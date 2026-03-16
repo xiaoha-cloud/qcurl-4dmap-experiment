@@ -34,20 +34,27 @@ var defaultPullSessionOption = PullSessionOption{
 
 type ModPullSessionOption func(option *PullSessionOption)
 
+
+
 func NewPullSession(modOptions ...ModPullSessionOption) *PullSession {
+	return NewPullSessionWithProtocol("tcp", modOptions...)
+}
+
+func NewPullSessionWithProtocol(protocol string, modOptions ...ModPullSessionOption) *PullSession {
 	opt := defaultPullSessionOption
 	for _, fn := range modOptions {
 		fn(&opt)
 	}
 
 	return &PullSession{
-		core: NewClientSession(CSTPullSession, "tcp", func(option *ClientSessionOption) {
+		core: NewClientSession(CSTPullSession, protocol, func(option *ClientSessionOption) {
 			option.DoTimeoutMS = opt.PullTimeoutMS
 			option.ReadAVTimeoutMS = opt.ReadAVTimeoutMS
 			option.HandshakeComplexFlag = opt.HandshakeComplexFlag
 		}),
 	}
 }
+
 
 // 阻塞直到和对端完成拉流前，握手部分的工作（也即收到RTMP Play response），或者发生错误
 //

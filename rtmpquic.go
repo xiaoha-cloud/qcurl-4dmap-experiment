@@ -54,7 +54,7 @@ func rtmpOverQUIC(network, local, addr, rawurl string,
 	}()
 
 	if rtmpType {
-		pullrtmp(rawurl, filename)
+		pullrtmp(rawurl, filename, protocol)
 		return
 	}
 
@@ -62,7 +62,7 @@ func rtmpOverQUIC(network, local, addr, rawurl string,
 	pushrtmp(rawurl, filename, protocol)
 }
 
-func pullrtmp(url, filename string) {
+func pullrtmp(url, filename string, protocol string){
 	var (
 		w   httpflv.FLVFileWriter
 		err error
@@ -73,7 +73,7 @@ func pullrtmp(url, filename string) {
 	err = w.WriteRaw(httpflv.FLVHeader)
 	nazalog.Assert(nil, err)
 
-	session := rtmp.NewPullSession(func(option *rtmp.PullSessionOption) {
+	session := rtmp.NewPullSessionWithProtocol(protocol, func(option *rtmp.PullSessionOption) {
 		//option.PullTimeoutMS = 10000
 		//option.ReadAVTimeoutMS = 10000
 	})
