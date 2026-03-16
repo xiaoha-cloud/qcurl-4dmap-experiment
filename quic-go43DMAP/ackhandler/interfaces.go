@@ -34,8 +34,11 @@ type SentPacketHandler interface {
 	GetBytesInflight() uint64
 	GetBandwidthEstimate() uint64
  	GetLossRate() float64
-	GetStatisticstp() (float64,float64) 
+	GetStatisticstp() (float64,float64)
 	GetLostByte() protocol.ByteCount
+
+	// Utility-based control passthrough to congestion (4D-MAP)
+	SetUtilityControl(gain float64, backoff float64)
 }
 
 // ReceivedPacketHandler handles ACKs needed to send for incoming packets
