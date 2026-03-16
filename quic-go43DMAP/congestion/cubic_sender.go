@@ -289,6 +289,9 @@ func (c *cubicSender) SetSlowStartLargeReduction(enabled bool) {
 	c.slowStartLargeReduction = enabled
 }
 
+// SetUtilityControl is a no-op for Cubic (used by 4D-MAP multipath with OLIA)
+func (c *cubicSender) SetUtilityControl(gain float64, backoff float64) {}
+
 // RetransmissionDelay gives the time to retransmission
 func (c *cubicSender) RetransmissionDelay() time.Duration {
 	if c.rttStats.SmoothedRTT() == 0 {

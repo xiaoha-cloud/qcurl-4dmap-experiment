@@ -51,6 +51,10 @@ type OliaSender struct {
 
 	initialCongestionWindow    protocol.PacketNumber
 	initialMaxCongestionWindow protocol.PacketNumber
+
+	// Utility-based control (4D-MAP): modulate ACK growth (gain) and loss backoff
+	utilityGain    float64
+	utilityBackoff float64
 }
 
 func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTStats, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber) SendAlgorithmWithDebugInfo {
@@ -65,7 +69,14 @@ func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTSta
 		numConnections:             defaultNumConnections,
 		olia:                       NewOlia(0),
 		oliaSenders:                oliaSenders,
+		utilityGain:                1.0,
+		utilityBackoff:             1.0,
 	}
+}
+
+func (o *OliaSender) SetUtilityControl(gain float64, backoff float64) {
+	o.utilityGain = gain
+	o.utilityBackoff = backoff
 }
 
 func (o *OliaSender) TimeUntilSend(now time.Time, bytesInFlight protocol.ByteCount) time.Duration {

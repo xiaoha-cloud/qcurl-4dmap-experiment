@@ -693,6 +693,11 @@ func (h * sentPacketHandler) GetLossRate() float64{
 	return float64(h.losses) / float64(h.packets)
 }
 
-func (h * sentPacketHandler) GetLostByte() protocol.ByteCount{
+func (h *sentPacketHandler) GetLostByte() protocol.ByteCount {
 	return h.lostbytes
+}
+
+// SetUtilityControl passes gain/backoff to the congestion algorithm (4D-MAP utility controller)
+func (h *sentPacketHandler) SetUtilityControl(gain float64, backoff float64) {
+	h.congestion.SetUtilityControl(gain, backoff)
 }
