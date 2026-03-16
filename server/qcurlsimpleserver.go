@@ -51,15 +51,32 @@ func main() {
 	// if err := rtmpserver.Listen(); err != nil {
 	// 	return err
 	// }
-	if *hasau{
-		rtmpserver.ListenAU()
-		rtmpserver.RunLoopAU()
+	if *hasau {
+		if err := rtmpserver.ListenAU(); err != nil {
+			fmt.Println("rtmpserver.ListenAU failed:", err)
+			return
+		}
+		if err := rtmpserver.RunLoopAU(); err != nil {
+			fmt.Println("rtmpserver.RunLoopAU failed:", err)
+			return
+		}
 	}
-	rtmpserver.Listen()
+	//rtmpserver.Listen()
 
-	rtmpserver.RunLoop()
+	//rtmpserver.RunLoop()
 	
-		
+	if err := rtmpserver.Listen(); err != nil {
+		fmt.Println("rtmpserver.Listen failed:", err)
+		return
+	}
+	fmt.Println("rtmpserver.Listen ok")
+
+	if err := rtmpserver.RunLoop(); err != nil {
+		fmt.Println("rtmpserver.RunLoop failed:", err)
+		return
+	}
+
+	
 	// go func() {
 	// 	if err := rtmpserver.RunLoop(); err != nil {
 	// 		nazalog.Error(err)

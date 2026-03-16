@@ -16,7 +16,7 @@ import (
 	"crypto/x509"
 	//"encoding/binary"
 	"encoding/pem"
-	//"fmt"
+	"fmt"
 	"math/big"
 	quic "github.com/lucas-clemente/quic-go"
 	log "github.com/q191201771/naza/pkg/nazalog"
@@ -51,24 +51,47 @@ func NewServer(observer ServerObserver, addr string, protocol string, hasau bool
 }
 
 func (server *Server) Listen() (err error) {
-	//if ; err != nil {
 	quicConfig := &quic.Config{
-			CreatePaths: true,
-	}
-	log.Infof("hasau %v",server.hasau)
-	if server.protocol == "quic"{
-		server.ln , err  = quic.ListenAddr(server.addr, generateTLSConfig(), quicConfig)
-		log.Infof("start rtmp server listen. addr=%s  proto:%s", server.addr,server.protocol)
+		CreatePaths: true,
 	}
 
-	if( server.protocol == "tcp"){
-		log.Infof("hahahahhahahaha")
-		server.lntcp, err = net.Listen("tcp", server.addr)
-		log.Infof("start rtmp server listen. ,lntcp = %v, addr=%s  proto:%s, err:%v", server.lntcp, server.addr,server.protocol,err)
+	log.Infof("hasau=%v protocol=%s addr=%s", server.hasau, server.protocol, server.addr)
+
+	if server.protocol == "quic" {
+		log.Infof("[DEBUG] about to call quic.ListenAddr, addr=%s", server.addr)
+
+		server.ln, err = quic.ListenAddr(server.addr, generateTLSConfig(), quicConfig)
+
+		log.Infof("[DEBUG] quic.ListenAddr returned. ln=%v err=%v", server.ln, err)
+		fmt.Printf("[DEBUG] quic.ListenAddr returned. ln=%#v err=%v\n", server.ln, err)
+
+		if err != nil {
+			return err
+		}
+		if server.ln == nil {
+			return fmt.Errorf("quic.ListenAddr returned nil listener without error")
+		}
+
+		log.Infof("start rtmp server listen success. addr=%s proto=%s", server.addr, server.protocol)
+		return nil
 	}
-	
-	
-	return
+
+	if server.protocol == "tcp" {
+		server.lntcp, err = net.Listen("tcp", server.addr)
+		log.Infof("tcp net.Listen returned. lntcp=%v addr=%s proto=%s err=%v", server.lntcp, server.addr, server.protocol, err)
+
+		if err != nil {
+			return err
+		}
+		if server.lntcp == nil {
+			return fmt.Errorf("net.Listen returned nil tcp listener without error")
+		}
+
+		log.Infof("start rtmp server listen success. addr=%s proto=%s", server.addr, server.protocol)
+		return nil
+	}
+
+	return fmt.Errorf("unknown protocol: %s", server.protocol)
 }
 
 
@@ -86,24 +109,50 @@ func (server *Server) ListenAU() (err error) {
 }
 func (server *Server) RunLoop() error {
 	for {
-		if server.protocol == "tcp"{
+		if server.protocol == "tcp" {
 			conn, err := server.lntcp.Accept()
 			if err != nil {
 				return err
 			}
 			go server.handleTCPConnectTCP(conn)
-		}else{
-			sess,err := server.ln.Accept()
-			conn,err := sess.AcceptStream()
+		} else {
+			if server.ln == nil{
+				return fmt.Errorf("Server.ln is nil before Accept")
+			}
+
+			//sess, err := server.ln.Accept()
+			
+			log.Infof("[DEBUG] RunLoop about to call server.ln.Accept()")
+			fmt.Printf("[DEBUG] RunLoop about to call server.ln.Accept()\n")
+
+			sess, err := server.ln.Accept()
+			log.Infof("[DEBUG] server.ln.Accept returned. sess=%v err=%v", sess, err)
+			fmt.Printf("[DEBUG] server.ln.Accept returned. sess=%#v err=%v\n", sess, err)
+			
 			if err != nil {
 				return err
 			}
+
+			if sess == nil {
+				return fmt.Errorf("server.ln.Accept returned nil session without error")
+			}
+
+			log.Infof("[DEBUG] about to call sess.AcceptStream()")
+			fmt.Printf("[DEBUG] about to call sess.AcceptStream()\n")
+
+			conn, err := sess.AcceptStream()
+			log.Infof("[DEBUG] sess.AcceptStream returned. conn=%v err=%v", conn, err)
+			fmt.Printf("[DEBUG] sess.AcceptStream returned. conn=%#v err=%v\n", conn, err)
+			
+			if err != nil {
+				return err
+			}
+
 			go server.handleTCPConnect(conn)
 		}
-
-
 	}
 }
+
 
 func (server *Server) RunLoopAU() error {
 	//for {
