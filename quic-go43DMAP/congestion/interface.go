@@ -23,8 +23,11 @@ type SendAlgorithm interface {
 	// Experiments
 	SetSlowStartLargeReduction(enabled bool)
 
-		//cx add 1215
-		BandwidthEstimate() Bandwidth
+	// cx add 1215
+	BandwidthEstimate() Bandwidth
+
+	// Utility-based control (4D-MAP): modulate ACK growth and loss backoff
+	SetUtilityControl(gain float64, backoff float64)
 }
 
 // SendAlgorithmWithDebugInfo adds some debug functions to SendAlgorithm

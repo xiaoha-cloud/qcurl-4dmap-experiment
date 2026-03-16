@@ -20,7 +20,8 @@ type scheduler struct {
 	redundancy_data []byte
 	redundancy_stream_off_start protocol.ByteCount
 	redundancy_stream_off_end protocol.ByteCount
-	monitor *monitor
+	monitor           *monitor
+	utilityController *UtilityController
 	// Flag of current network status
 	Flag_beginining bool
 	Flag_bw_unenough bool
@@ -55,7 +56,8 @@ type monitor struct{
 	bitrate float64
 	fps float64
 
-	
+	// utility controller (reference from scheduler)
+	utilityController *UtilityController
 }
 
 func (m *monitor) setup() {
@@ -79,7 +81,9 @@ func (sch *scheduler) setup() {
 	sch.quotas = make(map[protocol.PathID]uint)
 	sch.waiting = 0
 	sch.redundancy = 0
+	sch.utilityController = NewUtilityController(ModeT)
 	sch.monitor = &monitor{}
+	sch.monitor.utilityController = sch.utilityController
 	sch.monitor.setup()
 	//sch.redundancy_data = make([]byte)
 	sch.delta_gap = make(map[protocol.PathID]int)
@@ -2542,7 +2546,23 @@ func (m *monitor) monitorCurrentPathState(pth *path) {
 	utils.Infof("[m]Path %v	rtt: %v,  cwnd: %v, loss: %v",pth.pathID, nowRTT, m.state_cwnd[pth.pathID], m.state_loss[pth.pathID])
 	utils.Infof("[m]retransBytes:%vB", m.retransBytes)
 	//utils.Infof("[monitor]path %v, inflight %v, serverinx %v,", pth.pathID,  m.state_inflight[pth.pathID], m.state_serverinx[pth.pathID])
-	
+
+	// Utility controller: compute gain/backoff and pass to congestion control
+	if m.utilityController != nil {
+		owdNs := m.state_owd[pth.pathID].Nanoseconds()
+		pm := PathMetrics{
+			PathID:    pth.pathID,
+			BWbps:     float64(m.state_bw[pth.pathID]) * 8, // bytes/sec -> bits/sec
+			LossRate:  m.state_loss[pth.pathID],
+			OWDms:     float64(owdNs) / 1e6,
+			CwndRoom:  float64(m.state_cwnd[pth.pathID]),
+			Timestamp: time.Now(),
+		}
+		sig := m.utilityController.Compute(pm)
+		pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
+		utils.Infof("[utility] path=%v mode=%s bw=%.2fMbps loss=%.4f owd=%.2fms gain=%.3f backoff=%.3f U=%.4f",
+			pth.pathID, sig.Mode, pm.BWbps/1e6, pm.LossRate, pm.OWDms, sig.Gain, sig.Backoff, sig.Utility)
+	}
 }
 
 func (m *monitor) monitorCurrentSessionState(s *session){
