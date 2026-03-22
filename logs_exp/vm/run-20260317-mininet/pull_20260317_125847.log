@@ -1,0 +1,542 @@
+true rr /home/mininet/Videos/pulled_20260317_125847.flv true false false
+2026/03/17 12:58:52.428130 [22;34mDEBUG[0m protocol = quic - rtmpquic.go:36
+
+2026/03/17 12:58:52.434059 [22;34mDEBUG[0m [monitor]sess :<nil> - rtmpquic.go:44
+2026/03/17 12:58:52.434731 [22;36m INFO[0m [RTMPPULL1] lifecycle new rtmp ClientSession. session=0x40000d6000 - client_session.go:135
+2026/03/17 12:58:52.434759 [22;34mDEBUG[0m [RTMPPULL1] Do. url=rtmp://127.0.0.1/live/test - client_session.go:141
+2026/03/17 12:58:52.435327 [22;36m INFO[0m [RTMPPULL1] > tcp connect. protocol:quic - client_session.go:354
+2026/03/17 12:58:52 Starting new connection to 127.0.0.1 ([::]:42488 -> 127.0.0.1:1935), connectionID 242cf5c9d0549468, version 512
+&{[512 39 38 37] false 10s 30s <nil> 16777216 25165824 false false true rr false false}2026/03/17 12:58:52 !!!!!!!rr,false,false
+2026/03/17 12:58:52 path :0 mean tp: NaNMbps, rcvim tp: 0.000000Mbps, RTT: 0,
+2026/03/17 12:58:52 path :0 mean tp: NaNMbps, sndim tp: 0.000000Mbps, RTT: 0,
+2026/03/17 12:58:52 [m]Path 0	rtt: 0s,  cwnd: 46720, loss: NaN
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=0.00Mbps loss=NaN owd=0.00ms gain=NaN backoff=NaN U=NaN
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :1040B
+2026/03/17 12:58:52 [m]Path 0	rtt: 0s,  cwnd: 45651, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=0.00Mbps loss=0.0000 owd=0.00ms gain=1.000 backoff=1.000 U=0.0000
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.199 backoff=0.920 U=0.5970
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :1040B
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.832409ms,  cwnd: 45649, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=437.63Mbps loss=0.0000 owd=3.42ms gain=1.200 backoff=0.920 U=0.5990
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :1040B
+2026/03/17 12:58:52 [m]Path 0	rtt: 6.189ms,  cwnd: 45649, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=483.13Mbps loss=0.0000 owd=3.09ms gain=1.200 backoff=0.920 U=0.5991
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 Queueing packet 0x6 for later decryption
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52.479940 [22;34mDEBUG[0m [NAZACONN1] lifecycle new connection. net.Conn=0x40001fc000, naza.Connection=0x40001fe000 - connection.go:158
+2026/03/17 12:58:52.482447 [22;36m INFO[0m [RTMPPULL1] > W Handshake C0+C1. - client_session.go:388
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :1537B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-3],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 45370, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :219B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 5.449ms,  cwnd: 45123, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=548.74Mbps loss=0.0000 owd=2.72ms gain=1.200 backoff=0.920 U=0.5992
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 46473, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 46473, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 46473, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 46473, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.492329 [22;36m INFO[0m [RTMPPULL1] < R Handshake S0+S1. - client_session.go:396
+2026/03/17 12:58:52.492346 [22;36m INFO[0m [RTMPPULL1] > W Handshake C2. - client_session.go:398
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 46473, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :1536B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 45123, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :214B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 44881, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 44881, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 44881, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.8ms,  cwnd: 44881, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=622.93Mbps loss=0.0000 owd=2.40ms gain=1.200 backoff=0.920 U=0.5993
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46478, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.493199 [22;36m INFO[0m [RTMPPULL1] < R Handshake S2. - client_session.go:406
+2026/03/17 12:58:52.493202 [22;36m INFO[0m [RTMPPULL1] > W SetChunkSize 4096. - client_session.go:294
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46478, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :16B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52.493232 [22;36m INFO[0m [RTMPPULL1] > W connect('live'). tcUrl=rtmp://127.0.0.1/live - client_session.go:300
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46434, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46434, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :131B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46275, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 4.288ms,  cwnd: 46275, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=697.31Mbps loss=0.0000 owd=2.14ms gain=1.200 backoff=0.920 U=0.5994
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.493288 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.494037 [22;36m INFO[0m [RTMPPULL1] < R Window Acknowledgement Size: 5000000 - client_session.go:627
+2026/03/17 12:58:52.494044 [22;34mDEBUG[0m chunk:1,chunk-dur:1, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.494221 [22;33m WARN[0m [RTMPPULL1] < R Set Peer Bandwidth. ignore. - client_session.go:630
+2026/03/17 12:58:52.494226 [22;34mDEBUG[0m chunk:2,chunk-dur:0, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52.496462 [22;36m INFO[0m [RTMPPULL1] < R Set Chunk Size 4096. - client_session.go:633
+2026/03/17 12:58:52.496471 [22;34mDEBUG[0m chunk:3,chunk-dur:2, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46561, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.498937 [22;36m INFO[0m [RTMPPULL1] < R _result("NetConnection.Connect.Success"). - client_session.go:583
+2026/03/17 12:58:52.498946 [22;36m INFO[0m [RTMPPULL1] > W createStream(). - client_session.go:584
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :37B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46655, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46655, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.499044 [22;34mDEBUG[0m chunk:4,chunk-dur:3, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46655, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46655, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.500190 [22;36m INFO[0m [RTMPPULL1] < R _result(). - client_session.go:600
+2026/03/17 12:58:52.500195 [22;36m INFO[0m [RTMPPULL1] > W play('test'). - client_session.go:603
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46655, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [sch]Dataforwriting waitted for scheduling, size :36B
+2026/03/17 12:58:52 I_start:-1, I_end:-1,nextheaderoff:[-1],FLAGUNENOUGH:false, lackbw:false
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46591, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.773ms,  cwnd: 46591, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=792.49Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.500237 [22;34mDEBUG[0m chunk:5,chunk-dur:1, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52.504434 [22;33m WARN[0m [RTMPPULL1] read user control message, ignore. buf=00000000  00 04 00 00 00 01                                 |......|
+ - client_session.go:471
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.504550 [22;34mDEBUG[0m chunk:6,chunk-dur:4, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52.504813 [22;33m WARN[0m [RTMPPULL1] read user control message, ignore. buf=00000000  00 00 00 00 00 01                                 |......|
+ - client_session.go:471
+2026/03/17 12:58:52.504817 [22;34mDEBUG[0m chunk:7,chunk-dur:0, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52.504847 [22;36m INFO[0m [RTMPPULL1] < R onStatus('NetStream.Play.Start'). - client_session.go:556
+2026/03/17 12:58:52.504872 [22;34mDEBUG[0m chunk:8,chunk-dur:0, timestamp:0, od:0 - chunk_composer.go:299
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:52 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:52 [m]retransBytes:0B
+2026/03/17 12:58:52 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:52 [m]dupsize: 0B
+2026/03/17 12:58:53 path :0 mean tp: 0.040511Mbps, rcvim tp: 0.040510Mbps, RTT: 3.781,
+2026/03/17 12:58:53 path :0 mean tp: 0.056440Mbps, sndim tp: 0.056438Mbps, RTT: 3.781,
+2026/03/17 12:58:53.493756 [22;34mDEBUG[0m bitrate:0.003462 Mbps - client_session.go:438
+2026/03/17 12:58:53 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:53 [m]retransBytes:0B
+2026/03/17 12:58:53 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:53 [m]dupsize: 0B
+2026/03/17 12:58:54 path :0 mean tp: 0.020266Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:54 path :0 mean tp: 0.028234Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:54.494487 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:54 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:54 [m]retransBytes:0B
+2026/03/17 12:58:54 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:54 [m]dupsize: 0B
+2026/03/17 12:58:55 path :0 mean tp: 0.013504Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:55 path :0 mean tp: 0.018813Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:55.494975 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:55 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:55 [m]retransBytes:0B
+2026/03/17 12:58:55 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:55 [m]dupsize: 0B
+2026/03/17 12:58:56 path :0 mean tp: 0.010130Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:56 path :0 mean tp: 0.014113Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:56.495783 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:56 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:56 [m]retransBytes:0B
+2026/03/17 12:58:56 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:56 [m]dupsize: 0B
+2026/03/17 12:58:57 path :0 mean tp: 0.008099Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:57 path :0 mean tp: 0.011283Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:57.498398 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:57 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:57 [m]retransBytes:0B
+2026/03/17 12:58:57 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:57 [m]dupsize: 0B
+2026/03/17 12:58:58 path :0 mean tp: 0.006749Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:58 path :0 mean tp: 0.009402Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:58.499358 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:58 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:58 [m]retransBytes:0B
+2026/03/17 12:58:58 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:58 [m]dupsize: 0B
+2026/03/17 12:58:59 path :0 mean tp: 0.005784Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:59 path :0 mean tp: 0.008058Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:58:59.503893 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:58:59 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:58:59 [m]retransBytes:0B
+2026/03/17 12:58:59 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:58:59 [m]dupsize: 0B
+2026/03/17 12:59:00 path :0 mean tp: 0.005061Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:00 path :0 mean tp: 0.007051Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:00.506864 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:00 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:00 [m]retransBytes:0B
+2026/03/17 12:59:00 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:00 [m]dupsize: 0B
+2026/03/17 12:59:01 path :0 mean tp: 0.004499Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:01 path :0 mean tp: 0.006268Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:01.507900 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:01 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:01 [m]retransBytes:0B
+2026/03/17 12:59:01 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:01 [m]dupsize: 0B
+2026/03/17 12:59:02 path :0 mean tp: 0.004047Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:02 path :0 mean tp: 0.005637Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:02.509079 [22;36m INFO[0m mean write bitrate:0.000346 Mbps - client_session.go:447
+2026/03/17 12:59:02.509227 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:02 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:02 [m]retransBytes:0B
+2026/03/17 12:59:02 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:02 [m]dupsize: 0B
+2026/03/17 12:59:03 path :0 mean tp: 0.003673Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:03 path :0 mean tp: 0.005117Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:03.510911 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:03 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:03 [m]retransBytes:0B
+2026/03/17 12:59:03 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:03 [m]dupsize: 0B
+2026/03/17 12:59:04 path :0 mean tp: 0.003367Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:04 path :0 mean tp: 0.004691Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:04.511098 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:04 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:04 [m]retransBytes:0B
+2026/03/17 12:59:04 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:04 [m]dupsize: 0B
+2026/03/17 12:59:05 path :0 mean tp: 0.003109Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:05 path :0 mean tp: 0.004331Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:05.512278 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:05 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:05 [m]retransBytes:0B
+2026/03/17 12:59:05 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:05 [m]dupsize: 0B
+2026/03/17 12:59:06 path :0 mean tp: 0.002887Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:06 path :0 mean tp: 0.004022Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:06.513136 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:06 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:06 [m]retransBytes:0B
+2026/03/17 12:59:06 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:06 [m]dupsize: 0B
+2026/03/17 12:59:07 path :0 mean tp: 0.002693Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:07 path :0 mean tp: 0.003752Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:07.513573 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:07 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:07 [m]retransBytes:0B
+2026/03/17 12:59:07 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:07 [m]dupsize: 0B
+2026/03/17 12:59:08 path :0 mean tp: 0.002525Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:08 path :0 mean tp: 0.003517Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:08.522740 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:08 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:08 [m]retransBytes:0B
+2026/03/17 12:59:08 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:08 [m]dupsize: 0B
+2026/03/17 12:59:09 path :0 mean tp: 0.002376Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:09 path :0 mean tp: 0.003310Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:09 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:09.526547 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:09 [m]retransBytes:0B
+2026/03/17 12:59:09 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:09 [m]dupsize: 0B
+2026/03/17 12:59:10 path :0 mean tp: 0.002244Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:10 path :0 mean tp: 0.003127Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:10 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:10 [m]retransBytes:0B
+2026/03/17 12:59:10 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:10 [m]dupsize: 0B
+2026/03/17 12:59:10.527831 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:11 path :0 mean tp: 0.002127Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:11 path :0 mean tp: 0.002963Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:11.528404 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:11 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:11 [m]retransBytes:0B
+2026/03/17 12:59:11 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:11 [m]dupsize: 0B
+2026/03/17 12:59:12 path :0 mean tp: 0.002020Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:12 path :0 mean tp: 0.002815Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:12 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:12 [m]retransBytes:0B
+2026/03/17 12:59:12 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:12 [m]dupsize: 0B
+2026/03/17 12:59:12.529777 [22;36m INFO[0m mean write bitrate:0.000173 Mbps - client_session.go:447
+2026/03/17 12:59:12.530082 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:13 path :0 mean tp: 0.001924Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:13 path :0 mean tp: 0.002680Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:13.532924 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:13 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:13 [m]retransBytes:0B
+2026/03/17 12:59:13 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:13 [m]dupsize: 0B
+2026/03/17 12:59:14 path :0 mean tp: 0.001837Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:14 path :0 mean tp: 0.002559Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:14.535713 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:14 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:14 [m]retransBytes:0B
+2026/03/17 12:59:14 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:14 [m]dupsize: 0B
+2026/03/17 12:59:15 path :0 mean tp: 0.001757Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:15 path :0 mean tp: 0.002447Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:15 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:15 [m]retransBytes:0B
+2026/03/17 12:59:15.536455 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:15 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:15 [m]dupsize: 0B
+2026/03/17 12:59:16 path :0 mean tp: 0.001683Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:16 path :0 mean tp: 0.002345Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:16.545159 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:16 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:16 [m]retransBytes:0B
+2026/03/17 12:59:16 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:16 [m]dupsize: 0B
+2026/03/17 12:59:17 path :0 mean tp: 0.001616Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:17 path :0 mean tp: 0.002252Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:17 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:17 [m]retransBytes:0B
+2026/03/17 12:59:17 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:17 [m]dupsize: 0B
+2026/03/17 12:59:17.545864 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:18 path :0 mean tp: 0.001554Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:18 path :0 mean tp: 0.002165Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:18.554436 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:18 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:18 [m]retransBytes:0B
+2026/03/17 12:59:18 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:18 [m]dupsize: 0B
+2026/03/17 12:59:19 path :0 mean tp: 0.001497Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:19 path :0 mean tp: 0.002085Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:19.558045 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:19 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:19 [m]retransBytes:0B
+2026/03/17 12:59:19 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:19 [m]dupsize: 0B
+2026/03/17 12:59:20 path :0 mean tp: 0.001443Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:20 path :0 mean tp: 0.002011Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:20 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:20 [m]retransBytes:0B
+2026/03/17 12:59:20 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:20 [m]dupsize: 0B
+2026/03/17 12:59:20.559224 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:21 path :0 mean tp: 0.001393Mbps, rcvim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:21 path :0 mean tp: 0.001941Mbps, sndim tp: 0.000000Mbps, RTT: 3.781,
+2026/03/17 12:59:21 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:21 [m]retransBytes:0B
+2026/03/17 12:59:21 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:21 [m]dupsize: 0B
+2026/03/17 12:59:21.561153 [22;34mDEBUG[0m bitrate:0.000000 Mbps - client_session.go:438
+2026/03/17 12:59:22 [m]Path 0	rtt: 3.781ms,  cwnd: 46720, loss: 0
+2026/03/17 12:59:22 [m]retransBytes:0B
+2026/03/17 12:59:22 [utility] path=0 mode=T bw=790.82Mbps loss=0.0000 owd=1.89ms gain=1.200 backoff=0.920 U=0.5995
+2026/03/17 12:59:22 [m]dupsize: 0B
+2026/03/17 12:59:22 Closing connection 242cf5c9d0549468
+2026/03/17 12:59:22.507732 [22;34mDEBUG[0m [NAZACONN1] close once. err=NetworkIdleTimeout: No recent network activity. - connection.go:432
+2026/03/17 12:59:22.508035 [22;34mDEBUG[0m < session.WaitChan. [RTMPPULL1] err=NetworkIdleTimeout: No recent network activity. - rtmpquic.go:93
+2026/03/17 12:59:22 Connection 242cf5c9d0549468 closed.
