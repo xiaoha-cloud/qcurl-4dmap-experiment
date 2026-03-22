@@ -2542,10 +2542,16 @@ func (m *monitor) monitorCurrentPathState(pth *path) {
 		m.totalcwnd += m.state_cwnd[pth.pathID]
 		m.retransBytes += pth.sentPacketHandler.GetLostByte()
 	}
-	//utils.Infof("[m]Path %v	rtt: %v, bw: %v, cwnd: %v, loss_rate: %v",pth.pathID, nowRTT, m.state_bw[pth.pathID], m.state_cwnd[pth.pathID], m.state_loss[pth.pathID])
-	utils.Infof("[m]Path %v	rtt: %v,  cwnd: %v, loss: %v",pth.pathID, nowRTT, m.state_cwnd[pth.pathID], m.state_loss[pth.pathID])
+	// [m]monitor: per-path network snapshot (cwnd_room = GetCWND()-GetBytesInflight(); owd ≈ RTT/2; bw = BandwidthEstimate B/s).
+	cwndFull := pth.sentPacketHandler.GetCWND()
+	lostB := pth.sentPacketHandler.GetLostByte()
+	minRTT := pth.rttStats.MinRTT()
+	latestRTT := pth.rttStats.LatestRTT()
+	meanDev := pth.rttStats.MeanDeviation()
+	srvInx := m.state_serverinx[pth.pathID]
+	utils.Infof("[m]monitor path=%v rtt_smoothed=%v rtt_min=%v rtt_latest=%v rtt_mean_dev=%v owd=%v bw=%vB/s inflight=%vB cwnd_full=%vB cwnd_room=%vB loss=%v lost_B=%v serverinx=%v",
+		pth.pathID, nowRTT, minRTT, latestRTT, meanDev, m.state_owd[pth.pathID], m.state_bw[pth.pathID], m.state_inflight[pth.pathID], cwndFull, m.state_cwnd[pth.pathID], m.state_loss[pth.pathID], lostB, srvInx)
 	utils.Infof("[m]retransBytes:%vB", m.retransBytes)
-	//utils.Infof("[monitor]path %v, inflight %v, serverinx %v,", pth.pathID,  m.state_inflight[pth.pathID], m.state_serverinx[pth.pathID])
 
 	// Utility controller: compute gain/backoff and pass to congestion control
 	if m.utilityController != nil {
