@@ -1,0 +1,8 @@
+# Local build outputs
+/4dmap
+/qserver
+
+# Scratch logs at repo root — only logs_exp/vm/ is intended for sharing
+logs_exp/*
+!logs_exp/vm/
+!logs_exp/vm/**
