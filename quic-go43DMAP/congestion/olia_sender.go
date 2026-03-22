@@ -1,10 +1,19 @@
 package congestion
 
 import (
+	"math"
 	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
+)
+
+// Bounds aligned with quic.UtilityController defaults; used to sanitize NaN/Inf and out-of-range inputs.
+const (
+	utilityGainMin    = 0.80
+	utilityGainMax    = 1.20
+	utilityBackoffMin = 0.90
+	utilityBackoffMax = 1.10
 )
 
 type OliaSender struct {
@@ -55,6 +64,9 @@ type OliaSender struct {
 	// Utility-based control (4D-MAP): modulate ACK growth (gain) and loss backoff
 	utilityGain    float64
 	utilityBackoff float64
+
+	// Fractional slow-start growth: accumulates utilityGain per ACK until a full packet of growth.
+	utilitySsAckAccum float64
 }
 
 func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTStats, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber) SendAlgorithmWithDebugInfo {
@@ -75,8 +87,17 @@ func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTSta
 }
 
 func (o *OliaSender) SetUtilityControl(gain float64, backoff float64) {
-	o.utilityGain = gain
-	o.utilityBackoff = backoff
+	// Defensive: NaN/Inf or bogus values fall back to neutral 1.0, else clamp to typical utility bounds.
+	if math.IsNaN(gain) || math.IsInf(gain, 0) {
+		o.utilityGain = 1.0
+	} else {
+		o.utilityGain = math.Min(utilityGainMax, math.Max(utilityGainMin, gain))
+	}
+	if math.IsNaN(backoff) || math.IsInf(backoff, 0) {
+		o.utilityBackoff = 1.0
+	} else {
+		o.utilityBackoff = math.Min(utilityBackoffMax, math.Max(utilityBackoffMin, backoff))
+	}
 }
 
 func (o *OliaSender) TimeUntilSend(now time.Time, bytesInFlight protocol.ByteCount) time.Duration {
@@ -114,6 +135,7 @@ func (o *OliaSender) GetSlowStartThreshold() protocol.ByteCount {
 
 func (o *OliaSender) ExitSlowstart() {
 	o.slowstartThreshold = o.congestionWindow
+	o.utilitySsAckAccum = 0
 }
 
 func (o *OliaSender) MaybeExitSlowStart() {
@@ -232,15 +254,26 @@ func (o *OliaSender) maybeIncreaseCwnd(ackedPacketNumber protocol.PacketNumber, 
 		return
 	}
 	if o.InSlowStart() {
-		// TCP slow start, exponential growth, increase by one for each ACK.
-		o.congestionWindow++
+		// TCP slow start: scale per-ACK growth by utilityGain via a fractional accumulator.
+		o.utilitySsAckAccum += o.utilityGain
+		for o.utilitySsAckAccum >= 1.0 && o.congestionWindow < o.maxTCPCongestionWindow {
+			o.congestionWindow++
+			o.utilitySsAckAccum -= 1.0
+		}
 		return
-	} else {
-		o.getEpsilon()
-		rate := getRate(o.oliaSenders, o.rttStats.SmoothedRTT())
-		cwndScaled := oliaScale(uint64(o.congestionWindow), scale)
-		o.congestionWindow = utils.MinPacketNumber(o.maxTCPCongestionWindow, o.olia.CongestionWindowAfterAck(o.congestionWindow, rate, cwndScaled))
 	}
+	o.getEpsilon()
+	rate := getRate(o.oliaSenders, o.rttStats.SmoothedRTT())
+	cwndScaled := oliaScale(uint64(o.congestionWindow), scale)
+	oldCwnd := o.congestionWindow
+	newCwnd := utils.MinPacketNumber(o.maxTCPCongestionWindow, o.olia.CongestionWindowAfterAck(o.congestionWindow, rate, cwndScaled))
+	// Phase 1: scale the OLIA cwnd delta by utilityGain. Olia.sndCwndCnt still advances with full OLIA
+	// math; scaling cwnd here can desync slightly from the internal counter — acceptable for Phase 1.
+	delta := float64(newCwnd) - float64(oldCwnd)
+	adjusted := float64(oldCwnd) + delta*o.utilityGain
+	rounded := math.Round(adjusted)
+	clamped := math.Max(float64(o.minCongestionWindow), math.Min(float64(o.maxTCPCongestionWindow), rounded))
+	o.congestionWindow = protocol.PacketNumber(clamped)
 }
 
 func (o *OliaSender) OnPacketAcked(ackedPacketNumber protocol.PacketNumber, ackedBytes protocol.ByteCount, bytesInFlight protocol.ByteCount) {
@@ -288,7 +321,17 @@ func (o *OliaSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes 
 		o.congestionWindow = o.congestionWindow - 1
 		//utils.Debugf("cwnd reduce :%d",o.congestionWindow)
 	} else {
-		o.congestionWindow = protocol.PacketNumber(float32(o.congestionWindow) * o.RenoBeta())
+		// Combine Reno multiplicative decrease with utilityBackoff:
+		// utilityBackoff > 1 → larger effective factor → less cwnd reduction for this loss;
+		// utilityBackoff < 1 → smaller factor → more reduction. Clamp to (0,1] for safety.
+		effectiveBeta := float64(o.RenoBeta()) * o.utilityBackoff
+		if effectiveBeta > 1.0 {
+			effectiveBeta = 1.0
+		}
+		if effectiveBeta <= 0 || math.IsNaN(effectiveBeta) || math.IsInf(effectiveBeta, 0) {
+			effectiveBeta = 1e-9
+		}
+		o.congestionWindow = protocol.PacketNumber(float64(o.congestionWindow) * effectiveBeta)
 		//utils.Debugf("cwnd reduce :%d",o.congestionWindow)
 	}
 	// Enforce a minimum congestion window.
@@ -330,6 +373,7 @@ func (o *OliaSender) OnConnectionMigration() {
 	o.lastCutbackExitedSlowstart = false
 	o.olia.Reset()
 	o.congestionWindowCount = 0
+	o.utilitySsAckAccum = 0
 	o.congestionWindow = o.initialCongestionWindow
 	o.slowstartThreshold = o.initialMaxCongestionWindow
 	o.maxTCPCongestionWindow = o.initialMaxCongestionWindow
