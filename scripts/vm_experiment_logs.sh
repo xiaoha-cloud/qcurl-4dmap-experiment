@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot experiment logging layout: logs_exp/<RUN_ID>/server|push|pull_<RUN_ID>.log
+# One-shot experiment logging layout: logs_exp/vm_run_<RUN_ID>/server|push|pull_<RUN_ID>.log
 #
 # From the repository root (e.g. ~/Project/4D-MAP):
 #   source scripts/vm_experiment_logs.sh
@@ -29,7 +29,7 @@ if [[ -z "${RUN_ID:-}" ]]; then
 	export RUN_ID="$(date +%Y%m%d_%H%M%S)"
 fi
 
-export LOGDIR="${REPO_ROOT}/logs_exp/${RUN_ID}"
+export LOGDIR="${REPO_ROOT}/logs_exp/vm_run_${RUN_ID}"
 mkdir -p "$LOGDIR"
 
 echo "RUN_ID=$RUN_ID"
