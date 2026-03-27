@@ -17,12 +17,13 @@ Usage:
   One-shot experiment (server on h2, pull+push on h1, logs saved):
     sudo python3 scripts/mininet/mp_topo.py --run-exp
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 90 --input-flv ~/Videos/push_input.flv
+    # Under sudo, ~/Videos resolves to the invoking user's home (SUDO_USER), not /root.
 """
 
 import argparse
 import os
+import pwd
 import signal
-import sys
 import time
 
 from mininet.cli import CLI
@@ -33,6 +34,28 @@ from mininet.topo import Topo
 
 # Project root is two directories above this script (scripts/mininet/mp_topo.py -> root)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+def effective_home():
+    """Home directory for ~/ paths when this script is run as root via sudo."""
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_user:
+        try:
+            return pwd.getpwnam(sudo_user).pw_dir
+        except KeyError:
+            pass
+    return os.path.expanduser("~")
+
+
+def expand_user_path(path):
+    """Expand ~ using the invoking user's home (not /root) under sudo."""
+    if not path:
+        return path
+    if path.startswith("~/"):
+        return os.path.join(effective_home(), path[2:])
+    if path == "~":
+        return effective_home()
+    return os.path.expanduser(path)
 
 
 class MPTopo(Topo):
@@ -105,11 +128,15 @@ def run_experiment(net, args):
     logdir = os.path.join(ROOT, "logs_exp", f"vm_run_{run_id}")
     os.makedirs(logdir, exist_ok=True)
 
-    videos_dir = os.path.expanduser("~/Videos")
+    videos_dir = os.path.join(effective_home(), "Videos")
     os.makedirs(videos_dir, exist_ok=True)
 
     outfile = os.path.join(videos_dir, f"pulled_{run_id}.flv")
-    input_flv = args.input_flv or os.path.join(videos_dir, "push_input.flv")
+    input_flv = (
+        expand_user_path(args.input_flv)
+        if args.input_flv
+        else os.path.join(videos_dir, "push_input.flv")
+    )
 
     server_bin = os.path.join(ROOT, "qserver")
     client_bin = os.path.join(ROOT, "4dmap")
@@ -131,6 +158,7 @@ def run_experiment(net, args):
 
     _log("exp", f"RUN_ID  = {run_id}")
     _log("exp", f"LOGDIR  = {logdir}")
+    _log("exp", f"HOME    = {effective_home()} (for ~/Videos when using sudo)")
     _log("exp", f"outfile = {outfile}")
     _log("exp", f"input   = {input_flv}")
     _log("exp", f"timeout = {args.timeout}s")
