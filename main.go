@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -24,6 +25,10 @@ func main() {
 		buffer      = flag.Int("buffer", 102400, "buffer size in byte")
 		rtmpType    = flag.Bool("type", false, "whether to pull or publish,true is pull")
 		skip        = flag.Bool("skip", true, "whether a client verifies the server's certificate chain and host name")
+		utilityMode = flag.String("utility-mode", "T", "4D-MAP utility mode: T, D, L, or baseline (disables utility controller)")
+		logControl  = flag.Bool("log-control", false, "emit [control] lines on ACK/LOSS (cwnd before/after); very verbose")
+		runID       = flag.String("run-id", "", "experiment run id for [meta] (default: $RUN_ID)")
+		expInput    = flag.String("experiment-input", "", "input file label for [meta] (default: -file value)")
 	)
 
 	flag.Parse()
@@ -65,7 +70,20 @@ func main() {
 		*sni = u.Host
 	}
 
-	tlsCfg, cfg := parseCfg(*multi, *sni, *skip, *sch, *red, *iprio)
+	rid := *runID
+	if rid == "" {
+		rid = os.Getenv("RUN_ID")
+	}
+	inputMeta := *expInput
+	if inputMeta == "" {
+		inputMeta = *name
+	}
+	lc := *logControl
+	if v := os.Getenv("QUIC_GO_LOG_CONTROL"); v == "1" || strings.EqualFold(v, "true") {
+		lc = true
+	}
+
+	tlsCfg, cfg := parseCfg(*multi, *sni, *skip, *sch, *red, *iprio, *utilityMode, lc, rid, inputMeta)
 
 	appBuffer := make([]byte, *buffer)
 

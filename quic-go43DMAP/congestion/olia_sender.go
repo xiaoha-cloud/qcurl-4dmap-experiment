@@ -67,9 +67,12 @@ type OliaSender struct {
 
 	// Fractional slow-start growth: accumulates utilityGain per ACK until a full packet of growth.
 	utilitySsAckAccum float64
+
+	pathID            protocol.PathID
+	logControlActions bool
 }
 
-func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTStats, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber) SendAlgorithmWithDebugInfo {
+func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTStats, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber, pathID protocol.PathID, logControlActions bool) SendAlgorithmWithDebugInfo {
 	return &OliaSender{
 		rttStats:                   rttStats,
 		initialCongestionWindow:    initialCongestionWindow,
@@ -83,6 +86,8 @@ func NewOliaSender(oliaSenders map[protocol.PathID]*OliaSender, rttStats *RTTSta
 		oliaSenders:                oliaSenders,
 		utilityGain:                1.0,
 		utilityBackoff:             1.0,
+		pathID:                     pathID,
+		logControlActions:          logControlActions,
 	}
 }
 
@@ -284,9 +289,15 @@ func (o *OliaSender) OnPacketAcked(ackedPacketNumber protocol.PacketNumber, acke
 		return
 	}
 	o.olia.UpdateAckedSinceLastLoss(ackedBytes)
+	cwndBefore := o.GetCongestionWindow()
 	o.maybeIncreaseCwnd(ackedPacketNumber, ackedBytes, bytesInFlight)
 	if o.InSlowStart() {
 		o.hybridSlowStart.OnPacketAcked(ackedPacketNumber)
+	}
+	if o.logControlActions {
+		cwndAfter := o.GetCongestionWindow()
+		utils.Infof("[control] path=%v event=ACK cwnd_before=%vB cwnd_after=%vB gain_used=%.4f backoff_used=%.4f",
+			o.pathID, cwndBefore, cwndAfter, o.utilityGain, o.utilityBackoff)
 	}
 }
 
@@ -308,6 +319,7 @@ func (o *OliaSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes 
 		}
 		return
 	}
+	cwndBeforeLoss := o.GetCongestionWindow()
 	o.lastCutbackExitedSlowstart = o.InSlowStart()
 	if o.InSlowStart() {
 		o.stats.slowstartPacketsLost++
@@ -344,6 +356,11 @@ func (o *OliaSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes 
 	// reset packet count from congestion avoidance mode. We start
 	// counting again when we're out of recovery.
 	o.congestionWindowCount = 0
+	if o.logControlActions {
+		cwndAfterLoss := o.GetCongestionWindow()
+		utils.Infof("[control] path=%v event=LOSS cwnd_before=%vB cwnd_after=%vB gain_used=%.4f backoff_used=%.4f",
+			o.pathID, cwndBeforeLoss, cwndAfterLoss, o.utilityGain, o.utilityBackoff)
+	}
 }
 
 func (o *OliaSender) SetNumEmulatedConnections(n int) {

@@ -1,6 +1,7 @@
 package quic
 
 import (
+	"strings"
 	"time"
 	//"fmt"
 	"sync"
@@ -34,6 +35,9 @@ type scheduler struct {
 	totalruntime int64
 	totalpacketnum int64
 	CWNDFlag bool				// cx designed for always no cwnd control, but now abandon it.
+
+	config *Config // session config; used for utility mode + [meta] once
+	metaLogged bool
 }
 type monitor struct{
 	// separate path statis
@@ -75,13 +79,45 @@ func (m *monitor) setup() {
 
 }
 
+func utilityModeFromConfig(cfg *Config) UtilityMode {
+	if cfg == nil || cfg.UtilityMode == "" {
+		return ModeT
+	}
+	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
+	case "D":
+		return ModeD
+	case "L":
+		return ModeL
+	case "BASELINE", "OFF", "NONE", "DISABLE":
+		return ModeT // placeholder; controller will stay nil
+	default:
+		return ModeT
+	}
+}
+
+func isUtilityBaseline(cfg *Config) bool {
+	if cfg == nil || cfg.UtilityMode == "" {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
+	case "BASELINE", "OFF", "NONE", "DISABLE":
+		return true
+	default:
+		return false
+	}
+}
+
 func (sch *scheduler) setup() {
 	sch.CWNDFlag = false
 	sch.OriginScheduler = sch.SchedulerName
 	sch.quotas = make(map[protocol.PathID]uint)
 	sch.waiting = 0
 	sch.redundancy = 0
-	sch.utilityController = NewUtilityController(ModeT)
+	if isUtilityBaseline(sch.config) {
+		sch.utilityController = nil
+	} else {
+		sch.utilityController = NewUtilityController(utilityModeFromConfig(sch.config))
+	}
 	sch.monitor = &monitor{}
 	sch.monitor.utilityController = sch.utilityController
 	sch.monitor.setup()
@@ -90,6 +126,18 @@ func (sch *scheduler) setup() {
 	sch.totalruntime = 0
 	sch.totalpacketnum = 0
 	sch.lastpath = 1
+
+	if sch.config != nil && !sch.metaLogged {
+		sch.metaLogged = true
+		um := strings.TrimSpace(sch.config.UtilityMode)
+		if um == "" {
+			um = "T"
+		}
+		rid := sch.config.ExperimentRunID
+		inp := sch.config.ExperimentInputFile
+		utils.Infof("[meta] run_id=%s utility_mode=%s scheduler=%s multi=%v log_control=%v input=%s",
+			rid, um, sch.config.SchedulerName, sch.config.CreatePaths, sch.config.LogControlActions, inp)
+	}
 }
 
 
@@ -2566,8 +2614,8 @@ func (m *monitor) monitorCurrentPathState(pth *path) {
 		}
 		sig := m.utilityController.Compute(pm)
 		pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
-		utils.Infof("[utility] path=%v mode=%s bw=%.2fMbps loss=%.4f owd=%.2fms gain=%.3f backoff=%.3f U=%.4f",
-			pth.pathID, sig.Mode, pm.BWbps/1e6, pm.LossRate, pm.OWDms, sig.Gain, sig.Backoff, sig.Utility)
+		utils.Infof("[utility] path=%v mode=%s G=%.4f D=%.4f L=%.4f bw=%.2fMbps loss=%.4f owd=%.2fms gain=%.3f backoff=%.3f U=%.4f trend_ms=%.4f",
+			pth.pathID, sig.Mode, sig.NormG, sig.NormD, sig.NormL, pm.BWbps/1e6, pm.LossRate, pm.OWDms, sig.Gain, sig.Backoff, sig.Utility, sig.DelayTrend)
 	}
 }
 

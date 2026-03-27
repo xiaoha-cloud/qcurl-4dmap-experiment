@@ -69,12 +69,16 @@ func (p *path) setup(oliaSenders map[protocol.PathID]*congestion.OliaSender) {
 
 	var cong congestion.SendAlgorithm
 
+	logCtrl := false
+	if p.sess.config != nil {
+		logCtrl = p.sess.config.LogControlActions
+	}
 	if p.sess.version >= protocol.VersionMP && oliaSenders != nil && p.pathID != protocol.InitialPathID {
-		cong = congestion.NewOliaSender(oliaSenders, p.rttStats, protocol.InitialCongestionWindow, protocol.DefaultMaxCongestionWindow)
+		cong = congestion.NewOliaSender(oliaSenders, p.rttStats, protocol.InitialCongestionWindow, protocol.DefaultMaxCongestionWindow, p.pathID, logCtrl)
 		oliaSenders[p.pathID] = cong.(*congestion.OliaSender)
 	}
 
-	sentPacketHandler := ackhandler.NewSentPacketHandler(p.rttStats, cong, p.onRTO)
+	sentPacketHandler := ackhandler.NewSentPacketHandler(p.rttStats, cong, p.onRTO, p.pathID, logCtrl)
 
 	now := time.Now()
 

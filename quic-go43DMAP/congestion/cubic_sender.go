@@ -58,10 +58,13 @@ type cubicSender struct {
 
 	initialCongestionWindow    protocol.PacketNumber
 	initialMaxCongestionWindow protocol.PacketNumber
+
+	pathID            protocol.PathID
+	logControlActions bool
 }
 
-// NewCubicSender makes a new cubic sender
-func NewCubicSender(clock Clock, rttStats *RTTStats, reno bool, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber) SendAlgorithmWithDebugInfo {
+// NewCubicSender makes a new cubic sender (pathID/logControl used only for optional [control] logging).
+func NewCubicSender(clock Clock, rttStats *RTTStats, reno bool, initialCongestionWindow, initialMaxCongestionWindow protocol.PacketNumber, pathID protocol.PathID, logControlActions bool) SendAlgorithmWithDebugInfo {
 	return &cubicSender{
 		rttStats:                   rttStats,
 		initialCongestionWindow:    initialCongestionWindow,
@@ -73,6 +76,8 @@ func NewCubicSender(clock Clock, rttStats *RTTStats, reno bool, initialCongestio
 		numConnections:             defaultNumConnections,
 		cubic:                      NewCubic(clock),
 		reno:                       reno,
+		pathID:                     pathID,
+		logControlActions:          logControlActions,
 	}
 }
 
@@ -138,9 +143,15 @@ func (c *cubicSender) OnPacketAcked(ackedPacketNumber protocol.PacketNumber, ack
 		c.prr.OnPacketAcked(ackedBytes)
 		return
 	}
+	cwndBefore := c.GetCongestionWindow()
 	c.maybeIncreaseCwnd(ackedPacketNumber, ackedBytes, bytesInFlight)
 	if c.InSlowStart() {
 		c.hybridSlowStart.OnPacketAcked(ackedPacketNumber)
+	}
+	if c.logControlActions {
+		cwndAfter := c.GetCongestionWindow()
+		utils.Infof("[control] path=%v event=ACK cwnd_before=%vB cwnd_after=%vB gain_used=%.4f backoff_used=%.4f",
+			c.pathID, cwndBefore, cwndAfter, 1.0, 1.0)
 	}
 }
 
@@ -161,6 +172,7 @@ func (c *cubicSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes
 		}
 		return
 	}
+	cwndBeforeLoss := c.GetCongestionWindow()
 	c.lastCutbackExitedSlowstart = c.InSlowStart()
 	if c.InSlowStart() {
 		c.stats.slowstartPacketsLost++
@@ -185,6 +197,11 @@ func (c *cubicSender) OnPacketLost(packetNumber protocol.PacketNumber, lostBytes
 	// reset packet count from congestion avoidance mode. We start
 	// counting again when we're out of recovery.
 	c.congestionWindowCount = 0
+	if c.logControlActions {
+		cwndAfterLoss := c.GetCongestionWindow()
+		utils.Infof("[control] path=%v event=LOSS cwnd_before=%vB cwnd_after=%vB gain_used=%.4f backoff_used=%.4f",
+			c.pathID, cwndBeforeLoss, cwndAfterLoss, 1.0, 1.0)
+	}
 }
 
 func (c *cubicSender) RenoBeta() float32 {

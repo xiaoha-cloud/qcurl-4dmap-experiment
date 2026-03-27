@@ -215,8 +215,8 @@ func (s *session) setup(
 		s.config.IdleTimeout,
 	)
 
-	s.scheduler = &scheduler{SchedulerName:s.config.SchedulerName}
-	utils.Infof("!!!!!!!%v,%v,%v",s.config.SchedulerName, s.config.GenerateRedundancy, s.config.IPriority)
+	s.scheduler = &scheduler{SchedulerName: s.config.SchedulerName, config: s.config}
+	utils.Infof("!!!!!!!%v,%v,%v", s.config.SchedulerName, s.config.GenerateRedundancy, s.config.IPriority)
 	s.scheduler.setup()
 
 	if pconnMgr == nil && conn != nil {

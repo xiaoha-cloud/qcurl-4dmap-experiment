@@ -23,6 +23,7 @@ Usage:
 import argparse
 import os
 import pwd
+import shlex
 import signal
 import time
 
@@ -168,6 +169,9 @@ def run_experiment(net, args):
         f.write(run_id + "\n")
 
     env_prefix = "QUIC_GO_LOG_LEVEL=info"
+    if getattr(args, "log_control", False):
+        env_prefix += " QUIC_GO_LOG_CONTROL=1"
+    um = getattr(args, "utility_mode", "T")
 
     # ---- Start server on h2 ------------------------------------------------
     server_log_path = os.path.join(logdir, f"server_{run_id}.log")
@@ -184,13 +188,17 @@ def run_experiment(net, args):
     pull_log_path = os.path.join(logdir, f"pull_{run_id}.log")
     pull_log = open(pull_log_path, "w")
     open(outfile, "w").close()  # touch
+    lc = " -log-control" if getattr(args, "log_control", False) else ""
     pull_cmd = (
-        f"{env_prefix} {client_bin} -type=true -protocol=quic -multi=true"
-        f" -file={outfile} rtmp://10.0.1.2/live/test"
+        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
+        f" -type=true -protocol=quic -multi=true -sch=rr"
+        f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
+        f" -experiment-input={shlex.quote(outfile)}"
+        f" -file={shlex.quote(outfile)} rtmp://10.0.1.2/live/test{lc}"
     )
     _log("pull", f"starting on h1 → {pull_log_path}")
     pull_proc = h1.popen(
-        f"cd {ROOT} && {pull_cmd}",
+        pull_cmd,
         stdout=pull_log, stderr=pull_log, shell=True,
     )
     time.sleep(3)
@@ -199,12 +207,15 @@ def run_experiment(net, args):
     push_log_path = os.path.join(logdir, f"push_{run_id}.log")
     push_log = open(push_log_path, "w")
     push_cmd = (
-        f"{env_prefix} {client_bin} -type=false -protocol=quic -multi=true -sch=rr"
-        f" -file={input_flv} rtmp://10.0.1.2/live/test"
+        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
+        f" -type=false -protocol=quic -multi=true -sch=rr"
+        f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
+        f" -experiment-input={shlex.quote(input_flv)}"
+        f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test{lc}"
     )
     _log("push", f"starting on h1 → {push_log_path}")
     push_proc = h1.popen(
-        f"cd {ROOT} && {push_cmd}",
+        push_cmd,
         stdout=push_log, stderr=push_log, shell=True,
     )
 
@@ -288,6 +299,14 @@ def main():
     parser.add_argument(
         "--input-flv", default=None,
         help="path to input FLV file for push (default: ~/Videos/push_input.flv)",
+    )
+    parser.add_argument(
+        "--utility-mode", default="T",
+        help="4D-MAP -utility-mode: T, D, L, or baseline (disables utility controller)",
+    )
+    parser.add_argument(
+        "--log-control", action="store_true",
+        help="enable [control] ACK/LOSS cwnd logs (sets -log-control and QUIC_GO_LOG_CONTROL=1; very verbose)",
     )
     args = parser.parse_args()
 

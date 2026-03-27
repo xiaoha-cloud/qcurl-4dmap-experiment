@@ -73,7 +73,7 @@ var _ = Describe("Packet packer", func() {
 		streamFramer = newStreamFramer(streamsMap, nil)
 
 		pth = &path{
-			sentPacketHandler:     ackhandler.NewSentPacketHandler(&congestion.RTTStats{}, nil, nil),
+			sentPacketHandler:     ackhandler.NewSentPacketHandler(&congestion.RTTStats{}, nil, nil, 0, false),
 			packetNumberGenerator: newPacketNumberGenerator(protocol.SkipPacketAveragePeriodLength),
 		}
 
