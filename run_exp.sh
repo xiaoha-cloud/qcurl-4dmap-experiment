@@ -87,7 +87,7 @@ PULL_PID=$!
 
 sleep 3
 
-PUSH_TIMEOUT="${PUSH_TIMEOUT:-180}"
+PUSH_TIMEOUT="${PUSH_TIMEOUT:-90}"
 echo "[start] launching push (timeout ${PUSH_TIMEOUT}s)..."
 (
 	cd "$ROOT"
@@ -107,7 +107,7 @@ echo "$SERVER_PID" >"${LOGDIR}/server.pid"
 echo "$PULL_PID" >"${LOGDIR}/pull.pid"
 echo "$PUSH_PID" >"${LOGDIR}/push.pid"
 
-GRACE_SEC="${WATCHDOG_GRACE_SEC:-45}"
+GRACE_SEC="${WATCHDOG_GRACE_SEC:-20}"
 echo "[watchdog] grace ${GRACE_SEC}s for streams to start..."
 sleep "$GRACE_SEC"
 
