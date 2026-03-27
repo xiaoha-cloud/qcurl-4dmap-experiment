@@ -101,9 +101,9 @@ type sentPacketHandler struct {
 }
 
 // NewSentPacketHandler creates a new sentPacketHandler
-func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlgorithm, onRTOCallback func(time.Time) bool) SentPacketHandler {
+func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlgorithm, onRTOCallback func(time.Time) bool, pathID protocol.PathID, logControlActions bool) SentPacketHandler {
 	var congestionControl congestion.SendAlgorithm
-	
+
 	if cong != nil {
 		congestionControl = cong
 	} else {
@@ -113,6 +113,8 @@ func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlg
 			false, /* don't use reno since chromium doesn't (why?) */
 			protocol.InitialCongestionWindow,
 			protocol.DefaultMaxCongestionWindow,
+			pathID,
+			logControlActions,
 		)
 	}
 	// window := make(map[int] bool)

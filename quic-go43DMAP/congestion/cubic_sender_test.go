@@ -39,7 +39,7 @@ var _ = Describe("Cubic Sender", func() {
 		ackedPacketNumber = 0
 		clock = mockClock{}
 		rttStats = NewRTTStats()
-		sender = NewCubicSender(&clock, rttStats, true /*reno*/, initialCongestionWindowPackets, MaxCongestionWindow)
+		sender = NewCubicSender(&clock, rttStats, true /*reno*/, initialCongestionWindowPackets, MaxCongestionWindow, 0, false)
 	})
 
 	SendAvailableSendWindowLen := func(packetLength protocol.ByteCount) int {
@@ -421,7 +421,7 @@ var _ = Describe("Cubic Sender", func() {
 	It("slow start max send window", func() {
 		const kMaxCongestionWindowTCP = 50
 		const kNumberOfAcks = 100
-		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP)
+		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP, 0, false)
 
 		for i := 0; i < kNumberOfAcks; i++ {
 			// Send our full send window.
@@ -435,7 +435,7 @@ var _ = Describe("Cubic Sender", func() {
 	It("tcp reno max congestion window", func() {
 		const kMaxCongestionWindowTCP = 50
 		const kNumberOfAcks = 1000
-		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP)
+		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP, 0, false)
 
 		SendAvailableSendWindow()
 		AckNPackets(2)
@@ -457,7 +457,7 @@ var _ = Describe("Cubic Sender", func() {
 		// Set to 10000 to compensate for small cubic alpha.
 		const kNumberOfAcks = 10000
 
-		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP)
+		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindowTCP, 0, false)
 
 		SendAvailableSendWindow()
 		AckNPackets(2)
@@ -477,7 +477,7 @@ var _ = Describe("Cubic Sender", func() {
 	It("tcp cubic reset epoch on quiescence", func() {
 		const kMaxCongestionWindow = 50
 		const kMaxCongestionWindowBytes = kMaxCongestionWindow * protocol.DefaultTCPMSS
-		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindow)
+		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindow, 0, false)
 
 		num_sent := SendAvailableSendWindow()
 
@@ -517,7 +517,7 @@ var _ = Describe("Cubic Sender", func() {
 	It("tcp cubic shifted epoch on quiescence", func() {
 		const kMaxCongestionWindow = 50
 		const kMaxCongestionWindowBytes = kMaxCongestionWindow * protocol.DefaultTCPMSS
-		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindow)
+		sender = NewCubicSender(&clock, rttStats, false, initialCongestionWindowPackets, kMaxCongestionWindow, 0, false)
 
 		num_sent := SendAvailableSendWindow()
 

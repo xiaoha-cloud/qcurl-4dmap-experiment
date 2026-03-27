@@ -134,6 +134,13 @@ type Config struct {
 	SchedulerName string
 	GenerateRedundancy bool
 	IPriority bool
+
+	// 4D-MAP experiment / logging (client-oriented; safe zero value = off or default T)
+	// UtilityMode: "T", "D", "L", or "baseline" (disables utility controller; congestion default only).
+	UtilityMode         string
+	LogControlActions     bool // emit [control] lines on ACK/LOSS (verbose)
+	ExperimentRunID       string
+	ExperimentInputFile   string // label for [meta], e.g. FLV path
 }
 
 // A Listener for incoming QUIC connections
