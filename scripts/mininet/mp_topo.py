@@ -54,6 +54,13 @@ def setup_addresses_and_rules(net):
     h2.cmd("ip link set h2-eth0 up")
     h2.cmd("ip link set h2-eth1 up")
 
+    # Main routing table: direct routes for both subnets (ip addr flush removes
+    # auto-generated connected routes, so we must re-add them explicitly).
+    h1.cmd("ip route add 10.0.1.0/24 dev h1-eth0 scope link")
+    h1.cmd("ip route add 10.0.2.0/24 dev h1-eth1 scope link")
+    h2.cmd("ip route add 10.0.1.0/24 dev h2-eth0 scope link")
+    h2.cmd("ip route add 10.0.2.0/24 dev h2-eth1 scope link")
+
     # Source-based routing (minimal rules to keep both paths usable).
     h1.cmd("ip rule add from 10.0.1.1 table 101")
     h1.cmd("ip rule add from 10.0.2.1 table 102")
