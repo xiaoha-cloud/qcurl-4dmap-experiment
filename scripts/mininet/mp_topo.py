@@ -24,6 +24,12 @@ Usage:
     sudo python3 scripts/mininet/mp_topo.py --scenario d --run-exp --utility-mode D
     sudo python3 scripts/mininet/mp_topo.py --scenario l --run-exp --utility-mode L
     sudo python3 scripts/mininet/mp_topo.py --list-scenarios
+
+  Phase 2 (dynamic perturbation on path B; use one mode per run):
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
+      --dynamic-delay-profile scripts/mininet/delay_profile.example.env
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
+      --dynamic-loss-profile scripts/mininet/loss_profile.example.env
 """
 
 
@@ -39,6 +45,9 @@ import time
 
 # Project root is two directories above this script (scripts/mininet/mp_topo.py -> root)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+MININET_DIR = os.path.join(ROOT, "scripts", "mininet")
+TC_DELAY_SCRIPT = os.path.join(MININET_DIR, "tc_delay_steps.sh")
+TC_LOSS_SCRIPT = os.path.join(MININET_DIR, "tc_loss_steps.sh")
 
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
 # Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP -utility-mode (T/D/L).
@@ -186,6 +195,9 @@ def _log(tag, msg):
 def run_experiment(net, args):
     h1 = net.get("h1")
     h2 = net.get("h2")
+    tc_proc = None
+    tc_log_path = None
+    tc_log_f = None
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
     logdir = os.path.join(ROOT, "logs_exp", f"vm_run_{run_id}")
@@ -233,6 +245,37 @@ def run_experiment(net, args):
     _log("exp", f"outfile = {outfile}")
     _log("exp", f"input   = {input_flv}")
     _log("exp", f"timeout = {args.timeout}s")
+
+    delay_prof = getattr(args, "dynamic_delay_profile", None)
+    loss_prof = getattr(args, "dynamic_loss_profile", None)
+    if delay_prof:
+        prof_path = expand_user_path(delay_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"delay profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_DELAY_SCRIPT):
+            _log("error", f"tc_delay_steps.sh not found: {TC_DELAY_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_delay_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
+        _log("tc", f"starting delay steps on h1 → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+    elif loss_prof:
+        prof_path = expand_user_path(loss_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"loss profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_LOSS_SCRIPT):
+            _log("error", f"tc_loss_steps.sh not found: {TC_LOSS_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_loss_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
+        _log("tc", f"starting loss steps on h1 → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
     # Write run_id for later reference
     with open(os.path.join(ROOT, ".last_run_id"), "w") as f:
@@ -332,13 +375,16 @@ def run_experiment(net, args):
 
     # ---- Teardown ----------------------------------------------------------
     _log("exp", "stopping all processes...")
-    for proc in [push_proc, pull_proc, server_proc]:
+    procs = [push_proc, pull_proc, server_proc]
+    if tc_proc is not None:
+        procs.append(tc_proc)
+    for proc in procs:
         try:
             proc.send_signal(signal.SIGTERM)
         except Exception:
             pass
     time.sleep(2)
-    for proc in [push_proc, pull_proc, server_proc]:
+    for proc in procs:
         try:
             proc.send_signal(signal.SIGKILL)
         except Exception:
@@ -347,11 +393,16 @@ def run_experiment(net, args):
     for f in [server_log, pull_log, push_log]:
         f.flush()
         f.close()
+    if tc_log_f is not None:
+        tc_log_f.flush()
+        tc_log_f.close()
 
     _log("exp", f"done! logs saved to {logdir}")
     _log("exp", "--- quick check commands ---")
     _log("exp", f"grep '[m]monitor path=' {pull_log_path} | head -30")
     _log("exp", f"grep '[utility]'        {pull_log_path} | head -30")
+    if tc_log_path:
+        _log("exp", f"tc timeline log: {tc_log_path}")
 
 
 def main():
@@ -389,7 +440,23 @@ def main():
         "--log-control", action="store_true",
         help="enable [control] ACK/LOSS cwnd logs (sets -log-control and QUIC_GO_LOG_CONTROL=1; very verbose)",
     )
+    dyn = parser.add_mutually_exclusive_group()
+    dyn.add_argument(
+        "--dynamic-delay-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: path-B delay steps only (tc_delay_steps.sh); requires --run-exp; mutually exclusive with --dynamic-loss-profile",
+    )
+    dyn.add_argument(
+        "--dynamic-loss-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: path-B loss steps only (tc_loss_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile",
+    )
     args = parser.parse_args()
+
+    if (args.dynamic_delay_profile or args.dynamic_loss_profile) and not args.run_exp:
+        parser.error("--dynamic-delay-profile / --dynamic-loss-profile require --run-exp")
 
     if args.list_scenarios:
         print("SCENARIOS (path_a = 10.0.1.x path, path_b = 10.0.2.x path):")
