@@ -18,7 +18,14 @@ Usage:
     sudo python3 scripts/mininet/mp_topo.py --run-exp
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 90 --input-flv ~/Videos/push_input.flv
     # Under sudo, ~/Videos resolves to the invoking user's home (SUDO_USER), not /root.
+
+  Static link scenarios (TCLink per path; see SCENARIOS in this file):
+    sudo python3 scripts/mininet/mp_topo.py --scenario t --run-exp --utility-mode T
+    sudo python3 scripts/mininet/mp_topo.py --scenario d --run-exp --utility-mode D
+    sudo python3 scripts/mininet/mp_topo.py --scenario l --run-exp --utility-mode L
+    sudo python3 scripts/mininet/mp_topo.py --list-scenarios
 """
+
 
 import argparse
 import os
@@ -27,14 +34,57 @@ import shlex
 import signal
 import time
 
-from mininet.cli import CLI
-from mininet.link import TCLink
-from mininet.net import Mininet
-from mininet.node import OVSBridge
-from mininet.topo import Topo
+# Mininet is imported lazily in main() so `python3 mp_topo.py --list-scenarios`
+# works on machines without Mininet installed.
 
 # Project root is two directories above this script (scripts/mininet/mp_topo.py -> root)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+# Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
+# Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP -utility-mode (T/D/L).
+SCENARIOS = {
+    "default": {
+        "path_a": (20, "10ms", 0),
+        "path_b": (10, "30ms", 0.5),
+    },
+    # Throughput: strong path vs weaker path (bandwidth gap, moderate delays).
+    "t": {
+        "path_a": (25, "15ms", 0),
+        "path_b": (8, "20ms", 0),
+    },
+    # Delay: same bandwidth, large RTT gap (no added loss).
+    "d": {
+        "path_a": (15, "10ms", 0),
+        "path_b": (15, "90ms", 0),
+    },
+    # Loss: similar bw/delay; path B has higher loss.
+    "l": {
+        "path_a": (15, "20ms", 0),
+        "path_b": (15, "20ms", 4),
+    },
+}
+
+
+def scenario_link_kwargs(name):
+    """Return dict of TCLink kwargs for path_a and path_b from SCENARIOS[name]."""
+    if name not in SCENARIOS:
+        raise KeyError(f"unknown scenario: {name!r} (valid: {', '.join(sorted(SCENARIOS))})")
+    cfg = SCENARIOS[name]
+    pa, pb = cfg["path_a"], cfg["path_b"]
+    return {
+        "path_a": {"bw": pa[0], "delay": pa[1], "loss": pa[2]},
+        "path_b": {"bw": pb[0], "delay": pb[1], "loss": pb[2]},
+    }
+
+
+def print_scenarios():
+    for key in sorted(SCENARIOS):
+        cfg = SCENARIOS[key]
+        pa, pb = cfg["path_a"], cfg["path_b"]
+        print(
+            f"  {key:8}  path_a: bw={pa[0]}Mbps delay={pa[1]} loss={pa[2]}%  |  "
+            f"path_b: bw={pb[0]}Mbps delay={pb[1]} loss={pb[2]}%"
+        )
 
 
 def effective_home():
@@ -59,20 +109,32 @@ def expand_user_path(path):
     return os.path.expanduser(path)
 
 
-class MPTopo(Topo):
-    def build(self):
-        h1 = self.addHost("h1")
-        h2 = self.addHost("h2")
-        s1 = self.addSwitch("s1")
-        s2 = self.addSwitch("s2")
+def _mp_topo_class():
+    """Build MPTopo after Mininet imports (keeps --list-scenarios usable without Mininet)."""
+    from mininet.link import TCLink
+    from mininet.topo import Topo
 
-        # Path A: faster
-        self.addLink(h1, s1, cls=TCLink, bw=20, delay="10ms", loss=0)
-        self.addLink(s1, h2, cls=TCLink, bw=20, delay="10ms", loss=0)
+    class MPTopo(Topo):
+        def __init__(self, scenario="default", **params):
+            self.scenario = scenario
+            super().__init__(**params)
 
-        # Path B: slower + slight loss to make path characteristics different
-        self.addLink(h1, s2, cls=TCLink, bw=10, delay="30ms", loss=0.5)
-        self.addLink(s2, h2, cls=TCLink, bw=10, delay="30ms", loss=0.5)
+        def build(self):
+            h1 = self.addHost("h1")
+            h2 = self.addHost("h2")
+            s1 = self.addSwitch("s1")
+            s2 = self.addSwitch("s2")
+
+            kw = scenario_link_kwargs(self.scenario)
+            ka, kb = kw["path_a"], kw["path_b"]
+
+            self.addLink(h1, s1, cls=TCLink, **ka)
+            self.addLink(s1, h2, cls=TCLink, **ka)
+
+            self.addLink(h1, s2, cls=TCLink, **kb)
+            self.addLink(s2, h2, cls=TCLink, **kb)
+
+    return MPTopo
 
 
 def setup_addresses_and_rules(net):
@@ -159,6 +221,14 @@ def run_experiment(net, args):
 
     _log("exp", f"RUN_ID  = {run_id}")
     _log("exp", f"LOGDIR  = {logdir}")
+    scen = getattr(args, "scenario", "default")
+    cfg = SCENARIOS[scen]
+    pa, pb = cfg["path_a"], cfg["path_b"]
+    _log(
+        "exp",
+        f"scenario = {scen}  path_a bw={pa[0]}Mbps delay={pa[1]} loss={pa[2]}%  "
+        f"path_b bw={pb[0]}Mbps delay={pb[1]} loss={pb[2]}%",
+    )
     _log("exp", f"HOME    = {effective_home()} (for ~/Videos when using sudo)")
     _log("exp", f"outfile = {outfile}")
     _log("exp", f"input   = {input_flv}")
@@ -289,6 +359,17 @@ def main():
         description="2-path Mininet topology for qcurl-4dmap-experiment"
     )
     parser.add_argument(
+        "--scenario",
+        default="default",
+        choices=sorted(SCENARIOS.keys()),
+        help="static link preset (TCLink bw/delay/loss per path); default matches legacy topology",
+    )
+    parser.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="print SCENARIOS presets and exit (no Mininet)",
+    )
+    parser.add_argument(
         "--run-exp", action="store_true",
         help="run one-shot experiment (server on h2, pull+push on h1) instead of interactive CLI",
     )
@@ -310,12 +391,24 @@ def main():
     )
     args = parser.parse_args()
 
-    topo = MPTopo()
+    if args.list_scenarios:
+        print("SCENARIOS (path_a = 10.0.1.x path, path_b = 10.0.2.x path):")
+        print_scenarios()
+        return
+
+    from mininet.cli import CLI
+    from mininet.link import TCLink
+    from mininet.net import Mininet
+    from mininet.node import OVSBridge
+
+    MPTopo = _mp_topo_class()
+    topo = MPTopo(scenario=args.scenario)
     net = Mininet(topo=topo, link=TCLink, switch=OVSBridge, controller=None, autoSetMacs=True)
     net.start()
     setup_addresses_and_rules(net)
 
     print("\n[mp_topo] Topology is up.")
+    print(f"[mp_topo] scenario={args.scenario} (see SCENARIOS in mp_topo.py or --list-scenarios)")
 
     if args.run_exp:
         try:
