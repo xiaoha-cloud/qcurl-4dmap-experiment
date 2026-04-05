@@ -23,6 +23,8 @@ Usage:
     sudo python3 scripts/mininet/mp_topo.py --scenario t --run-exp --utility-mode T
     sudo python3 scripts/mininet/mp_topo.py --scenario d --run-exp --utility-mode D
     sudo python3 scripts/mininet/mp_topo.py --scenario l --run-exp --utility-mode L
+    sudo python3 scripts/mininet/mp_topo.py --scenario d_queue --run-exp --utility-mode D
+    sudo python3 scripts/mininet/mp_topo.py --scenario d --run-exp --bg-iperf --bg-iperf-path b
     sudo python3 scripts/mininet/mp_topo.py --list-scenarios
 
   Phase 2 (dynamic perturbation on path B; use one mode per run):
@@ -43,6 +45,7 @@ import os
 import pwd
 import re
 import shlex
+import shutil
 import signal
 import time
 
@@ -77,6 +80,13 @@ SCENARIOS = {
         "path_a": (15, "20ms", 0),
         "path_b": (15, "20ms", 4),
     },
+    # Same RTT gap as `d`, but path B uses a small netem queue → standing queue / queueing delay.
+    # Optional TCLink extras via path_*_extra (merged into kwargs for addLink).
+    "d_queue": {
+        "path_a": (15, "10ms", 0),
+        "path_b": (15, "90ms", 0),
+        "path_b_extra": {"max_queue_size": 25},
+    },
 }
 
 
@@ -86,19 +96,25 @@ def scenario_link_kwargs(name):
         raise KeyError(f"unknown scenario: {name!r} (valid: {', '.join(sorted(SCENARIOS))})")
     cfg = SCENARIOS[name]
     pa, pb = cfg["path_a"], cfg["path_b"]
-    return {
-        "path_a": {"bw": pa[0], "delay": pa[1], "loss": pa[2]},
-        "path_b": {"bw": pb[0], "delay": pb[1], "loss": pb[2]},
-    }
+    ka = {"bw": pa[0], "delay": pa[1], "loss": pa[2]}
+    kb = {"bw": pb[0], "delay": pb[1], "loss": pb[2]}
+    ka.update(cfg.get("path_a_extra", {}))
+    kb.update(cfg.get("path_b_extra", {}))
+    return {"path_a": ka, "path_b": kb}
 
 
 def print_scenarios():
     for key in sorted(SCENARIOS):
         cfg = SCENARIOS[key]
         pa, pb = cfg["path_a"], cfg["path_b"]
+        xa = cfg.get("path_a_extra") or {}
+        xb = cfg.get("path_b_extra") or {}
+        extra = ""
+        if xa or xb:
+            extra = f"  extras: path_a={xa!r} path_b={xb!r}"
         print(
             f"  {key:8}  path_a: bw={pa[0]}Mbps delay={pa[1]} loss={pa[2]}%  |  "
-            f"path_b: bw={pb[0]}Mbps delay={pb[1]} loss={pb[2]}%"
+            f"path_b: bw={pb[0]}Mbps delay={pb[1]} loss={pb[2]}%{extra}"
         )
 
 
@@ -316,6 +332,43 @@ def run_experiment(net, args):
         _log("tc", f"profile = {prof_path}")
         tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
+    iperf_procs = []
+    iperf_aux_files = []
+    if getattr(args, "bg_iperf", False):
+        if not shutil.which("iperf3"):
+            _log("error", "iperf3 not found; install iperf3 or omit --bg-iperf")
+            if tc_log_f is not None:
+                tc_log_f.close()
+            return
+        port = int(getattr(args, "bg_iperf_port", 55201))
+        bw = getattr(args, "bg_iperf_bw", "10M")
+        path_key = getattr(args, "bg_iperf_path", "b")
+        dst = "10.0.1.2" if path_key == "a" else "10.0.2.2"
+        srv_log = os.path.join(logdir, f"iperf_server_{run_id}.log")
+        cli_log = os.path.join(logdir, f"iperf_client_{run_id}.log")
+        srv_f = open(srv_log, "w")
+        cli_f = open(cli_log, "w")
+        iperf_aux_files.extend([srv_f, cli_f])
+        _log("exp", f"bg-iperf3 server on h2 port {port} → {srv_log}")
+        iperf_procs.append(
+            h2.popen(
+                f"iperf3 -s -p {port}",
+                stdout=srv_f,
+                stderr=srv_f,
+                shell=True,
+            )
+        )
+        time.sleep(1)
+        _log("exp", f"bg-iperf3 client h1 → {dst}:{port} -b {bw} (600s) → {cli_log}")
+        iperf_procs.append(
+            h1.popen(
+                f"iperf3 -c {dst} -p {port} -b {shlex.quote(bw)} -t 600",
+                stdout=cli_f,
+                stderr=cli_f,
+                shell=True,
+            )
+        )
+
     # Write run_id for later reference
     with open(os.path.join(ROOT, ".last_run_id"), "w") as f:
         f.write(run_id + "\n")
@@ -414,7 +467,7 @@ def run_experiment(net, args):
 
     # ---- Teardown ----------------------------------------------------------
     _log("exp", "stopping all processes...")
-    procs = [push_proc, pull_proc, server_proc]
+    procs = list(iperf_procs) + [push_proc, pull_proc, server_proc]
     if tc_proc is not None:
         procs.append(tc_proc)
     for proc in procs:
@@ -435,6 +488,12 @@ def run_experiment(net, args):
     if tc_log_f is not None:
         tc_log_f.flush()
         tc_log_f.close()
+    for f in iperf_aux_files:
+        try:
+            f.flush()
+            f.close()
+        except Exception:
+            pass
 
     _log("exp", f"done! logs saved to {logdir}")
     _log("exp", "--- quick check commands ---")
@@ -478,6 +537,25 @@ def main():
     parser.add_argument(
         "--log-control", action="store_true",
         help="enable [control] ACK/LOSS cwnd logs (sets -log-control and QUIC_GO_LOG_CONTROL=1; very verbose)",
+    )
+    parser.add_argument(
+        "--bg-iperf", action="store_true",
+        help=(
+            "Start iperf3 server on h2 and client on h1 (UDP/TCP per iperf3 default: TCP) for the run "
+            "duration, to add cross-traffic on path A or B (--bg-iperf-path). Requires iperf3 in PATH."
+        ),
+    )
+    parser.add_argument(
+        "--bg-iperf-bw", default="10M",
+        help="iperf3 -b limit for background client (default: 10M)",
+    )
+    parser.add_argument(
+        "--bg-iperf-path", choices=("a", "b"), default="b",
+        help="h2 destination IP: a=10.0.1.2 b=10.0.2.2 (default: b)",
+    )
+    parser.add_argument(
+        "--bg-iperf-port", type=int, default=55201,
+        help="iperf3 listening port on h2 (default: 55201)",
     )
     dyn = parser.add_mutually_exclusive_group()
     dyn.add_argument(

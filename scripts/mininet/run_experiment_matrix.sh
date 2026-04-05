@@ -1,19 +1,35 @@
 #!/usr/bin/env bash
-# Batch runner for mp_topo.py: Phase 1 (static scenarios) + Phase 2 (dynamic tc).
+# Batch runner for mp_topo.py: Phase 1 (static) + Phase 2 (fixed T/D/L + dynamic tc) + Phase 3 (auto).
 #
 # Naming (do not confuse):
-#   --utility-mode T|D|L|auto = 4D-MAP optimization preference (auto = runtime selector)
-#   --scenario default|t|d|l = Mininet TCLink preset at build time (static)
-#   --dynamic-delay-profile  = Phase 2: delay steps on path B only (one run)
-#   --dynamic-loss-profile   = Phase 2: loss steps on path B only (one run)
+#   --utility-mode T|D|L|auto|baseline = 4D-MAP mode (baseline = controller off)
+#   --scenario default|t|d|l|d_queue = Mininet TCLink preset (d_queue = like d + small path-B queue)
+#   --dynamic-delay-profile  = Phase 2/3: delay steps on path B only (one run)
+#   --dynamic-loss-profile   = Phase 2/3: loss steps on path B only (one run)
 #
-# Logs: each --run-exp creates a directory under logs_exp/session_<TS>/:
-#   --run-label phase1_<scenario>_<utility>   (Phase 1)
-#   --run-label phase2_baseline_<utility>
-#   --run-label phase2_delay_<utility>
-#   --run-label phase2_loss_<utility>
-# Files inside are still server_<RUN_ID>.log, pull_<RUN_ID>.log, push_<RUN_ID>.log
-# (+ tc_* for dynamic runs). RUN_ID is the timestamp when that run started.
+# Phase 3 = design “layer C”: only --utility-mode auto (adaptive), on static scenarios and/or same tc profiles as Phase 2.
+#
+# Log directory tree (USE_SESSION=1, one batch = one session folder):
+#
+#   logs_exp/session_YYYYMMDD_HHMMSS/
+#     phase1_default_baseline/          # one subfolder per matrix cell (--run-label)
+#       server_<RUN_ID>.log             # qserver on h2
+#       pull_<RUN_ID>.log               # pull client on h1
+#       push_<RUN_ID>.log               # push client on h1
+#     phase1_default_T/
+#       server_<RUN_ID>.log
+#       pull_<RUN_ID>.log
+#       push_<RUN_ID>.log
+#     phase2_delay_T/
+#       pull_*.log push_*.log server_*.log
+#       tc_delay_<RUN_ID>.log           # dynamic tc script log (Phase 2 delay only)
+#     phase3_static_default_auto/
+#     phase3_delay_auto/
+#     phase3_loss_auto/
+#
+# Classification is by subfolder name (scenario + utility), not by merging streams into one file.
+# The three QUIC role logs stay separate so you can grep pull vs server without a splitter.
+# Optional: mp_topo.py --bg-iperf adds iperf_server_<RUN_ID>.log and iperf_client_<RUN_ID>.log in the same folder.
 #
 # Set USE_SESSION=0 to restore legacy flat layout: logs_exp/vm_run_<RUN_ID>/ only.
 #
@@ -27,10 +43,10 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 
 # -------------------- tune this block --------------------
-# Phase 1: loop static SCENARIOS × UTILITIES (each run: 3 log files under vm_run_*)
+# Phase 1: loop static SCENARIOS × UTILITIES (each run: one subdir, three QUIC logs + optional tc/iperf)
 RUN_PHASE1=1
-PHASE1_SCENARIOS=(default t d l)
-PHASE1_UTILS=(T D L)
+PHASE1_SCENARIOS=(default t d l) # append d_queue for queueing-delay-style path B (see mp_topo SCENARIOS)
+PHASE1_UTILS=(baseline T D L)
 TIMEOUT_PHASE1=90
 
 # Phase 2: optional static baseline (no dynamic tc), then delay steps, then loss steps
@@ -38,10 +54,18 @@ RUN_PHASE2_BASELINE=1
 RUN_PHASE2_DELAY=1
 RUN_PHASE2_LOSS=1
 PHASE2_SCENARIO=default
-PHASE2_UTILS=(T D L) # add "auto" to also run adaptive utility-mode
+PHASE2_UTILS=(T D L)
 TIMEOUT_PHASE2=120
 DELAY_PROFILE="$ROOT/scripts/mininet/delay_profile.example.env"
 LOSS_PROFILE="$ROOT/scripts/mininet/loss_profile.example.env"
+
+# Phase 3: adaptive utility only (auto). Compare phase3_delay_auto vs phase2_delay_* on the same profile.
+RUN_PHASE3_STATIC=1
+RUN_PHASE3_DELAY=1
+RUN_PHASE3_LOSS=1
+PHASE3_SCENARIOS=(default t d l) # empty array + RUN_PHASE3_STATIC=0 to skip static auto sweep
+PHASE3_SCENARIO=default        # for dynamic delay/loss; set same as PHASE2_SCENARIO for A/B with Phase 2
+TIMEOUT_PHASE3=120
 
 # 1 = all runs under logs_exp/session_<timestamp>/…  ; 0 = flat logs_exp/vm_run_<RUN_ID>/
 USE_SESSION=1
@@ -144,15 +168,53 @@ phase2_loss() {
   done
 }
 
+phase3_static() {
+  local sc
+  for sc in "${PHASE3_SCENARIOS[@]}"; do
+    log "PHASE3 STATIC begin scenario=$sc utility=auto"
+    if [[ "$USE_SESSION" -eq 1 ]]; then
+      mp_run --run-label "phase3_static_${sc}_auto" -- --run-exp --scenario "$sc" --utility-mode auto \
+        --timeout "$TIMEOUT_PHASE3"
+    else
+      python3 "$MP" --run-exp --scenario "$sc" --utility-mode auto --timeout "$TIMEOUT_PHASE3"
+    fi
+    log "PHASE3 STATIC done scenario=$sc"
+  done
+}
+
+phase3_delay() {
+  log "PHASE3 DELAY begin utility=auto scenario=$PHASE3_SCENARIO"
+  if [[ "$USE_SESSION" -eq 1 ]]; then
+    mp_run --run-label "phase3_delay_auto" -- --run-exp --scenario "$PHASE3_SCENARIO" --utility-mode auto \
+      --timeout "$TIMEOUT_PHASE3" --dynamic-delay-profile "$DELAY_PROFILE"
+  else
+    python3 "$MP" --run-exp --scenario "$PHASE3_SCENARIO" --utility-mode auto \
+      --timeout "$TIMEOUT_PHASE3" --dynamic-delay-profile "$DELAY_PROFILE"
+  fi
+  log "PHASE3 DELAY done"
+}
+
+phase3_loss() {
+  log "PHASE3 LOSS begin utility=auto scenario=$PHASE3_SCENARIO"
+  if [[ "$USE_SESSION" -eq 1 ]]; then
+    mp_run --run-label "phase3_loss_auto" -- --run-exp --scenario "$PHASE3_SCENARIO" --utility-mode auto \
+      --timeout "$TIMEOUT_PHASE3" --dynamic-loss-profile "$LOSS_PROFILE"
+  else
+    python3 "$MP" --run-exp --scenario "$PHASE3_SCENARIO" --utility-mode auto \
+      --timeout "$TIMEOUT_PHASE3" --dynamic-loss-profile "$LOSS_PROFILE"
+  fi
+  log "PHASE3 LOSS done"
+}
+
 main() {
   require_sudo
   cd "$ROOT"
   log "ROOT=$ROOT"
   [[ -f "$MP" ]] || { log "missing $MP"; exit 1; }
-  if [[ "$RUN_PHASE2_DELAY" -eq 1 ]] && [[ ! -f "$DELAY_PROFILE" ]]; then
+  if { [[ "$RUN_PHASE2_DELAY" -eq 1 ]] || [[ "$RUN_PHASE3_DELAY" -eq 1 ]]; } && [[ ! -f "$DELAY_PROFILE" ]]; then
     log "missing DELAY_PROFILE=$DELAY_PROFILE"; exit 1
   fi
-  if [[ "$RUN_PHASE2_LOSS" -eq 1 ]] && [[ ! -f "$LOSS_PROFILE" ]]; then
+  if { [[ "$RUN_PHASE2_LOSS" -eq 1 ]] || [[ "$RUN_PHASE3_LOSS" -eq 1 ]]; } && [[ ! -f "$LOSS_PROFILE" ]]; then
     log "missing LOSS_PROFILE=$LOSS_PROFILE"; exit 1
   fi
 
@@ -169,6 +231,15 @@ main() {
   fi
   if [[ "$RUN_PHASE2_LOSS" -eq 1 ]]; then
     phase2_loss
+  fi
+  if [[ "$RUN_PHASE3_STATIC" -eq 1 ]]; then
+    phase3_static
+  fi
+  if [[ "$RUN_PHASE3_DELAY" -eq 1 ]]; then
+    phase3_delay
+  fi
+  if [[ "$RUN_PHASE3_LOSS" -eq 1 ]]; then
+    phase3_loss
   fi
   log "all enabled stages finished"
   if [[ -n "${SESSION_DIR:-}" ]]; then
