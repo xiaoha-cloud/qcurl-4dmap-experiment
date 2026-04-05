@@ -30,12 +30,18 @@ Usage:
       --dynamic-delay-profile scripts/mininet/delay_profile.example.env
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
       --dynamic-loss-profile scripts/mininet/loss_profile.example.env
+
+  Group runs under one session directory (see run_experiment_matrix.sh):
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --log-parent logs_exp/session_20260402_001 \\
+      --run-label phase1_default_T
+    # → logs_exp/session_20260402_001/phase1_default_T/  (files still named *_<RUN_ID>.log)
 """
 
 
 import argparse
 import os
 import pwd
+import re
 import shlex
 import signal
 import time
@@ -116,6 +122,24 @@ def expand_user_path(path):
     if path == "~":
         return effective_home()
     return os.path.expanduser(path)
+
+
+def resolve_repo_path(path):
+    """Resolve a path: absolute paths unchanged; relative paths are under ROOT."""
+    path = expand_user_path(path)
+    if os.path.isabs(path):
+        return path
+    return os.path.join(ROOT, path)
+
+
+def sanitize_run_label(name):
+    """Allow only safe folder-name characters; empty → 'run'."""
+    name = (name or "").strip()
+    if not name:
+        return "run"
+    name = re.sub(r"[^a-zA-Z0-9._-]+", "_", name)
+    name = name.strip("._-") or "run"
+    return name
 
 
 def _mp_topo_class():
@@ -200,7 +224,20 @@ def run_experiment(net, args):
     tc_log_f = None
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
-    logdir = os.path.join(ROOT, "logs_exp", f"vm_run_{run_id}")
+
+    log_parent = getattr(args, "log_parent", None)
+    run_label = getattr(args, "run_label", None)
+    if log_parent:
+        parent = resolve_repo_path(log_parent)
+    else:
+        parent = os.path.join(ROOT, "logs_exp")
+
+    if run_label:
+        subdir = sanitize_run_label(run_label)
+    else:
+        subdir = f"vm_run_{run_id}"
+
+    logdir = os.path.join(parent, subdir)
     os.makedirs(logdir, exist_ok=True)
 
     videos_dir = os.path.join(effective_home(), "Videos")
@@ -233,6 +270,8 @@ def run_experiment(net, args):
 
     _log("exp", f"RUN_ID  = {run_id}")
     _log("exp", f"LOGDIR  = {logdir}")
+    if log_parent or run_label:
+        _log("exp", f"log_parent = {log_parent!r}  run_label = {run_label!r}")
     scen = getattr(args, "scenario", "default")
     cfg = SCENARIOS[scen]
     pa, pb = cfg["path_a"], cfg["path_b"]
@@ -434,7 +473,7 @@ def main():
     )
     parser.add_argument(
         "--utility-mode", default="T",
-        help="4D-MAP -utility-mode: T, D, L, or baseline (disables utility controller)",
+        help="4D-MAP -utility-mode: T, D, L, auto (adaptive), or baseline (disables utility controller)",
     )
     parser.add_argument(
         "--log-control", action="store_true",
@@ -452,6 +491,24 @@ def main():
         metavar="PATH",
         default=None,
         help="Phase 2: path-B loss steps only (tc_loss_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile",
+    )
+    parser.add_argument(
+        "--log-parent",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Place this run under ROOT/DIR (or absolute DIR). "
+            "Default parent is logs_exp. Subdir is vm_run_<RUN_ID> unless --run-label is set."
+        ),
+    )
+    parser.add_argument(
+        "--run-label",
+        metavar="NAME",
+        default=None,
+        help=(
+            "Folder name under --log-parent (sanitized) instead of vm_run_<RUN_ID>. "
+            "Log files still use RUN_ID in their names. Example: phase1_default_T."
+        ),
     )
     args = parser.parse_args()
 
