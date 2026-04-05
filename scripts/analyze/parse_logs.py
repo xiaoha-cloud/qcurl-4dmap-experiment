@@ -9,10 +9,13 @@ Log lines handled:
   tc_delay / tc_loss   (written by tc_delay_steps.sh / tc_loss_steps.sh)
 
 Usage:
-    from parse_logs import load_pull_log, load_tc_log, find_run_dirs
+    from parse_logs import load_pull_log, load_tc_log, find_run_dirs, load_labeled_vm_runs
 
     df_util, df_mon = load_pull_log("logs_exp/vm_run_XXX/pull_XXX.log", label="baseline")
     tc_steps       = load_tc_log("logs_exp/vm_run_XXX/tc_delay_XXX.log")
+
+    # ACCeSS-style T/D/L comparison (three vm_run dirs, same scenario):
+    df_util, df_mon, tc_steps = load_labeled_vm_runs({"T": t_dir, "D": d_dir, "L": l_dir})
 """
 
 from __future__ import annotations
@@ -20,8 +23,9 @@ from __future__ import annotations
 import re
 import glob
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import Optional, Union
 
 import pandas as pd
 
@@ -53,12 +57,12 @@ _RE_MONITOR = re.compile(
     r" lost_B=(?P<lost_B>[^\s]+)"
 )
 
-_RE_TC_STEP = re.compile(
+_RE_TC_HEAD = re.compile(
     r"\[tc_(?P<mode>delay|loss)\] step \d+/\d+ at=(?P<at>\d+)s"
-    r"(?: delay=(?P<delay_ms>\d+)ms)?"
-    r"(?: loss=(?P<loss_pct>[^\s]+)%)?"
-    r" dev=(?P<dev>[^\s]+)"
 )
+_RE_DELAY_MS = re.compile(r"delay=(?P<delay_ms>\d+)ms")
+_RE_LOSS_PCT = re.compile(r"loss=(?P<loss_pct>[^\s]+)%")
+_RE_TC_DEV = re.compile(r"dev=(?P<dev>[^\s]+)")
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -179,6 +183,62 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
     return df_util, df_mon
 
 
+def _parse_leading_iso_timestamp(line: str) -> Optional[float]:
+    """Parse leading ``[2026-04-02T16:56:38+00:00]`` from a tc log line → Unix timestamp."""
+    if not line.startswith("["):
+        return None
+    end = line.find("]")
+    if end <= 1:
+        return None
+    raw = line[1:end]
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except ValueError:
+        return None
+
+
+def estimate_tc_pull_offset_seconds(pull_path: Union[str, Path], tc_path: Union[str, Path]) -> float:
+    """
+    Seconds to add to tc ``at_sec`` so it aligns with pull log ``t``.
+
+    Pull ``t`` is (wall time of row − wall time of first ``[utility]`` line), using second
+    resolution. TC ``at_sec`` is relative to tc script start. We approximate script start as
+    the wall time of the first ``[tc_delay]`` / ``[tc_loss]`` step line in the tc log.
+
+    plot_t ≈ at_sec + offset,  where  offset ≈ t_tc_first_step_wall − t_pull_first_utility_wall.
+
+    Returns 0.0 if timestamps cannot be read.
+    """
+    pull_path, tc_path = Path(pull_path), Path(tc_path)
+    t_util: Optional[float] = None
+    with open(pull_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            mu = _RE_UTILITY.search(line)
+            if mu:
+                try:
+                    dt = datetime.strptime(
+                        mu["date"] + " " + mu["time"], "%Y/%m/%d %H:%M:%S"
+                    )
+                    t_util = dt.replace(tzinfo=timezone.utc).timestamp()
+                except ValueError:
+                    pass
+                break
+
+    t_tc: Optional[float] = None
+    with open(tc_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if _RE_TC_HEAD.search(line):
+                ts = _parse_leading_iso_timestamp(line)
+                if ts is not None:
+                    t_tc = ts
+                    break
+
+    if t_util is None or t_tc is None:
+        return 0.0
+    return float(t_tc - t_util)
+
+
 def load_tc_log(path: Union[str, Path]) -> pd.DataFrame:
     """
     Parse a tc_delay_*.log or tc_loss_*.log file.
@@ -188,15 +248,19 @@ def load_tc_log(path: Union[str, Path]) -> pd.DataFrame:
     rows = []
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
-            m = _RE_TC_STEP.search(line)
-            if m:
-                rows.append({
-                    "at_sec": int(m["at"]),
-                    "mode": m["mode"],
-                    "delay_ms": float(m["delay_ms"]) if m["delay_ms"] else float("nan"),
-                    "loss_pct": float(m["loss_pct"]) if m["loss_pct"] else float("nan"),
-                    "dev": m["dev"],
-                })
+            m = _RE_TC_HEAD.search(line)
+            if not m:
+                continue
+            dm = _RE_DELAY_MS.search(line)
+            lm = _RE_LOSS_PCT.search(line)
+            dev_m = _RE_TC_DEV.search(line)
+            rows.append({
+                "at_sec": int(m["at"]),
+                "mode": m["mode"],
+                "delay_ms": float(dm["delay_ms"]) if dm else float("nan"),
+                "loss_pct": float(lm["loss_pct"]) if lm else float("nan"),
+                "dev": dev_m["dev"] if dev_m else "",
+            })
     return pd.DataFrame(rows)
 
 
@@ -273,6 +337,63 @@ def load_phase2_triple(
             tc_steps["delay"] = load_tc_log(tc_delay)
         if tc_loss:
             tc_steps["loss"] = load_tc_log(tc_loss)
+
+    return (
+        pd.concat(util_dfs, ignore_index=True),
+        pd.concat(mon_dfs, ignore_index=True),
+        tc_steps,
+    )
+
+
+def load_labeled_vm_runs(
+    label_to_dir: dict[str, Union[str, Path]],
+    tc_from_label: Optional[str] = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, pd.DataFrame]]:
+    """
+    Load several ``vm_run_*`` folders (e.g. utility modes T / D / L) for ACCeSS-style comparison.
+
+    Parameters
+    ----------
+    label_to_dir :
+        Maps experiment label to directory, e.g. ``{"T": Path(".../vm_run_t"), "D": ...}``.
+        Each directory must contain ``pull_*.log``.
+    tc_from_label :
+        If set, use this key's directory to load ``tc_delay_*.log`` / ``tc_loss_*.log``.
+        If ``None``, use the first key in iteration order (sorted by key for stability).
+
+    Returns
+    -------
+    df_util, df_mon : concatenated DataFrames with column ``label`` set to each key.
+    tc_steps : same shape as ``load_phase2_triple`` (``delay`` / ``loss`` keys if present).
+    """
+    if not label_to_dir:
+        raise ValueError("label_to_dir is empty")
+
+    util_dfs: list[pd.DataFrame] = []
+    mon_dfs: list[pd.DataFrame] = []
+
+    for lab in sorted(label_to_dir.keys()):
+        d = Path(label_to_dir[lab])
+        pull = next(d.glob("pull_*.log"), None)
+        if pull is None:
+            raise FileNotFoundError(f"No pull_*.log in {d} (label={lab})")
+        u, m = load_pull_log(pull, label=lab)
+        util_dfs.append(u)
+        mon_dfs.append(m)
+
+    tc_steps: dict[str, pd.DataFrame] = {}
+    src_key = tc_from_label
+    if src_key is not None and src_key not in label_to_dir:
+        src_key = None
+    if src_key is None:
+        src_key = sorted(label_to_dir.keys())[0]
+    src_dir = Path(label_to_dir[src_key])
+    tc_delay = next(src_dir.glob("tc_delay_*.log"), None)
+    tc_loss = next(src_dir.glob("tc_loss_*.log"), None)
+    if tc_delay:
+        tc_steps["delay"] = load_tc_log(tc_delay)
+    if tc_loss:
+        tc_steps["loss"] = load_tc_log(tc_loss)
 
     return (
         pd.concat(util_dfs, ignore_index=True),

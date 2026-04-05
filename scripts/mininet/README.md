@@ -67,3 +67,9 @@ If you only see `path=0`, check:
 - `-multi=true` is set on both pull and push
 - both `10.0.1.x` and `10.0.2.x` are reachable
 - you are not using `127.0.0.1`
+
+## 5) Batch runs, T/D/L, and adaptive `auto`
+
+- `run_experiment_matrix.sh`: Phase 2 now loops **`PHASE2_UTILS=(T D L)`** (edit the script to add `auto` or change the list).
+- **`-utility-mode=auto`**: scheduler periodically picks **T / D / L** from aggregated `max(loss)` and `max(OWD ms)`; switches are **rate-limited (2s)** and logged as `[utility_mode] adaptive X -> Y (...)`.
+- **`[utility] mode=`** in pull logs reflects the **current** controller mode (including under `auto`).

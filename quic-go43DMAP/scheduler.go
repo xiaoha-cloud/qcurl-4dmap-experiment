@@ -38,6 +38,9 @@ type scheduler struct {
 
 	config *Config // session config; used for utility mode + [meta] once
 	metaLogged bool
+
+	// adaptive utility-mode (UtilityMode=auto): rate-limit SetMode calls
+	adaptiveLastChange time.Time
 }
 type monitor struct{
 	// separate path statis
@@ -88,11 +91,72 @@ func utilityModeFromConfig(cfg *Config) UtilityMode {
 		return ModeD
 	case "L":
 		return ModeL
+	case "AUTO", "ADAPT":
+		return ModeT // initial mode; applyAdaptiveUtilityModeIfNeeded updates live
 	case "BASELINE", "OFF", "NONE", "DISABLE":
 		return ModeT // placeholder; controller will stay nil
 	default:
 		return ModeT
 	}
+}
+
+func isUtilityAdaptive(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
+	case "AUTO", "ADAPT":
+		return true
+	default:
+		return false
+	}
+}
+
+// pickAdaptiveUtilityMode maps aggregated loss / OWD to T/D/L with minimal hysteresis.
+func pickAdaptiveUtilityMode(maxLoss, maxOwdMs float64, cur UtilityMode) UtilityMode {
+	if maxLoss >= 0.02 {
+		return ModeL
+	}
+	if cur == ModeL && maxLoss >= 0.008 {
+		return ModeL
+	}
+	if maxOwdMs >= 100 {
+		return ModeD
+	}
+	if cur == ModeD && maxOwdMs >= 60 {
+		return ModeD
+	}
+	return ModeT
+}
+
+func (sch *scheduler) applyAdaptiveUtilityModeIfNeeded(s *session) {
+	if s == nil || sch.config == nil || sch.utilityController == nil || !isUtilityAdaptive(sch.config) {
+		return
+	}
+	var maxLoss float64
+	var maxOwdMs float64
+	for _, pth := range s.paths {
+		pid := pth.pathID
+		if l, ok := sch.monitor.state_loss[pid]; ok && l > maxLoss {
+			maxLoss = l
+		}
+		owd := sch.monitor.state_owd[pid]
+		ms := float64(owd.Nanoseconds()) / 1e6
+		if ms > maxOwdMs {
+			maxOwdMs = ms
+		}
+	}
+	cur := sch.utilityController.Mode
+	want := pickAdaptiveUtilityMode(maxLoss, maxOwdMs, cur)
+	if want == cur {
+		return
+	}
+	if !sch.adaptiveLastChange.IsZero() && time.Since(sch.adaptiveLastChange) < 2*time.Second {
+		return
+	}
+	sch.utilityController.SetMode(want)
+	sch.adaptiveLastChange = time.Now()
+	utils.Infof("[utility_mode] adaptive %s -> %s (max_loss=%.4f max_owd_ms=%.1f)", cur, want, maxLoss, maxOwdMs)
 }
 
 func isUtilityBaseline(cfg *Config) bool {
@@ -115,6 +179,8 @@ func (sch *scheduler) setup() {
 	sch.redundancy = 0
 	if isUtilityBaseline(sch.config) {
 		sch.utilityController = nil
+	} else if isUtilityAdaptive(sch.config) {
+		sch.utilityController = NewUtilityController(ModeT)
 	} else {
 		sch.utilityController = NewUtilityController(utilityModeFromConfig(sch.config))
 	}
@@ -1180,7 +1246,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// 2. monitor return current state
 			sch.monitor.monitorCurrentPathState(pth)
 		}
-		
+		sch.applyAdaptiveUtilityModeIfNeeded(s)
 
 		if len(s.paths) <= 1{
 			firstpath = s.paths[protocol.InitialPathID]
@@ -1857,6 +1923,7 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 			}
 			sch.monitor.monitorCurrentPathState(pth)
 		}
+		sch.applyAdaptiveUtilityModeIfNeeded(s)
 		
 		//sch.monitor.isHighlossrate(sch, s)
 		
@@ -2026,6 +2093,7 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 			}
 			sch.monitor.monitorCurrentPathState(pth)
 		}
+		sch.applyAdaptiveUtilityModeIfNeeded(s)
 		
 		//sch.monitor.isHighlossrate(sch, s)
 		
@@ -2167,6 +2235,7 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 			sch.monitor.monitorCurrentPathState(pth)
 
 		}
+		sch.applyAdaptiveUtilityModeIfNeeded(s)
 		sch.monitor.monitorCurrentSessionState(s)
 	
 		numStreams := uint32(len(s.streamsMap.streams))		
@@ -2395,6 +2464,7 @@ func (sch *scheduler) sendPacket(s *session) error {
 			sch.monitor.monitorCurrentPathState(pth)
 
 		}
+		sch.applyAdaptiveUtilityModeIfNeeded(s)
 		sch.monitor.monitorCurrentSessionState(s)
 		sch.monitor.mutex.Unlock()
 		numStreams := uint32(len(s.streamsMap.streams))		
