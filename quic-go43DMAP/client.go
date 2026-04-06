@@ -201,7 +201,11 @@ func populateClientConfig(config *Config) *Config {
 		CreatePaths:    config.CreatePaths,
 		SchedulerName: config.SchedulerName,
 		GenerateRedundancy: config.GenerateRedundancy,
-		IPriority : config.IPriority,
+		IPriority: config.IPriority,
+		UtilityMode: config.UtilityMode,
+		LogControlActions: config.LogControlActions,
+		ExperimentRunID: config.ExperimentRunID,
+		ExperimentInputFile: config.ExperimentInputFile,
 	}
 }
 
