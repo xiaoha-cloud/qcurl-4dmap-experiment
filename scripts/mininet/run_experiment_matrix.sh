@@ -5,7 +5,7 @@
 #   --utility-mode T|D|L|auto|baseline = 4D-MAP mode (baseline = controller off)
 #   --scenario default|t|d|l|d_queue = Mininet TCLink preset (d_queue = like d + small path-B queue)
 #   --dynamic-delay-profile  = Phase 2/3: delay steps on path B only (one run)
-#   --dynamic-loss-profile   = Phase 2/3: loss steps on path B only (one run)
+#   --dynamic-loss-profile   = Phase 2/3: loss steps (profile sets IFACE or IFACES; default = both paths)
 #
 # Phase 3 = design “layer C”: only --utility-mode auto (adaptive), on static scenarios and/or same tc profiles as Phase 2.
 #
@@ -57,7 +57,8 @@ PHASE2_SCENARIO=default
 PHASE2_UTILS=(T D L)
 TIMEOUT_PHASE2=120
 DELAY_PROFILE="$ROOT/scripts/mininet/delay_profile.example.env"
-LOSS_PROFILE="$ROOT/scripts/mininet/loss_profile.example.env"
+# Scheme A (dual-link netem): same loss on h1-eth0 + h1-eth1. For path-B-only, use loss_profile.example.env.
+LOSS_PROFILE="$ROOT/scripts/mininet/loss_profile.both_paths.example.env"
 
 # Phase 3: adaptive utility only (auto). Compare phase3_delay_auto vs phase2_delay_* on the same profile.
 RUN_PHASE3_STATIC=1
