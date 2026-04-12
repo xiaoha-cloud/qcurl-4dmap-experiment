@@ -1,13 +1,15 @@
 # Local build outputs (rebuild on each machine)
 /4dmap
 /server/qserver
+qserver
 
 # Server runtime logs (local only)
 /server/logs/
 /server/server_qoe.log
 
-# logs_exp: ignore new loose files at top level; allow versioned experiment bundles
-/logs_exp/*
-!/logs_exp/vm/
-!/logs_exp/vm_run_*/
-!/logs_exp/vm_runs/
+# Experiment logs: entire tree (Mininet/vm runs, sessions, loose *.log)
+# Previously some paths were force-tracked with !rules — that caused accidental commits.
+/logs_exp/
+
+# One-shot helpers / VM state
+.last_run_id
