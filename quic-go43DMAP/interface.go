@@ -136,7 +136,7 @@ type Config struct {
 	IPriority bool
 
 	// 4D-MAP experiment / logging (client-oriented; safe zero value = off or default T)
-	// UtilityMode: "T", "D", "L", "auto" (runtime L/D/T selector), or "baseline" (disables utility controller).
+	// UtilityMode: "T", "D", "L", "auto" (runtime L/D/T), "learn" (a.k.a. "pg" projected-gradient weights on simplex), or "baseline" (disables utility controller).
 	UtilityMode         string
 	LogControlActions     bool // emit [control] lines on ACK/LOSS (verbose)
 	ExperimentRunID       string

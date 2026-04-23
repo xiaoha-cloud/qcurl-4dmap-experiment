@@ -27,7 +27,9 @@ Usage:
     sudo python3 scripts/mininet/mp_topo.py --scenario d --run-exp --bg-iperf --bg-iperf-path b
     sudo python3 scripts/mininet/mp_topo.py --list-scenarios
 
-  Phase 2 (dynamic perturbation on path B; use one mode per run):
+  Phase 2 (dynamic perturbation; use one mode per run):
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 300 \\
+      --utility-mode T --dynamic-bw-profile scripts/mininet/bw_profile.example.env
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
       --dynamic-delay-profile scripts/mininet/delay_profile.example.env
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
@@ -57,6 +59,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MININET_DIR = os.path.join(ROOT, "scripts", "mininet")
 TC_DELAY_SCRIPT = os.path.join(MININET_DIR, "tc_delay_steps.sh")
 TC_LOSS_SCRIPT = os.path.join(MININET_DIR, "tc_loss_steps.sh")
+TC_BW_SCRIPT = os.path.join(MININET_DIR, "tc_bw_steps.sh")
 
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
 # Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP -utility-mode (T/D/L).
@@ -301,9 +304,24 @@ def run_experiment(net, args):
     _log("exp", f"input   = {input_flv}")
     _log("exp", f"timeout = {args.timeout}s")
 
+    bw_prof = getattr(args, "dynamic_bw_profile", None)
     delay_prof = getattr(args, "dynamic_delay_profile", None)
     loss_prof = getattr(args, "dynamic_loss_profile", None)
-    if delay_prof:
+    if bw_prof:
+        prof_path = expand_user_path(bw_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"bw profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_BW_SCRIPT):
+            _log("error", f"tc_bw_steps.sh not found: {TC_BW_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_bw_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
+        _log("tc", f"starting bandwidth steps on h1 → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+    elif delay_prof:
         prof_path = expand_user_path(delay_prof)
         if not os.path.isfile(prof_path):
             _log("error", f"delay profile not found: {prof_path}")
@@ -532,7 +550,7 @@ def main():
     )
     parser.add_argument(
         "--utility-mode", default="T",
-        help="4D-MAP -utility-mode: T, D, L, auto (adaptive), or baseline (disables utility controller)",
+        help="4D-MAP -utility-mode: T, D, L, auto (adaptive), learn (pg weights), or baseline (disables utility controller)",
     )
     parser.add_argument(
         "--log-control", action="store_true",
@@ -558,6 +576,12 @@ def main():
         help="iperf3 listening port on h2 (default: 55201)",
     )
     dyn = parser.add_mutually_exclusive_group()
+    dyn.add_argument(
+        "--dynamic-bw-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: bandwidth steps on one interface (tc_bw_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile / --dynamic-loss-profile",
+    )
     dyn.add_argument(
         "--dynamic-delay-profile",
         metavar="PATH",
@@ -590,8 +614,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if (args.dynamic_delay_profile or args.dynamic_loss_profile) and not args.run_exp:
-        parser.error("--dynamic-delay-profile / --dynamic-loss-profile require --run-exp")
+    if (args.dynamic_bw_profile or args.dynamic_delay_profile or args.dynamic_loss_profile) and not args.run_exp:
+        parser.error("--dynamic-bw-profile / --dynamic-delay-profile / --dynamic-loss-profile require --run-exp")
 
     if args.list_scenarios:
         print("SCENARIOS (path_a = 10.0.1.x path, path_b = 10.0.2.x path):")

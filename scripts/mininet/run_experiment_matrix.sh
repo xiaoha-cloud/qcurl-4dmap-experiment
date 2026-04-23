@@ -2,7 +2,7 @@
 # Batch runner for mp_topo.py: Phase 1 (static) + Phase 2 (fixed T/D/L + dynamic tc) + Phase 3 (auto).
 #
 # Naming (do not confuse):
-#   --utility-mode T|D|L|auto|baseline = 4D-MAP mode (baseline = controller off)
+#   --utility-mode T|D|L|auto|learn|baseline = 4D-MAP mode (baseline = controller off, learn = pg weights)
 #   --scenario default|t|d|l|d_queue = Mininet TCLink preset (d_queue = like d + small path-B queue)
 #   --dynamic-delay-profile  = Phase 2/3: delay steps on path B only (one run)
 #   --dynamic-loss-profile   = Phase 2/3: loss steps (profile sets IFACE or IFACES; default = both paths)
@@ -43,10 +43,14 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 
 # -------------------- tune this block --------------------
+# Quick preset: 1 = skip the full matrix; run only Phase 2 LOSS (T,D,L × LOSS_PROFILE) + Phase 3 LOSS (auto).
+# When 1, the RUN_PHASE* flags below are overridden after this block.
+RUN_LOSS_ONLY=0
+
 # Phase 1: loop static SCENARIOS × UTILITIES (each run: one subdir, three QUIC logs + optional tc/iperf)
 RUN_PHASE1=1
 PHASE1_SCENARIOS=(default t d l) # append d_queue for queueing-delay-style path B (see mp_topo SCENARIOS)
-PHASE1_UTILS=(baseline T D L)
+PHASE1_UTILS=(baseline T D L learn)
 TIMEOUT_PHASE1=90
 
 # Phase 2: optional static baseline (no dynamic tc), then delay steps, then loss steps
@@ -54,7 +58,7 @@ RUN_PHASE2_BASELINE=1
 RUN_PHASE2_DELAY=1
 RUN_PHASE2_LOSS=1
 PHASE2_SCENARIO=default
-PHASE2_UTILS=(T D L)
+PHASE2_UTILS=(T D L learn)
 TIMEOUT_PHASE2=120
 DELAY_PROFILE="$ROOT/scripts/mininet/delay_profile.example.env"
 # Scheme A (dual-link netem): same loss on h1-eth0 + h1-eth1. For path-B-only, use loss_profile.example.env.
@@ -70,6 +74,16 @@ TIMEOUT_PHASE3=120
 
 # 1 = all runs under logs_exp/session_<timestamp>/…  ; 0 = flat logs_exp/vm_run_<RUN_ID>/
 USE_SESSION=1
+
+if [[ "$RUN_LOSS_ONLY" -eq 1 ]]; then
+  RUN_PHASE1=0
+  RUN_PHASE2_BASELINE=0
+  RUN_PHASE2_DELAY=0
+  RUN_PHASE2_LOSS=1
+  RUN_PHASE3_STATIC=0
+  RUN_PHASE3_DELAY=0
+  RUN_PHASE3_LOSS=1
+fi
 # ---------------------------------------------------------
 
 log() { echo "[$(date -Iseconds)] $*" >&2; }
