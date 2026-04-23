@@ -95,8 +95,22 @@ func utilityModeFromConfig(cfg *Config) UtilityMode {
 		return ModeT // initial mode; applyAdaptiveUtilityModeIfNeeded updates live
 	case "BASELINE", "OFF", "NONE", "DISABLE":
 		return ModeT // placeholder; controller will stay nil
+	case "LEARN", "PG", "GRAD", "LEARNED":
+		return ModeLearn
 	default:
 		return ModeT
+	}
+}
+
+func isUtilityLearned(cfg *Config) bool {
+	if cfg == nil {
+		return false
+	}
+	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
+	case "LEARN", "PG", "GRAD", "LEARNED":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -179,6 +193,8 @@ func (sch *scheduler) setup() {
 	sch.redundancy = 0
 	if isUtilityBaseline(sch.config) {
 		sch.utilityController = nil
+	} else if isUtilityLearned(sch.config) {
+		sch.utilityController = NewUtilityController(ModeLearn)
 	} else if isUtilityAdaptive(sch.config) {
 		sch.utilityController = NewUtilityController(ModeT)
 	} else {
@@ -2686,6 +2702,12 @@ func (m *monitor) monitorCurrentPathState(pth *path) {
 		pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
 		utils.Infof("[utility] path=%v mode=%s G=%.4f D=%.4f L=%.4f bw=%.2fMbps loss=%.4f owd=%.2fms gain=%.3f backoff=%.3f U=%.4f trend_ms=%.4f",
 			pth.pathID, sig.Mode, sig.NormG, sig.NormD, sig.NormL, pm.BWbps/1e6, pm.LossRate, pm.OWDms, sig.Gain, sig.Backoff, sig.Utility, sig.DelayTrend)
+		if m.utilityController.Mode == ModeLearn && pth.pathID == m.utilityController.LearnLeaderPathID() {
+			w := m.utilityController.GetLearnedWeights()
+			g0, g1, g2 := m.utilityController.GetLastLearnGradient()
+			utils.Infof("[learn] path=%v wT=%.4f wD=%.4f wL=%.4f grad=(%.4f,%.4f,%.4f) eta=%.4f floor=%.4f",
+				pth.pathID, w.WT, w.WD, w.WL, g0, g1, g2, m.utilityController.LearnDebugEta(), m.utilityController.LearnDebugEps())
+		}
 	}
 }
 
