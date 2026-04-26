@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Phase 2 (bandwidth-only): step egress rate on one interface.
+# For server→client bulk (pull), put IFACE on the **server** side (e.g. h2-eth1) so data is shaped.
 # Timeline is relative to when this script starts (before server/pull/push in --run-exp).
 # Profile format: see bw_profile.example.env
 set -euo pipefail

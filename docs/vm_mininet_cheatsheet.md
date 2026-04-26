@@ -88,7 +88,8 @@ sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \
 Swap `learn` for `T`, `D`, `L`, `auto`, or `baseline` for comparisons.
 
 **Fig.7-like topology preset** (`Link1=20Mbps,40ms,0%`; `Link2=20Mbps,20ms,0.001%`) with Link2
-capacity phases `20 -> 30 -> 10`:
+capacity phases `20 -> 30 -> 10`. Dynamic TBF runs on **h2-eth1** (server egress) so **pull** traffic
+is shaped; `tc_bw_*.log` will show `dev=h2-eth1`.
 
 ```bash
 cd /home/mininet/Project/4D-MAP

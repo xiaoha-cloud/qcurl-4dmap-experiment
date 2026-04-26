@@ -6,7 +6,7 @@ Time-based evaluation (paper-style): throughput vs time with tc capacity as shad
 - Y-axis: total throughput = sum over paths of ``mean tp`` (Mbps) per timestamp; then optional
   rolling mean for readability.
 - Background: regions from ``tc_bw_*.log`` (``tc_bw_steps.sh``): each step’s cap applies until the
-  next step; labels show the shaped link’s TBF rate (e.g. h1-eth0), not multipath sum.
+  next step; labels show the shaped interface’s TBF rate (e.g. h1-eth0 or h2-eth1), not multipath sum.
 
 This script does **not** use P1/P2/P3 phase bars. For per-window CSV stats, keep using
 ``route_a_evaluate.py``.
