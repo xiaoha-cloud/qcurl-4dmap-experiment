@@ -50,6 +50,10 @@ type UtilityWeights struct {
 	WL float64
 }
 
+// UtilityController drives fixed T/D/L and ModeLearn (Route A) for multipath 4D-MAP: blended
+// gain/backoff to OLIA (sentPacketHandler.SetUtilityControl → OliaSender). In ModeLearn, weights
+// (wT,wD,wL) on a bounded simplex follow projected-gradient steps on EMA(G,D,L) on the leader path.
+// This is not ACCeSS: no RFR, no offline alpha/beta/gamma.
 type UtilityController struct {
 	Mode UtilityMode
 
