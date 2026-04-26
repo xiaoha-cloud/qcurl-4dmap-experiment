@@ -87,6 +87,17 @@ sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \
 
 Swap `learn` for `T`, `D`, `L`, `auto`, or `baseline` for comparisons.
 
+**Fig.7-like topology preset** (`Link1=20Mbps,40ms,0%`; `Link2=20Mbps,20ms,0.001%`) with Link2
+capacity phases `20 -> 30 -> 10`:
+
+```bash
+cd /home/mininet/Project/4D-MAP
+sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \
+  --scenario fig7 --utility-mode learn --log-control \
+  --dynamic-bw-profile scripts/mininet/bw_profile.fig7_200s.env \
+  --input-flv /home/mininet/Videos/new_video_200s.flv
+```
+
 **Success checks:**
 
 - No `unsupport` in `push_*.log`.
