@@ -96,6 +96,14 @@ SCENARIOS = {
         "path_b": (15, "90ms", 0),
         "path_b_extra": {"max_queue_size": 25},
     },
+    # Paper Fig.7-like baseline:
+    #   Link1(path_a): 20Mbps, 40ms, 0%
+    #   Link2(path_b): 20Mbps, 20ms, 0.001%
+    # Combine with a dynamic bw profile on h1-eth1 (path_b) for 20/30/10 phases.
+    "fig7": {
+        "path_a": (20, "40ms", 0),
+        "path_b": (20, "20ms", 0.001),
+    },
 }
 
 
