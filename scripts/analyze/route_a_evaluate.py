@@ -5,6 +5,8 @@ Route A: aggregate metrics from existing Mininet logs (no experiment runner).
 - Parses pull_*.log + tc_bw_*.log via parse_logs.
 - Per-phase steady windows: route_a_four_steady_windows (0/50/100s design, 4×50s in pull time).
 - Writes CSVs under --out and optional matplotlib figures (Agg backend; safe headless).
+  Bar charts: ``figs/bar_*.png`` (per-phase side-by-side methods). Line charts: ``figs/line_*.png``
+  (each method a line across phases — use these for "trend over P1..Pn").
 
 This does **not** start mp_topo, sudo, or the client. Run experiments first, then point this
 script at one directory per {baseline,T,D,L,learn,auto} (or multiple replicates per method).
@@ -243,12 +245,14 @@ def main() -> None:
 
     methods = sorted(mpm["method"].unique())
     phases = sorted(mpm["phase"].unique().tolist())
-    for metric, title, fname in [
-        ("tp_mbps_mean", "Throughput (proxy, Mbps, phase mean of steady window)", "bar_tp_mbps.png"),
-        ("owd_ms_mean", "Mean OWD (ms)", "bar_owd_mean.png"),
-        ("rtt_ms_mean", "Mean RTT smoothed (ms)", "bar_rtt_mean.png"),
-        ("loss_mean", "Loss (utility, mean)", "bar_loss_utility.png"),
-    ]:
+    # Bar = compare methods *within* each phase (side-by-side). Line = *across* phases (trend) — use both.
+    plot_specs: list[tuple[str, str, str]] = [
+        ("tp_mbps_mean", "Throughput (proxy, Mbps, phase mean of steady window)", "tp_mbps"),
+        ("owd_ms_mean", "Mean OWD (ms)", "owd_ms"),
+        ("rtt_ms_mean", "Mean RTT smoothed (ms)", "rtt_ms"),
+        ("loss_mean", "Loss (utility, mean)", "loss"),
+    ]
+    for metric, title, stem in plot_specs:
         if metric not in mpm.columns:
             continue
         base = metric.replace("_mean", "")
@@ -258,7 +262,10 @@ def main() -> None:
         fig, ax = plt.subplots(figsize=(8, 4))
         for i, meth in enumerate(methods):
             sub = mpm[mpm["method"] == meth].set_index("phase")
-            ys = [float(sub.loc[p, metric]) if p in sub.index and metric in sub.columns else float("nan") for p in phases]
+            ys = [
+                float(sub.loc[p, metric]) if p in sub.index and metric in sub.columns else float("nan")
+                for p in phases
+            ]
             yerr = None
             if err_col in mpm.columns and metric.endswith("_mean"):
                 yerr = [
@@ -271,10 +278,44 @@ def main() -> None:
             else:
                 ax.bar(x + offset, ys, width=w, label=meth)
         ax.set_xticks(x, [f"P{p}" for p in phases])
-        ax.set_title(title)
+        ax.set_title(title + " (bar: within-phase compare)")
         ax.legend()
         fig.tight_layout()
-        fig.savefig(out / "figs" / fname, dpi=150)
+        fig.savefig(out / "figs" / f"bar_{stem}.png", dpi=150)
+        plt.close(fig)
+
+    # Line charts: one series per method, x = phase (across-phase trend; paper-friendly)
+    for metric, title, stem in plot_specs:
+        if metric not in mpm.columns:
+            continue
+        base = metric.replace("_mean", "")
+        err_col = base + "_std"
+        fig, ax = plt.subplots(figsize=(8, 4))
+        for meth in methods:
+            sub = mpm[mpm["method"] == meth].set_index("phase")
+            xs = [float(p) for p in phases]
+            ys = [
+                float(sub.loc[p, metric]) if p in sub.index and metric in sub.columns else float("nan")
+                for p in phases
+            ]
+            yerr = None
+            if err_col in mpm.columns:
+                yerr = [
+                    float(sub.loc[p, err_col]) if p in sub.index and err_col in sub.columns else 0.0
+                    for p in phases
+                ]
+            if yerr and any(e > 0 for e in yerr):
+                ax.errorbar(xs, ys, yerr=yerr, marker="o", capsize=3, linewidth=1.5, label=meth)
+            else:
+                ax.plot(xs, ys, marker="o", linewidth=1.5, label=meth)
+        if phases:
+            ax.set_xticks(phases, [f"P{int(p)}" for p in phases])
+        ax.set_xlabel("Phase")
+        ax.set_title(title + " (line: across-phase, mean±std if replicates)")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(out / "figs" / f"line_{stem}.png", dpi=150)
         plt.close(fig)
 
     for rspec in args.runs:
