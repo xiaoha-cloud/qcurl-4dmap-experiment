@@ -30,6 +30,12 @@ Usage:
   Phase 2 (dynamic perturbation; use one mode per run):
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 300 \\
       --utility-mode T --dynamic-bw-profile scripts/mininet/bw_profile.example.env
+    # Route A: online (wT,wD,wL) on simplex, ~200s media, capacity steps at 0/50/100s (see bw_profile.route_a_200s.env).
+    #   Copy new_video_200s.mp4 to ~/Videos/ and run:
+    #   If the publisher rejects MP4, remux once: ffmpeg -i new_video_200s.mp4 -c copy ~/Videos/new_video_200s.flv
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \\
+      --utility-mode learn --log-control --dynamic-bw-profile scripts/mininet/bw_profile.route_a_200s.env \\
+      --input-flv ~/Videos/new_video_200s.mp4
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
       --dynamic-delay-profile scripts/mininet/delay_profile.example.env
     sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
@@ -275,8 +281,8 @@ def run_experiment(net, args):
 
     # Pre-flight checks
     if not os.path.isfile(input_flv):
-        _log("error", f"input FLV not found: {input_flv}")
-        _log("error", "place file at ~/Videos/push_input.flv or pass --input-flv <path>")
+        _log("error", f"input media file not found: {input_flv}")
+        _log("error", "place file at ~/Videos/push_input.flv (or e.g. new_video_200s.mp4) or pass --input-flv <path>")
         return
     if not os.path.isfile(server_bin):
         _log("error", f"qserver binary not found: {server_bin}")
@@ -546,7 +552,7 @@ def main():
     )
     parser.add_argument(
         "--input-flv", default=None,
-        help="path to input FLV file for push (default: ~/Videos/push_input.flv)",
+        help="path to input media for push, e.g. .flv or .mp4 (default: ~/Videos/push_input.flv)",
     )
     parser.add_argument(
         "--utility-mode", default="T",

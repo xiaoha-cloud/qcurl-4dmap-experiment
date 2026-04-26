@@ -7,12 +7,24 @@ Log lines handled:
   [m]monitor path=X rtt_smoothed=.. rtt_min=.. bw=..B/s inflight=..
              cwnd_full=.. cwnd_room=.. loss=.. lost_B=..
   tc_delay / tc_loss   (written by tc_delay_steps.sh / tc_loss_steps.sh)
+  tc_bw               (written by tc_bw_steps.sh — capacity steps on one interface)
 
 Usage:
-    from parse_logs import load_pull_log, load_tc_log, find_run_dirs, load_labeled_vm_runs
+    from parse_logs import (
+        load_pull_log,
+        load_tc_log,
+        load_tc_bw_log,
+        phase_steady_windows_from_tc_bw,
+        find_run_dirs,
+        load_labeled_vm_runs,
+    )
 
     df_util, df_mon = load_pull_log("logs_exp/vm_run_XXX/pull_XXX.log", label="baseline")
     tc_steps       = load_tc_log("logs_exp/vm_run_XXX/tc_delay_XXX.log")
+    tc_bw          = load_tc_bw_log("logs_exp/vm_run_XXX/tc_bw_XXX.log")
+    ph = phase_steady_windows_from_tc_bw(".../tc_bw_*.log", ".../pull_*.log", experiment_end_sec=200)
+    ph4 = route_a_four_steady_windows(".../tc_bw_*.log", ".../pull_*.log")  # 50/100/150s design, 4×40s steady
+    # If pull t=0 matches tc t=0: steady_windows_from_phase_edges(ROUTE_A_PHASE_EDGES_SEC) → 10–50, 60–100, …
 
     # ACCeSS-style T/D/L comparison (three vm_run dirs, same scenario):
     df_util, df_mon, tc_steps = load_labeled_vm_runs({"T": t_dir, "D": d_dir, "L": l_dir})
@@ -20,14 +32,17 @@ Usage:
 
 from __future__ import annotations
 
+import math
 import re
-import glob
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Union
 
 import pandas as pd
+
+# Route A default designed phase edges (seconds from tc start, 200s run, steps at 0/50/100 in profile).
+ROUTE_A_PHASE_EDGES_SEC = (0, 50, 100, 150, 200)
 
 # ── regex patterns ──────────────────────────────────────────────────────────
 
@@ -63,6 +78,11 @@ _RE_TC_HEAD = re.compile(
 _RE_DELAY_MS = re.compile(r"delay=(?P<delay_ms>\d+)ms")
 _RE_LOSS_PCT = re.compile(r"loss=(?P<loss_pct>[^\s]+)%")
 _RE_TC_DEV = re.compile(r"dev=(?P<dev>[^\s]+)")
+
+# [2026-04-24T03:25:15+00:00] [tc_bw] step 1/3 at=0s bw=20mbit dev=h1-eth0
+_RE_TC_BW = re.compile(
+    r"\[tc_bw\]\s+step\s+(?P<i>\d+)/(?P<n>\d+)\s+at=(?P<at>\d+)s\s+bw=(?P<bw>\d+)mbit\s+dev=(?P<dev>\S+)"
+)
 
 # ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -198,6 +218,23 @@ def _parse_leading_iso_timestamp(line: str) -> Optional[float]:
         return None
 
 
+def first_utility_wall_unix(pull_path: Union[str, Path]) -> Optional[float]:
+    """Unix timestamp of the first [utility] line in a pull log (UTC-naive parsed as UTC)."""
+    pull_path = Path(pull_path)
+    with open(pull_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            mu = _RE_UTILITY.search(line)
+            if mu:
+                try:
+                    dt = datetime.strptime(
+                        mu["date"] + " " + mu["time"], "%Y/%m/%d %H:%M:%S"
+                    )
+                    return dt.replace(tzinfo=timezone.utc).timestamp()
+                except ValueError:
+                    continue
+    return None
+
+
 def estimate_tc_pull_offset_seconds(pull_path: Union[str, Path], tc_path: Union[str, Path]) -> float:
     """
     Seconds to add to tc ``at_sec`` so it aligns with pull log ``t``.
@@ -237,6 +274,245 @@ def estimate_tc_pull_offset_seconds(pull_path: Union[str, Path], tc_path: Union[
     if t_util is None or t_tc is None:
         return 0.0
     return float(t_tc - t_util)
+
+
+def estimate_tc_bw_pull_offset_seconds(pull_path: Union[str, Path], tc_bw_path: Union[str, Path]) -> float:
+    """
+    Same idea as ``estimate_tc_pull_offset_seconds``, but the first tc event is the first
+    ``[tc_bw] step`` line in ``tc_bw_path``.
+    """
+    pull_path, tc_bw_path = Path(pull_path), Path(tc_bw_path)
+    t_util = first_utility_wall_unix(pull_path)
+    t_tc: Optional[float] = None
+    with open(tc_bw_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            if _RE_TC_BW.search(line):
+                ts = _parse_leading_iso_timestamp(line)
+                if ts is not None:
+                    t_tc = ts
+                    break
+    if t_util is None or t_tc is None:
+        return 0.0
+    return float(t_tc - t_util)
+
+
+def load_tc_bw_log(path: Union[str, Path]) -> pd.DataFrame:
+    """
+    Parse a ``tc_bw_*.log`` file (``tc_bw_steps.sh``).
+
+    Each row is one applied step. Columns:
+
+    - ``at_sec`` — time from tc script start (matches profile)
+    - ``step_i``, ``step_n`` — 1-based index and total steps
+    - ``bw_mbit`` — shaped rate in Mbit/s
+    - ``dev`` — interface (e.g. h1-eth0)
+    - ``wall_unix`` — Unix time from the leading ``[ISO8601]`` prefix on that line (NaN if missing)
+    """
+    rows: list[dict] = []
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = _RE_TC_BW.search(line)
+            if not m:
+                continue
+            wu = _parse_leading_iso_timestamp(line)
+            rows.append({
+                "at_sec": int(m["at"]),
+                "step_i": int(m["i"]),
+                "step_n": int(m["n"]),
+                "bw_mbit": float(m["bw"]),
+                "dev": m["dev"],
+                "wall_unix": float(wu) if wu is not None else float("nan"),
+            })
+    return pd.DataFrame(rows)
+
+
+def tc_bw_with_pull_t(tc_bw_path: Union[str, Path], pull_path: Union[str, Path]) -> pd.DataFrame:
+    """
+    Join ``load_tc_bw_log`` with pull-timeline coordinates: ``t_pull`` = seconds from the first
+    ``[utility]`` line to the wall time of each tc step (uses ISO timestamps on tc lines).
+
+    This is more accurate than ``at_sec + offset`` when tc starts before the first utility log line.
+    """
+    df = load_tc_bw_log(tc_bw_path)
+    if df.empty:
+        return df.assign(t_pull=pd.Series(dtype=float))
+
+    t0 = first_utility_wall_unix(pull_path)
+    if t0 is None:
+        return df.assign(t_pull=float("nan"))
+
+    out = []
+    for _, row in df.iterrows():
+        wu = row["wall_unix"]
+        if wu is None or (isinstance(wu, float) and math.isnan(wu)):
+            out.append(float("nan"))
+        else:
+            out.append(float(wu) - t0)
+    df = df.copy()
+    df["t_pull"] = out
+    return df
+
+
+def steady_windows_from_phase_edges(
+    phase_edges_sec: tuple[float, ...],
+    *,
+    transition_sec: float = 10.0,
+) -> list[tuple[int, float, float]]:
+    """
+    Build steady analysis windows from **designed** phase edges (experiment time, same origin as pull ``t``).
+
+    For each segment ``[edges[i], edges[i+1])``, the steady window is
+    ``[edges[i] + transition_sec, edges[i+1])`` (no clipping). With 50s-long segments and
+    ``transition_sec=10``, each steady window is 40s.
+
+    Example: ``phase_edges_sec=(0, 50, 100, 150, 200)`` → four phases aligned to 50/100/150s boundaries.
+
+    Returns
+    -------
+    list of (phase_index_1based, t_steady_start, t_steady_end)
+    """
+    edges = tuple(phase_edges_sec)
+    if len(edges) < 2:
+        return []
+    win: list[tuple[int, float, float]] = []
+    for i in range(len(edges) - 1):
+        a, b = float(edges[i]), float(edges[i + 1])
+        ts, te = a + transition_sec, b
+        if te > ts:
+            win.append((i + 1, ts, te))
+    return win
+
+
+def phase_steady_windows_from_tc_bw(
+    tc_bw_path: Union[str, Path],
+    pull_path: Union[str, Path],
+    *,
+    transition_sec: float = 10.0,
+    experiment_end_sec: float = 200.0,
+) -> pd.DataFrame:
+    """
+    Steady windows derived from **actual** ``tc_bw`` step timestamps (ISO) vs first pull ``[utility]``.
+
+    Each row is one capacity segment after a step: from that step's ``t_pull`` until the next step
+    (or ``experiment_end_sec``). Steady sub-window skips the first ``transition_sec`` seconds in
+    each segment. ``bw_mbit`` is the cap in effect for that segment (value applied at the segment's
+    step line).
+
+    For a profile with steps at 0, 50, 100s and 200s end, you get three segments; add a design-time
+    fourth phase (e.g. 150–200s) by using :func:`steady_windows_from_phase_edges` with
+    ``(0, 50, 100, 150, 200)`` in pull time after you confirm alignment.
+    """
+    df = tc_bw_with_pull_t(tc_bw_path, pull_path)
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "phase",
+                "at_sec",
+                "bw_mbit",
+                "dev",
+                "t_step_pull",
+                "t_steady_start",
+                "t_steady_end",
+            ]
+        )
+    df = df.sort_values("at_sec").reset_index(drop=True)
+    rows: list[dict] = []
+    n = len(df)
+    for i in range(n):
+        seg_start = float(df.loc[i, "t_pull"])
+        if seg_start != seg_start:  # NaN
+            continue
+        seg_end = float(df.loc[i + 1, "t_pull"]) if i + 1 < n else float(experiment_end_sec)
+        ts = seg_start + transition_sec
+        te = seg_end
+        if te <= ts:
+            continue
+        rows.append({
+            "phase": i + 1,
+            "at_sec": int(df.loc[i, "at_sec"]),
+            "bw_mbit": float(df.loc[i, "bw_mbit"]),
+            "dev": str(df.loc[i, "dev"]),
+            "t_step_pull": seg_start,
+            "t_steady_start": ts,
+            "t_steady_end": te,
+        })
+    return pd.DataFrame(rows)
+
+
+def route_a_four_steady_windows(
+    tc_bw_path: Union[str, Path],
+    pull_path: Union[str, Path],
+    *,
+    transition_sec: float = 10.0,
+    experiment_end_sec: float = 200.0,
+) -> pd.DataFrame:
+    """
+    Four design phases in **pull** time: tc-design 0-50, 50-100, 100-150, 150-200 (s from tc start).
+
+    Uses observed ``t_pull`` for the steps at 0, 50, 100s. The 150s boundary is
+    ``t100 + (t50 - t0)`` (one 50s wall-clock span). Steady = skip ``transition_sec`` after each
+    edge; last segment ends at ``min(t150 + 50, experiment_end_sec)`` (i.e. up to 200s).
+
+    Returns columns: ``phase, tc_design_lo, tc_design_hi, t_steady_start, t_steady_end``.
+    """
+    dfp = tc_bw_with_pull_t(tc_bw_path, pull_path)
+    if dfp.empty:
+        return pd.DataFrame(
+            columns=[
+                "phase",
+                "tc_design_lo",
+                "tc_design_hi",
+                "t_steady_start",
+                "t_steady_end",
+            ]
+        )
+    need = {0, 50, 100}
+    have = set(dfp["at_sec"].astype(int).unique().tolist())
+    if not need <= have:
+        return pd.DataFrame(
+            columns=[
+                "phase",
+                "tc_design_lo",
+                "tc_design_hi",
+                "t_steady_start",
+                "t_steady_end",
+            ]
+        )
+
+    def _tp(sec: int) -> float:
+        r = dfp[dfp["at_sec"] == sec]
+        if r.empty:
+            return float("nan")
+        v = float(r.iloc[0]["t_pull"])
+        return v
+
+    t0, t50, t100 = _tp(0), _tp(50), _tp(100)
+    if any(math.isnan(x) for x in (t0, t50, t100)):
+        return pd.DataFrame(
+            columns=[
+                "phase",
+                "tc_design_lo",
+                "tc_design_hi",
+                "t_steady_start",
+                "t_steady_end",
+            ]
+        )
+    span = t50 - t0
+    t150 = t100 + span
+    t200 = min(t100 + 2.0 * span, float(experiment_end_sec))
+    edges = [(0, 50, t0, t50), (50, 100, t50, t100), (100, 150, t100, t150), (150, 200, t150, t200)]
+    rows_out: list[dict] = []
+    for i, (lo, hi, ea, eb) in enumerate(edges, start=1):
+        ts, te = ea + transition_sec, eb
+        if te > ts:
+            rows_out.append({
+                "phase": i,
+                "tc_design_lo": float(lo),
+                "tc_design_hi": float(hi),
+                "t_steady_start": ts,
+                "t_steady_end": te,
+            })
+    return pd.DataFrame(rows_out)
 
 
 def load_tc_log(path: Union[str, Path]) -> pd.DataFrame:
@@ -287,8 +563,11 @@ def find_run_dirs(logs_root: Union[str, Path] = "logs_exp") -> list:
             "server_log": next(d.glob("server_*.log"), None),
             "tc_delay_log": next(d.glob("tc_delay_*.log"), None),
             "tc_loss_log": next(d.glob("tc_loss_*.log"), None),
+            "tc_bw_log": next(d.glob("tc_bw_*.log"), None),
         }
-        if entry["tc_delay_log"]:
+        if entry["tc_bw_log"]:
+            entry["phase2_type"] = "bw"
+        elif entry["tc_delay_log"]:
             entry["phase2_type"] = "delay"
         elif entry["tc_loss_log"]:
             entry["phase2_type"] = "loss"
