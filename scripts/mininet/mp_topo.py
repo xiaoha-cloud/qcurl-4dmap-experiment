@@ -99,7 +99,8 @@ SCENARIOS = {
     # Paper Fig.7-like baseline:
     #   Link1(path_a): 20Mbps, 40ms, 0%
     #   Link2(path_b): 20Mbps, 20ms, 0.001%
-    # Combine with a dynamic bw profile on h1-eth1 (path_b) for 20/30/10 phases.
+    # Combine with dynamic TBF on h2-eth1 (server egress) + bw_profile.fig7_200s.env so
+    # pull (h2→h1) media is shaped; h1-eth1 egress would only limit ACKs, not goodput.
     "fig7": {
         "path_a": (20, "40ms", 0),
         "path_b": (20, "20ms", 0.001),
@@ -163,6 +164,29 @@ def resolve_repo_path(path):
     if os.path.isabs(path):
         return path
     return os.path.join(ROOT, path)
+
+
+def _tc_bw_host_for_profile(prof_path: str) -> str:
+    """
+    Mininet host on which to run ``tc_bw_steps.sh``: ``IFACE=`` in the profile must
+    exist in that node’s network namespace. For **pull (download)** experiments,
+    path-b caps on **server egress** (e.g. h2-eth1) actually limit h2→h1 throughput;
+    the same TBF on h1-eth1 would only limit client egress (ACKs), not the media stream.
+    """
+    try:
+        with open(prof_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                if line.startswith("IFACE="):
+                    iface = line.split("=", 1)[1].strip()
+                    if iface.startswith("h2-"):
+                        return "h2"
+                    break
+    except OSError:
+        pass
+    return "h1"
 
 
 def sanitize_run_label(name):
@@ -332,9 +356,11 @@ def run_experiment(net, args):
         tc_log_path = os.path.join(logdir, f"tc_bw_{run_id}.log")
         tc_log_f = open(tc_log_path, "w")
         cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
-        _log("tc", f"starting bandwidth steps on h1 → {tc_log_path}")
+        tc_node = _tc_bw_host_for_profile(prof_path)
+        tc_h = net.get(tc_node)
+        _log("tc", f"starting bandwidth steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
-        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+        tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
     elif delay_prof:
         prof_path = expand_user_path(delay_prof)
         if not os.path.isfile(prof_path):
