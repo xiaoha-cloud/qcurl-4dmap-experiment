@@ -172,8 +172,6 @@ Use the **directory that contains** `pull_*.log` and `tc_bw_*.log` in `-r method
 | `unsupport` in push | Use `.flv` from ffmpeg remux. |
 | Push exits in seconds | `push_*.log` tail; server log; rebuild `4dmap` / `qserver`. |
 | `tc_bw` only 1 line | Connection ended before next step; extend timeout or fix push. |
+| `unsupport` in push when using `--log-control` | **Fixed in `mp_topo`:** the RTMP URL must be the last `4dmap` argument. Older scripts put `-log-control` after the URL (pull/push; update repo). |
 | `flag not defined: -run-id` | Rebuild `4dmap` from current branch. |
 
----
-
-*Last aligned with profile `scripts/mininet/bw_profile.route_a_200s.env` (steps at 0, 50, 100 s) and branch `feature/online-projection-weights`.*

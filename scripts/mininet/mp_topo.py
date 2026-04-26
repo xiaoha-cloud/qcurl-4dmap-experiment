@@ -417,13 +417,16 @@ def run_experiment(net, args):
     pull_log_path = os.path.join(logdir, f"pull_{run_id}.log")
     pull_log = open(pull_log_path, "w")
     open(outfile, "w").close()  # touch
+    # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
+    # -log-control) must come before the URL, or the client prints "unsupport" and exits.
     lc = " -log-control" if getattr(args, "log_control", False) else ""
     pull_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
         f" -type=true -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(outfile)}"
-        f" -file={shlex.quote(outfile)} rtmp://10.0.1.2/live/test{lc}"
+        f"{lc}"
+        f" -file={shlex.quote(outfile)} rtmp://10.0.1.2/live/test"
     )
     _log("pull", f"starting on h1 → {pull_log_path}")
     pull_proc = h1.popen(
@@ -440,7 +443,8 @@ def run_experiment(net, args):
         f" -type=false -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(input_flv)}"
-        f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test{lc}"
+        f"{lc}"
+        f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test"
     )
     _log("push", f"starting on h1 → {push_log_path}")
     push_proc = h1.popen(
