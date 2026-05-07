@@ -7,11 +7,14 @@ Log lines handled:
   [m]monitor path=X rtt_smoothed=.. rtt_min=.. bw=..B/s inflight=..
              cwnd_full=.. cwnd_room=.. loss=.. lost_B=..
   tc_delay / tc_loss   (written by tc_delay_steps.sh / tc_loss_steps.sh)
+  [learn]   path=X wT=.. wD=.. wL=.. grad=(g0,g1,g2) eta=.. floor=..  (ModeLearn on leader path)
   tc_bw               (written by tc_bw_steps.sh — capacity steps on one interface)
 
 Usage:
     from parse_logs import (
         load_pull_log,
+        load_utility_gains,
+        load_learn_from_pull,
         load_tc_log,
         load_tc_bw_log,
         phase_steady_windows_from_tc_bw,
@@ -82,6 +85,15 @@ _RE_TC_DEV = re.compile(r"dev=(?P<dev>[^\s]+)")
 # [2026-04-24T03:25:15+00:00] [tc_bw] step 1/3 at=0s bw=20mbit dev=h1-eth0
 _RE_TC_BW = re.compile(
     r"\[tc_bw\]\s+step\s+(?P<i>\d+)/(?P<n>\d+)\s+at=(?P<at>\d+)s\s+bw=(?P<bw>\d+)mbit\s+dev=(?P<dev>\S+)"
+)
+
+# 2026/04/26 09:58:14 [learn] path=1 wT=0.3333 wD=0.3333 wL=0.3333 grad=(0.0,-0.0,-0.0) eta=0.0400 floor=0.0500
+_RE_LEARN = re.compile(
+    r"(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2})"
+    r".*?\[learn\] path=(?P<path>\d+)"
+    r" wT=(?P<wT>[\d.]+) wD=(?P<wD>[\d.]+) wL=(?P<wL>[\d.]+)"
+    r" grad=\((?P<g0>[-\d.]+),(?P<g1>[-\d.]+),(?P<g2>[-\d.]+)\)"
+    r" eta=(?P<eta>[\d.]+) floor=(?P<floor>[\d.]+)"
 )
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -201,6 +213,117 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
         df_util = df_util[df_util["U"].notna() & df_util["bw_mbps"].notna()]
 
     return df_util, df_mon
+
+
+def _first_metric_tod_sec(path: Union[str, Path]) -> int:
+    """Time-of-day (sec) of first ``[utility]`` or ``[m]monitor`` line — same origin as load_pull_log ``t``."""
+    p = Path(path)
+    with open(p, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = _RE_UTILITY.search(line) or _RE_MONITOR.search(line)
+            if m:
+                return _hms_to_sec(m["date"], m["time"])
+    return 0
+
+
+def load_utility_gains(path: Union[str, Path], label: str = "") -> pd.DataFrame:
+    """
+    All ``[utility]`` lines with ``t`` = seconds since first [utility] or [m]monitor (like ``load_pull_log``),
+    but **no** filter on U/bw. Use for time series of **gain** / **backoff** (early NaN values kept).
+    """
+    util_rows: list[dict] = []
+    t0: Optional[int] = None
+    p = Path(path)
+    with open(p, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            mu = _RE_UTILITY.search(line)
+            if mu:
+                ts = _hms_to_sec(mu["date"], mu["time"])
+                if t0 is None:
+                    t0 = ts
+                try:
+                    row = {
+                        "t": ts - t0,
+                        "path": int(mu["path"]),
+                        "mode": mu["mode"],
+                        "G": float(mu["G"]) if mu["G"] not in ("NaN", "nan") else float("nan"),
+                        "D": float(mu["D"]) if mu["D"] not in ("NaN", "nan") else float("nan"),
+                        "L": float(mu["L"]) if mu["L"] not in ("NaN", "nan") else float("nan"),
+                        "bw_mbps": float(mu["bw"]),
+                        "loss": float(mu["loss"]) if mu["loss"] not in ("NaN", "nan") else float("nan"),
+                        "owd_ms": float(mu["owd"]) if mu["owd"] not in ("NaN", "nan") else float("nan"),
+                        "gain": float(mu["gain"]) if mu["gain"] not in ("NaN", "nan") else float("nan"),
+                        "backoff": float(mu["backoff"]) if mu["backoff"] not in ("NaN", "nan") else float("nan"),
+                        "U": float(mu["U"]) if mu["U"] not in ("NaN", "nan") else float("nan"),
+                        "trend_ms": float(mu["trend"]) if mu["trend"] not in ("NaN", "nan") else float("nan"),
+                        "label": label,
+                    }
+                    util_rows.append(row)
+                except (ValueError, TypeError):
+                    pass
+                continue
+            mm = _RE_MONITOR.search(line)
+            if mm and t0 is None:
+                t0 = _hms_to_sec(mm["date"], mm["time"])
+    if not util_rows or t0 is None:
+        return pd.DataFrame(
+            columns=[
+                "t",
+                "path",
+                "mode",
+                "G",
+                "D",
+                "L",
+                "bw_mbps",
+                "loss",
+                "owd_ms",
+                "gain",
+                "backoff",
+                "U",
+                "trend_ms",
+                "label",
+            ]
+        )
+    return pd.DataFrame(util_rows)
+
+
+def load_learn_from_pull(path: Union[str, Path], label: str = "") -> pd.DataFrame:
+    """
+    Parse ``[learn]`` lines (ModeLearn: online ``wT,wD,wL`` and gradient on leader path).
+    ``t`` uses the same second-resolution origin as :func:`load_pull_log` (first [utility] or [m]monitor).
+    """
+    t0 = _first_metric_tod_sec(path)
+    rows: list[dict] = []
+    p = Path(path)
+    with open(p, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            ml = _RE_LEARN.search(line)
+            if not ml:
+                continue
+            try:
+                ts = _hms_to_sec(ml["date"], ml["time"])
+                rows.append(
+                    {
+                        "t": ts - t0,
+                        "path": int(ml["path"]),
+                        "wT": float(ml["wT"]),
+                        "wD": float(ml["wD"]),
+                        "wL": float(ml["wL"]),
+                        "g0": float(ml["g0"]),
+                        "g1": float(ml["g1"]),
+                        "g2": float(ml["g2"]),
+                        "eta": float(ml["eta"]),
+                        "floor": float(ml["floor"]),
+                        "label": label,
+                    }
+                )
+            except (ValueError, TypeError):
+                pass
+    if not rows:
+        return pd.DataFrame(
+            columns=["t", "path", "wT", "wD", "wL", "g0", "g1", "g2", "eta", "floor", "label"]
+        )
+    return pd.DataFrame(rows)
 
 
 def _parse_leading_iso_timestamp(line: str) -> Optional[float]:

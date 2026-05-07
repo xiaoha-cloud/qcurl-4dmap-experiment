@@ -1,0 +1,27 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+.git/
+derived/
+logs_exp/
+logs/
+pcap/
+qlog/
+results/
+Videos/
+*.log
+*.pcap
+*.qlog
+*.flv
+*.mp4
+*.mkv
+*.csv
+
+node_modules/
+.venv/
+venv/
+__pycache__/
+dist/
+build/
+
+lal-43DMAP/
+
+naza/
