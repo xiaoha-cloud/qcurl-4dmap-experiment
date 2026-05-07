@@ -53,10 +53,10 @@ PHASE1_SCENARIOS=(default t d l) # append d_queue for queueing-delay-style path 
 PHASE1_UTILS=(baseline T D L learn)
 TIMEOUT_PHASE1=90
 
-# Phase 2: optional static baseline (no dynamic tc), then delay steps, then loss steps
-RUN_PHASE2_BASELINE=1
-RUN_PHASE2_DELAY=1
-RUN_PHASE2_LOSS=1
+# Phase 2: dynamic perturbation batch (disabled by default to keep runs simple)
+RUN_PHASE2_BASELINE=0
+RUN_PHASE2_DELAY=0
+RUN_PHASE2_LOSS=0
 PHASE2_SCENARIO=default
 PHASE2_UTILS=(T D L learn)
 TIMEOUT_PHASE2=120
@@ -64,10 +64,10 @@ DELAY_PROFILE="$ROOT/scripts/mininet/delay_profile.example.env"
 # Scheme A (dual-link netem): same loss on h1-eth0 + h1-eth1. For path-B-only, use loss_profile.example.env.
 LOSS_PROFILE="$ROOT/scripts/mininet/loss_profile.both_paths.example.env"
 
-# Phase 3: adaptive utility only (auto). Compare phase3_delay_auto vs phase2_delay_* on the same profile.
-RUN_PHASE3_STATIC=1
-RUN_PHASE3_DELAY=1
-RUN_PHASE3_LOSS=1
+# Phase 3: adaptive utility batch (disabled by default; enable only if needed)
+RUN_PHASE3_STATIC=0
+RUN_PHASE3_DELAY=0
+RUN_PHASE3_LOSS=0
 PHASE3_SCENARIOS=(default t d l) # empty array + RUN_PHASE3_STATIC=0 to skip static auto sweep
 PHASE3_SCENARIO=default        # for dynamic delay/loss; set same as PHASE2_SCENARIO for A/B with Phase 2
 TIMEOUT_PHASE3=120

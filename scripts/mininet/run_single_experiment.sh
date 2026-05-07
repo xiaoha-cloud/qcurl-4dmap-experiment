@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
 # Minimal single-run wrapper for mp_topo.py
-# Goal: reproduce one simple static experiment only:
-#   scenario = fig7
-#   utility  = T
-#   dynamic perturbation = OFF (no delay/loss/bw profile)
+# Goal: run one fig7 experiment quickly, with optional dynamic profile.
 #
 # Usage:
 #   chmod +x scripts/mininet/run_single_experiment.sh
 #   sudo ./scripts/mininet/run_single_experiment.sh
 #
 # Optional env overrides:
-#   TIMEOUT=120 INPUT_FLV=~/Videos/push_input.flv LOG_CONTROL=1 sudo ./scripts/mininet/run_single_experiment.sh
+#   TIMEOUT=220 UTILITY_MODE=learn LOG_CONTROL=1 \
+#   BW_PROFILE=scripts/mininet/bw_profile.fig7_200s.env \
+#   sudo ./scripts/mininet/run_single_experiment.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 
-TIMEOUT="${TIMEOUT:-90}"
+TIMEOUT="${TIMEOUT:-220}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 UTILITY_MODE="${UTILITY_MODE:-T}"
+BW_PROFILE="${BW_PROFILE:-scripts/mininet/bw_profile.fig7_200s.env}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "[error] please run with sudo (Mininet requires root)" >&2
@@ -29,6 +29,11 @@ fi
 
 if [[ ! -f "$MP" ]]; then
   echo "[error] missing script: $MP" >&2
+  exit 1
+fi
+
+if [[ -n "$BW_PROFILE" && ! -f "$ROOT/$BW_PROFILE" && ! -f "$BW_PROFILE" ]]; then
+  echo "[error] missing BW_PROFILE: $BW_PROFILE" >&2
   exit 1
 fi
 
@@ -59,8 +64,15 @@ if [[ "$LOG_CONTROL" == "1" ]]; then
   CMD+=(--log-control)
 fi
 
-echo "[info] running single experiment (fig7 + T, no perturbation)"
+if [[ -n "$BW_PROFILE" ]]; then
+  CMD+=(--dynamic-bw-profile "$BW_PROFILE")
+fi
+
+echo "[info] running single experiment (fig7 + optional dynamic bw profile)"
 echo "[info] output root: $ROOT/$SESSION_DIR"
+echo "[info] timeout: $TIMEOUT"
+echo "[info] utility-mode: $UTILITY_MODE"
+echo "[info] bw-profile: ${BW_PROFILE:-<disabled>}"
 echo "[info] command: ${CMD[*]}"
 "${CMD[@]}"
 
