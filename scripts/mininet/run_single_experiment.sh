@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# Minimal single-run wrapper for mp_topo.py
+# Goal: reproduce one simple static experiment only:
+#   scenario = fig7
+#   utility  = T
+#   dynamic perturbation = OFF (no delay/loss/bw profile)
+#
+# Usage:
+#   chmod +x scripts/mininet/run_single_experiment.sh
+#   sudo ./scripts/mininet/run_single_experiment.sh
+#
+# Optional env overrides:
+#   TIMEOUT=120 INPUT_FLV=~/Videos/push_input.flv LOG_CONTROL=1 sudo ./scripts/mininet/run_single_experiment.sh
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+MP="$ROOT/scripts/mininet/mp_topo.py"
+
+TIMEOUT="${TIMEOUT:-90}"
+INPUT_FLV="${INPUT_FLV:-}"
+LOG_CONTROL="${LOG_CONTROL:-0}"
+UTILITY_MODE="${UTILITY_MODE:-T}"
+
+if [[ "$(id -u)" -ne 0 ]]; then
+  echo "[error] please run with sudo (Mininet requires root)" >&2
+  exit 1
+fi
+
+if [[ ! -f "$MP" ]]; then
+  echo "[error] missing script: $MP" >&2
+  exit 1
+fi
+
+cd "$ROOT"
+
+SESSION_DIR="logs_exp/session_$(date +%Y%m%d_%H%M%S)"
+mkdir -p "$SESSION_DIR"
+echo "$SESSION_DIR" > "logs_exp/.last_session"
+
+um_lc="$(printf '%s' "$UTILITY_MODE" | tr '[:upper:]' '[:lower:]')"
+RUN_LABEL="fig7_um_${um_lc}"
+
+CMD=(
+  python3 "$MP"
+  --run-exp
+  --scenario fig7
+  --utility-mode "$UTILITY_MODE"
+  --timeout "$TIMEOUT"
+  --log-parent "$SESSION_DIR"
+  --run-label "$RUN_LABEL"
+)
+
+if [[ -n "$INPUT_FLV" ]]; then
+  CMD+=(--input-flv "$INPUT_FLV")
+fi
+
+if [[ "$LOG_CONTROL" == "1" ]]; then
+  CMD+=(--log-control)
+fi
+
+echo "[info] running single experiment (fig7 + T, no perturbation)"
+echo "[info] output root: $ROOT/$SESSION_DIR"
+echo "[info] command: ${CMD[*]}"
+"${CMD[@]}"
+
+echo "[info] done"
+echo "[info] logs: $ROOT/$SESSION_DIR/$RUN_LABEL"
