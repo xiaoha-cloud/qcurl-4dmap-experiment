@@ -14,9 +14,28 @@ Usage:
   Interactive (default):
     sudo python3 scripts/mininet/mp_topo.py
 
+  One-shot experiment (server on h2, pull+push on h1, logs saved):
+    sudo python3 scripts/mininet/mp_topo.py --run-exp
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 90 --input-flv ~/Videos/push_input.flv
+    # Under sudo, ~/Videos resolves to the invoking user's home (SUDO_USER), not /root.
+
   Paper Fig.7-like baseline scenario:
     sudo python3 scripts/mininet/mp_topo.py --scenario fig7 --run-exp --utility-mode baseline
     sudo python3 scripts/mininet/mp_topo.py --list-scenarios
+
+  Phase 2 (dynamic perturbation; use one mode per run):
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 300 \\
+      --utility-mode T --dynamic-bw-profile scripts/mininet/bw_profile.example.env
+    # Route A: online (wT,wD,wL) on simplex, ~200s media, capacity steps at 0/50/100s (see bw_profile.route_a_200s.env).
+    #   Copy new_video_200s.mp4 to ~/Videos/ and run:
+    #   If the publisher rejects MP4, remux once: ffmpeg -i new_video_200s.mp4 -c copy ~/Videos/new_video_200s.flv
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \\
+      --utility-mode learn --log-control --dynamic-bw-profile scripts/mininet/bw_profile.route_a_200s.env \\
+      --input-flv ~/Videos/new_video_200s.mp4
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
+      --dynamic-delay-profile scripts/mininet/delay_profile.example.env
+    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
+      --dynamic-loss-profile scripts/mininet/loss_profile.example.env
 
   Group runs under one session directory (see run_experiment_matrix.sh):
     sudo python3 scripts/mininet/mp_topo.py --run-exp --log-parent logs_exp/session_20260402_001 \\
@@ -40,6 +59,9 @@ import time
 # Project root is two directories above this script (scripts/mininet/mp_topo.py -> root)
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MININET_DIR = os.path.join(ROOT, "scripts", "mininet")
+TC_DELAY_SCRIPT = os.path.join(MININET_DIR, "tc_delay_steps.sh")
+TC_LOSS_SCRIPT = os.path.join(MININET_DIR, "tc_loss_steps.sh")
+TC_BW_SCRIPT = os.path.join(MININET_DIR, "tc_bw_steps.sh")
 
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
 # Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP utility-mode selection.
@@ -113,6 +135,28 @@ def resolve_repo_path(path):
         return path
     return os.path.join(ROOT, path)
 
+
+def _tc_bw_host_for_profile(prof_path: str) -> str:
+    """
+    Mininet host on which to run ``tc_bw_steps.sh``: ``IFACE=`` in the profile must
+    exist in that node’s network namespace. For **pull (download)** experiments,
+    path-b caps on **server egress** (e.g. h2-eth1) actually limit h2→h1 throughput;
+    the same TBF on h1-eth1 would only limit client egress (ACKs), not the media stream.
+    """
+    try:
+        with open(prof_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if not line or "=" not in line:
+                    continue
+                if line.startswith("IFACE="):
+                    iface = line.split("=", 1)[1].strip()
+                    if iface.startswith("h2-"):
+                        return "h2"
+                    break
+    except OSError:
+        pass
+    return "h1"
 
 
 def sanitize_run_label(name):
@@ -301,6 +345,54 @@ def run_experiment(net, args):
     _log("exp", f"input   = {input_flv}")
     _log("exp", f"timeout = {args.timeout}s")
 
+    bw_prof = getattr(args, "dynamic_bw_profile", None)
+    delay_prof = getattr(args, "dynamic_delay_profile", None)
+    loss_prof = getattr(args, "dynamic_loss_profile", None)
+    if bw_prof:
+        prof_path = expand_user_path(bw_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"bw profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_BW_SCRIPT):
+            _log("error", f"tc_bw_steps.sh not found: {TC_BW_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_bw_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
+        tc_node = _tc_bw_host_for_profile(prof_path)
+        tc_h = net.get(tc_node)
+        _log("tc", f"starting bandwidth steps on {tc_node} → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+    elif delay_prof:
+        prof_path = expand_user_path(delay_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"delay profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_DELAY_SCRIPT):
+            _log("error", f"tc_delay_steps.sh not found: {TC_DELAY_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_delay_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
+        _log("tc", f"starting delay steps on h1 → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+    elif loss_prof:
+        prof_path = expand_user_path(loss_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"loss profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_LOSS_SCRIPT):
+            _log("error", f"tc_loss_steps.sh not found: {TC_LOSS_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logdir, f"tc_loss_{run_id}.log")
+        tc_log_f = open(tc_log_path, "w")
+        cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
+        _log("tc", f"starting loss steps on h1 → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+
     iperf_procs = []
     iperf_aux_files = []
     if getattr(args, "bg_iperf", False):
@@ -347,19 +439,11 @@ def run_experiment(net, args):
         env_prefix += " QUIC_GO_LOG_CONTROL=1"
     um = getattr(args, "utility_mode", "T")
 
-    keep_all_logs = getattr(args, "keep_all_logs", False)
-    null_log = None
-    if not keep_all_logs:
-        null_log = open(os.devnull, "w")
-
     # ---- Start server on h2 ------------------------------------------------
     server_log_path = os.path.join(logdir, f"server_{run_id}.log")
-    server_log = open(server_log_path, "w") if keep_all_logs else null_log
+    server_log = open(server_log_path, "w")
     server_cmd = f"{env_prefix} {server_bin} -protocol=quic -au=false"
-    if keep_all_logs:
-        _log("server", f"starting on h2 → {server_log_path}")
-    else:
-        _log("server", "starting on h2 (log redirected to /dev/null; use --keep-all-logs to keep file)")
+    _log("server", f"starting on h2 → {server_log_path}")
     server_proc = h2.popen(
         f"cd {server_dir} && {server_cmd}",
         stdout=server_log, stderr=server_log, shell=True,
@@ -390,7 +474,7 @@ def run_experiment(net, args):
 
     # ---- Start push on h1 --------------------------------------------------
     push_log_path = os.path.join(logdir, f"push_{run_id}.log")
-    push_log = open(push_log_path, "w") if keep_all_logs else null_log
+    push_log = open(push_log_path, "w")
     push_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
         f" -type=false -protocol=quic -multi=true -sch=rr"
@@ -399,10 +483,7 @@ def run_experiment(net, args):
         f"{lc}"
         f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test"
     )
-    if keep_all_logs:
-        _log("push", f"starting on h1 → {push_log_path}")
-    else:
-        _log("push", "starting on h1 (log redirected to /dev/null; use --keep-all-logs to keep file)")
+    _log("push", f"starting on h1 → {push_log_path}")
     push_proc = h1.popen(
         push_cmd,
         stdout=push_log, stderr=push_log, shell=True,
@@ -480,17 +561,9 @@ def run_experiment(net, args):
         except Exception:
             pass
 
-    # pull log is always persisted; server/push are optional and may share /dev/null.
-    if keep_all_logs:
-        for f in [server_log, pull_log, push_log]:
-            f.flush()
-            f.close()
-    else:
-        pull_log.flush()
-        pull_log.close()
-        if null_log is not None:
-            null_log.flush()
-            null_log.close()
+    for f in [server_log, pull_log, push_log]:
+        f.flush()
+        f.close()
     if tc_log_f is not None:
         tc_log_f.flush()
         tc_log_f.close()
@@ -559,16 +632,12 @@ def main():
         help="print SCENARIOS presets and exit (no Mininet)",
     )
     parser.add_argument(
-        "--timeout", type=int, default=180,
-        help="experiment hard timeout in seconds (default: 180)",
+        "--run-exp", action="store_true",
+        help="run one-shot experiment (server on h2, pull+push on h1) instead of interactive CLI",
     )
     parser.add_argument(
-        "--keep-all-logs",
-        action="store_true",
-        help=(
-            "persist server/push logs in addition to pull log. "
-            "Default keeps only pull log to reduce log volume."
-        ),
+        "--timeout", type=int, default=90,
+        help="experiment hard timeout in seconds (default: 90)",
     )
     parser.add_argument(
         "--input-flv", default=None,
@@ -601,6 +670,25 @@ def main():
         "--bg-iperf-port", type=int, default=55201,
         help="iperf3 listening port on h2 (default: 55201)",
     )
+    dyn = parser.add_mutually_exclusive_group()
+    dyn.add_argument(
+        "--dynamic-bw-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: bandwidth steps on one interface (tc_bw_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile / --dynamic-loss-profile",
+    )
+    dyn.add_argument(
+        "--dynamic-delay-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: path-B delay steps only (tc_delay_steps.sh); requires --run-exp; mutually exclusive with --dynamic-loss-profile",
+    )
+    dyn.add_argument(
+        "--dynamic-loss-profile",
+        metavar="PATH",
+        default=None,
+        help="Phase 2: path-B loss steps only (tc_loss_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile",
+    )
     parser.add_argument(
         "--log-parent",
         metavar="DIR",
@@ -620,6 +708,9 @@ def main():
         ),
     )
     args = parser.parse_args()
+
+    if (args.dynamic_bw_profile or args.dynamic_delay_profile or args.dynamic_loss_profile) and not args.run_exp:
+        parser.error("--dynamic-bw-profile / --dynamic-delay-profile / --dynamic-loss-profile require --run-exp")
 
     if args.list_scenarios:
         print("SCENARIOS (path_a = 10.0.1.x path, path_b = 10.0.2.x path):")
