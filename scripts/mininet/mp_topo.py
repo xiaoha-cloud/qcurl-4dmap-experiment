@@ -45,6 +45,7 @@ Usage:
 
 
 import argparse
+import csv
 import os
 import pwd
 import re
@@ -169,6 +170,46 @@ def sanitize_run_label(name):
     return name
 
 
+def _scenario_tag_for_dir(name):
+    """Compact scenario tag used in default run directory names."""
+    if name == "fig7":
+        return "figure7"
+    return sanitize_run_label(name)
+
+
+def _write_combined_log(output_path, inputs):
+    """Concatenate multiple logs into one file with section headers."""
+    with open(output_path, "w", encoding="utf-8", errors="replace") as out_f:
+        for label, in_path in inputs:
+            out_f.write(f"===== BEGIN {label}: {in_path} =====\n")
+            if os.path.isfile(in_path):
+                with open(in_path, "r", encoding="utf-8", errors="replace") as in_f:
+                    out_f.write(in_f.read())
+            else:
+                out_f.write("(missing log file)\n")
+            out_f.write(f"\n===== END {label} =====\n\n")
+
+
+def _split_throughput_csv(src_csv, out_a_csv, out_b_csv, out_total_csv):
+    """Split merged throughput CSV into pathA/pathB/total single-column CSV files."""
+    rows = []
+    with open(src_csv, "r", newline="", encoding="utf-8", errors="replace") as in_f:
+        reader = csv.DictReader(in_f)
+        for row in reader:
+            rows.append(row)
+
+    def write_single(out_path, key, header):
+        with open(out_path, "w", newline="", encoding="utf-8") as out_f:
+            writer = csv.writer(out_f)
+            writer.writerow(["time_s", header])
+            for row in rows:
+                writer.writerow([row.get("time_s", ""), row.get(key, "")])
+
+    write_single(out_a_csv, "pathA_Mbps", "pathA_down_Mbps")
+    write_single(out_b_csv, "pathB_Mbps", "pathB_down_Mbps")
+    write_single(out_total_csv, "total_Mbps", "total_down_Mbps")
+
+
 def _mp_topo_class():
     """Build MPTopo after Mininet imports (keeps --list-scenarios usable without Mininet)."""
     from mininet.link import TCLink
@@ -263,16 +304,20 @@ def run_experiment(net, args):
     else:
         parent = os.path.join(ROOT, "logs_exp")
 
+    scen = getattr(args, "scenario", "fig7")
+    um = getattr(args, "utility_mode", "T")
     if run_label:
         subdir = sanitize_run_label(run_label)
     else:
-        subdir = f"vm_run_{run_id}"
+        subdir = sanitize_run_label(f"{_scenario_tag_for_dir(scen)}_um_{um}")
 
     logdir = os.path.join(parent, subdir)
     os.makedirs(logdir, exist_ok=True)
 
-    pcap_dir = os.path.join(logdir, "pcap")
-    throughput_dir = os.path.join(logdir, "throughput")
+    logs_dir = os.path.join(logdir, "logs")
+    pcap_dir = os.path.join(logdir, "pcaps")
+    throughput_dir = os.path.join(logdir, "csv")
+    os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(pcap_dir, exist_ok=True)
     os.makedirs(throughput_dir, exist_ok=True)
 
@@ -281,8 +326,7 @@ def run_experiment(net, args):
 
     videos_dir = os.path.join(effective_home(), "Videos")
     os.makedirs(videos_dir, exist_ok=True)
-
-    outfile = os.path.join(videos_dir, f"pulled_{run_id}.flv")
+    outfile = os.path.join(logdir, f"output_{run_id}.flv")
     input_flv = (
         expand_user_path(args.input_flv)
         if args.input_flv
@@ -307,8 +351,10 @@ def run_experiment(net, args):
         _log("error", "build with: GO111MODULE=on go build -o 4dmap .")
         return
 
-    tcpdump_a_log = open(os.path.join(pcap_dir, f"tcpdump_pathA_{run_id}.log"), "w")
-    tcpdump_b_log = open(os.path.join(pcap_dir, f"tcpdump_pathB_{run_id}.log"), "w")
+    tcpdump_a_log_path = os.path.join(logs_dir, f"tcpdump_pathA_{run_id}.log")
+    tcpdump_b_log_path = os.path.join(logs_dir, f"tcpdump_pathB_{run_id}.log")
+    tcpdump_a_log = open(tcpdump_a_log_path, "w")
+    tcpdump_b_log = open(tcpdump_b_log_path, "w")
 
     _log("pcap", f"starting tcpdump path A h1-eth0 -> {pcap_a}")
     tcpdump_a = h1.popen(
@@ -332,7 +378,6 @@ def run_experiment(net, args):
     _log("exp", f"LOGDIR  = {logdir}")
     if log_parent or run_label:
         _log("exp", f"log_parent = {log_parent!r}  run_label = {run_label!r}")
-    scen = getattr(args, "scenario", "fig7")
     cfg = SCENARIOS[scen]
     pa, pb = cfg["path_a"], cfg["path_b"]
     _log(
@@ -356,7 +401,7 @@ def run_experiment(net, args):
         if not os.path.isfile(TC_BW_SCRIPT):
             _log("error", f"tc_bw_steps.sh not found: {TC_BW_SCRIPT}")
             return
-        tc_log_path = os.path.join(logdir, f"tc_bw_{run_id}.log")
+        tc_log_path = os.path.join(logs_dir, f"tc_bw_{run_id}.log")
         tc_log_f = open(tc_log_path, "w")
         cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
         tc_node = _tc_bw_host_for_profile(prof_path)
@@ -372,7 +417,7 @@ def run_experiment(net, args):
         if not os.path.isfile(TC_DELAY_SCRIPT):
             _log("error", f"tc_delay_steps.sh not found: {TC_DELAY_SCRIPT}")
             return
-        tc_log_path = os.path.join(logdir, f"tc_delay_{run_id}.log")
+        tc_log_path = os.path.join(logs_dir, f"tc_delay_{run_id}.log")
         tc_log_f = open(tc_log_path, "w")
         cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
         _log("tc", f"starting delay steps on h1 → {tc_log_path}")
@@ -386,7 +431,7 @@ def run_experiment(net, args):
         if not os.path.isfile(TC_LOSS_SCRIPT):
             _log("error", f"tc_loss_steps.sh not found: {TC_LOSS_SCRIPT}")
             return
-        tc_log_path = os.path.join(logdir, f"tc_loss_{run_id}.log")
+        tc_log_path = os.path.join(logs_dir, f"tc_loss_{run_id}.log")
         tc_log_f = open(tc_log_path, "w")
         cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
         _log("tc", f"starting loss steps on h1 → {tc_log_path}")
@@ -405,8 +450,8 @@ def run_experiment(net, args):
         bw = getattr(args, "bg_iperf_bw", "10M")
         path_key = getattr(args, "bg_iperf_path", "b")
         dst = "10.0.1.2" if path_key == "a" else "10.0.2.2"
-        srv_log = os.path.join(logdir, f"iperf_server_{run_id}.log")
-        cli_log = os.path.join(logdir, f"iperf_client_{run_id}.log")
+        srv_log = os.path.join(logs_dir, f"iperf_server_{run_id}.log")
+        cli_log = os.path.join(logs_dir, f"iperf_client_{run_id}.log")
         srv_f = open(srv_log, "w")
         cli_f = open(cli_log, "w")
         iperf_aux_files.extend([srv_f, cli_f])
@@ -437,10 +482,8 @@ def run_experiment(net, args):
     env_prefix = "QUIC_GO_LOG_LEVEL=info"
     if getattr(args, "log_control", False):
         env_prefix += " QUIC_GO_LOG_CONTROL=1"
-    um = getattr(args, "utility_mode", "T")
-
     # ---- Start server on h2 ------------------------------------------------
-    server_log_path = os.path.join(logdir, f"server_{run_id}.log")
+    server_log_path = os.path.join(logs_dir, f"server_{run_id}.log")
     server_log = open(server_log_path, "w")
     server_cmd = f"{env_prefix} {server_bin} -protocol=quic -au=false"
     _log("server", f"starting on h2 → {server_log_path}")
@@ -451,7 +494,7 @@ def run_experiment(net, args):
     time.sleep(3)
 
     # ---- Start pull on h1 --------------------------------------------------
-    pull_log_path = os.path.join(logdir, f"pull_{run_id}.log")
+    pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
     pull_log = open(pull_log_path, "w")
     open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
@@ -473,7 +516,7 @@ def run_experiment(net, args):
     time.sleep(3)
 
     # ---- Start push on h1 --------------------------------------------------
-    push_log_path = os.path.join(logdir, f"push_{run_id}.log")
+    push_log_path = os.path.join(logs_dir, f"push_{run_id}.log")
     push_log = open(push_log_path, "w")
     push_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
@@ -582,9 +625,12 @@ def run_experiment(net, args):
             pass
 
     analyzer = os.path.join(ROOT, "scripts", "analyze", "pcap_throughput.py")
-    throughput_csv = os.path.join(throughput_dir, "throughput_down_10s.csv")
-    tshark_summary = os.path.join(throughput_dir, "tshark_summary_down_10s.log")
-    tshark_err = os.path.join(throughput_dir, "tshark_summary_down_10s.err")
+    throughput_csv = os.path.join(throughput_dir, f"throughput_all_down_{run_id}.csv")
+    throughput_a_csv = os.path.join(throughput_dir, f"throughput_pathA_down_{run_id}.csv")
+    throughput_b_csv = os.path.join(throughput_dir, f"throughput_pathB_down_{run_id}.csv")
+    throughput_total_csv = os.path.join(throughput_dir, f"throughput_total_down_{run_id}.csv")
+    tshark_summary = os.path.join(logs_dir, f"tshark_summary_down_10s_{run_id}.log")
+    tshark_err = os.path.join(logs_dir, f"tshark_summary_down_10s_{run_id}.err")
     if shutil.which("tshark") and os.path.isfile(analyzer):
         _log("tshark", f"generating throughput csv -> {throughput_csv}")
         try:
@@ -603,10 +649,32 @@ def run_experiment(net, args):
                     stderr=err_f,
                     check=False,
                 )
+            if os.path.isfile(throughput_csv):
+                _split_throughput_csv(
+                    throughput_csv,
+                    throughput_a_csv,
+                    throughput_b_csv,
+                    throughput_total_csv,
+                )
+                _log("tshark", f"split csv -> {throughput_a_csv}, {throughput_b_csv}, {throughput_total_csv}")
         except Exception as e:
             _log("tshark", f"failed to generate throughput csv: {e}")
     else:
         _log("tshark", "skip throughput csv: tshark or analyzer script not found")
+
+    combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
+    _write_combined_log(
+        combined_log_path,
+        [
+            ("SERVER", server_log_path),
+            ("PULL", pull_log_path),
+            ("PUSH", push_log_path),
+            ("TCPDUMP_PATH_A", tcpdump_a_log_path),
+            ("TCPDUMP_PATH_B", tcpdump_b_log_path),
+            ("TC", tc_log_path or ""),
+        ],
+    )
+    _log("exp", f"combined log -> {combined_log_path}")
 
     _log("exp", f"done! logs saved to {logdir}")
     _log("exp", "--- quick check commands ---")
@@ -695,7 +763,7 @@ def main():
         default=None,
         help=(
             "Place this run under ROOT/DIR (or absolute DIR). "
-            "Default parent is logs_exp. Subdir is vm_run_<RUN_ID> unless --run-label is set."
+            "Default parent is logs_exp. Subdir defaults to <scenario>_um_<utility-mode> unless --run-label is set."
         ),
     )
     parser.add_argument(
@@ -703,8 +771,8 @@ def main():
         metavar="NAME",
         default=None,
         help=(
-            "Folder name under --log-parent (sanitized) instead of vm_run_<RUN_ID>. "
-            "Log files still use RUN_ID in their names. Example: phase1_default_T."
+            "Folder name under --log-parent (sanitized) instead of the default <scenario>_um_<utility-mode>. "
+            "Log files still use RUN_ID in their names. Example: fig7_um_learn."
         ),
     )
     args = parser.parse_args()
