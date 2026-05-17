@@ -11,6 +11,7 @@ RUN_ID="$(date +%Y%m%d_%H%M%S)"
 LOGDIR="$ROOT/logs_exp/vm_run_${RUN_ID}"
 OUTFILE="${HOME}/Videos/pulled_${RUN_ID}.flv"
 INPUT_FLV="${INPUT_FLV:-$HOME/Videos/push_input.flv}"
+SAVE_LOGS="${SAVE_LOGS:-0}"
 
 mkdir -p "$LOGDIR"
 mkdir -p "$(dirname "$OUTFILE")"
@@ -31,11 +32,12 @@ fi
 
 export RUN_ID
 export LOGDIR
-export QUIC_GO_LOG_LEVEL="${QUIC_GO_LOG_LEVEL:-info}"
+export QUIC_GO_LOG_LEVEL="${QUIC_GO_LOG_LEVEL:-error}"
 
 echo "RUN_ID=$RUN_ID"
 echo "LOGDIR=$LOGDIR"
 echo "INPUT_FLV=$INPUT_FLV"
+echo "SAVE_LOGS=$SAVE_LOGS"
 echo "$RUN_ID" >"$ROOT/.last_run_id"
 
 file_size() {
@@ -62,10 +64,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
+setup_role_log() {
+	local log_file="$1"
+	if [[ "$SAVE_LOGS" == "1" ]]; then
+		exec > >(tee -a "$log_file") 2>&1
+	else
+		exec >/dev/null 2>&1
+	fi
+}
+
+watchdog_log() {
+	if [[ "$SAVE_LOGS" == "1" ]]; then
+		tee -a "${LOGDIR}/watchdog_${RUN_ID}.log"
+	else
+		cat
+	fi
+}
+
 echo "[start] launching server..."
 (
 	cd "$SERVER_DIR"
-	exec > >(tee -a "${LOGDIR}/server_${RUN_ID}.log") 2>&1
+	setup_role_log "${LOGDIR}/server_${RUN_ID}.log"
 	echo "[server] cwd=$(pwd)"
 	echo "[server] start $(date -Iseconds 2>/dev/null || date)"
 	exec "$ROOT/qserver" -protocol=quic -au=false
@@ -77,7 +96,7 @@ sleep 3
 echo "[start] launching pull..."
 (
 	cd "$ROOT"
-	exec > >(tee -a "${LOGDIR}/pull_${RUN_ID}.log") 2>&1
+	setup_role_log "${LOGDIR}/pull_${RUN_ID}.log"
 	echo "[pull] cwd=$(pwd)"
 	echo "[pull] outfile=$OUTFILE"
 	echo "[pull] start $(date -Iseconds 2>/dev/null || date)"
@@ -91,7 +110,7 @@ PUSH_TIMEOUT="${PUSH_TIMEOUT:-90}"
 echo "[start] launching push (timeout ${PUSH_TIMEOUT}s)..."
 (
 	cd "$ROOT"
-	exec > >(tee -a "${LOGDIR}/push_${RUN_ID}.log") 2>&1
+	setup_role_log "${LOGDIR}/push_${RUN_ID}.log"
 	echo "[push] cwd=$(pwd)"
 	echo "[push] input=$INPUT_FLV"
 	echo "[push] start $(date -Iseconds 2>/dev/null || date)"
@@ -126,7 +145,7 @@ while true; do
 
 	current_size=$(file_size "$OUTFILE")
 	echo "[watchdog] $(date '+%F %T') size=${current_size}B stable=${stable_count} push_alive=${push_alive} pull_alive=${pull_alive}" |
-		tee -a "${LOGDIR}/watchdog_${RUN_ID}.log"
+		watchdog_log
 
 	if [[ "$current_size" -gt "$last_size" ]]; then
 		stable_count=0
@@ -136,13 +155,13 @@ while true; do
 	fi
 
 	if [[ "$push_alive" -eq 0 ]]; then
-		echo "[watchdog] push exited" | tee -a "${LOGDIR}/watchdog_${RUN_ID}.log"
+		echo "[watchdog] push exited" | watchdog_log
 		break
 	fi
 
 	if [[ "$stable_count" -ge "$max_stable_rounds" ]]; then
 		echo "[watchdog] output stalled (${max_stable_rounds}x${poll_interval}s), terminating run" |
-			tee -a "${LOGDIR}/watchdog_${RUN_ID}.log"
+			watchdog_log
 		break
 	fi
 
@@ -150,9 +169,17 @@ while true; do
 done
 
 echo "[finish] collecting tails..."
-tail -n 30 "${LOGDIR}/server_${RUN_ID}.log" >"${LOGDIR}/server_tail_${RUN_ID}.log" 2>/dev/null || true
-tail -n 30 "${LOGDIR}/pull_${RUN_ID}.log" >"${LOGDIR}/pull_tail_${RUN_ID}.log" 2>/dev/null || true
-tail -n 30 "${LOGDIR}/push_${RUN_ID}.log" >"${LOGDIR}/push_tail_${RUN_ID}.log" 2>/dev/null || true
+if [[ "$SAVE_LOGS" == "1" ]]; then
+	tail -n 30 "${LOGDIR}/server_${RUN_ID}.log" >"${LOGDIR}/server_tail_${RUN_ID}.log" 2>/dev/null || true
+	tail -n 30 "${LOGDIR}/pull_${RUN_ID}.log" >"${LOGDIR}/pull_tail_${RUN_ID}.log" 2>/dev/null || true
+	tail -n 30 "${LOGDIR}/push_${RUN_ID}.log" >"${LOGDIR}/push_tail_${RUN_ID}.log" 2>/dev/null || true
+else
+	echo "[finish] runtime logs disabled; set SAVE_LOGS=1 to keep role/watchdog logs"
+fi
 
-echo "[done] logs saved in $LOGDIR"
-echo "[done] exit codes: check push/pull/server in logs; watchdog_${RUN_ID}.log for stall decision"
+echo "[done] outputs saved in $LOGDIR"
+if [[ "$SAVE_LOGS" == "1" ]]; then
+	echo "[done] exit codes: check push/pull/server in logs; watchdog_${RUN_ID}.log for stall decision"
+else
+	echo "[done] runtime logs were disabled; rerun with SAVE_LOGS=1 to keep logs"
+fi

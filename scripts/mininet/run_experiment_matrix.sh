@@ -75,6 +75,9 @@ TIMEOUT_PHASE3=120
 # 1 = all runs under logs_exp/session_<timestamp>/…  ; 0 = flat logs_exp/vm_run_<RUN_ID>/
 USE_SESSION=1
 
+# 0 = discard verbose role/tc/tcpdump/tshark logs; set SAVE_LOGS=1 when debugging.
+SAVE_LOGS="${SAVE_LOGS:-0}"
+
 if [[ "$RUN_LOSS_ONLY" -eq 1 ]]; then
   RUN_PHASE1=0
   RUN_PHASE2_BASELINE=0
@@ -105,6 +108,10 @@ init_session() {
     log "SESSION_DIR=$SESSION_DIR (all runs this batch go here)"
     mkdir -p "$ROOT/logs_exp"
     echo "$SESSION_DIR" > "$ROOT/logs_exp/.last_session"
+  fi
+  if [[ "$SAVE_LOGS" != "1" ]]; then
+    MP_EXTRA+=(--disable-logs)
+    log "SAVE_LOGS=0 (runtime logs disabled; set SAVE_LOGS=1 to keep them)"
   fi
 }
 

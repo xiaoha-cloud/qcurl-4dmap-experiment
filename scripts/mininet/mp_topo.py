@@ -190,6 +190,11 @@ def _write_combined_log(output_path, inputs):
             out_f.write(f"\n===== END {label} =====\n\n")
 
 
+def _open_log_file(path, save_logs=True):
+    """Open a log destination; /dev/null keeps runs quiet when logs are disabled."""
+    return open(path if save_logs else os.devnull, "w")
+
+
 def _split_throughput_csv(src_csv, out_a_csv, out_b_csv, out_total_csv):
     """Split merged throughput CSV into pathA/pathB/total single-column CSV files."""
     rows = []
@@ -287,6 +292,7 @@ def _log(tag, msg):
 def run_experiment(net, args):
     h1 = net.get("h1")
     h2 = net.get("h2")
+    save_logs = not getattr(args, "disable_logs", False)
     tc_proc = None
     tc_log_path = None
     tc_log_f = None
@@ -353,8 +359,8 @@ def run_experiment(net, args):
 
     tcpdump_a_log_path = os.path.join(logs_dir, f"tcpdump_pathA_{run_id}.log")
     tcpdump_b_log_path = os.path.join(logs_dir, f"tcpdump_pathB_{run_id}.log")
-    tcpdump_a_log = open(tcpdump_a_log_path, "w")
-    tcpdump_b_log = open(tcpdump_b_log_path, "w")
+    tcpdump_a_log = _open_log_file(tcpdump_a_log_path, save_logs)
+    tcpdump_b_log = _open_log_file(tcpdump_b_log_path, save_logs)
 
     _log("pcap", f"starting tcpdump path A h1-eth0 -> {pcap_a}")
     tcpdump_a = h1.popen(
@@ -376,6 +382,8 @@ def run_experiment(net, args):
 
     _log("exp", f"RUN_ID  = {run_id}")
     _log("exp", f"LOGDIR  = {logdir}")
+    if not save_logs:
+        _log("exp", "runtime logs disabled (--disable-logs); role/tc/tcpdump/tshark logs go to /dev/null")
     if log_parent or run_label:
         _log("exp", f"log_parent = {log_parent!r}  run_label = {run_label!r}")
     cfg = SCENARIOS[scen]
@@ -402,7 +410,7 @@ def run_experiment(net, args):
             _log("error", f"tc_bw_steps.sh not found: {TC_BW_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_bw_{run_id}.log")
-        tc_log_f = open(tc_log_path, "w")
+        tc_log_f = _open_log_file(tc_log_path, save_logs)
         cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)
@@ -418,7 +426,7 @@ def run_experiment(net, args):
             _log("error", f"tc_delay_steps.sh not found: {TC_DELAY_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_delay_{run_id}.log")
-        tc_log_f = open(tc_log_path, "w")
+        tc_log_f = _open_log_file(tc_log_path, save_logs)
         cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
         _log("tc", f"starting delay steps on h1 → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
@@ -432,7 +440,7 @@ def run_experiment(net, args):
             _log("error", f"tc_loss_steps.sh not found: {TC_LOSS_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_loss_{run_id}.log")
-        tc_log_f = open(tc_log_path, "w")
+        tc_log_f = _open_log_file(tc_log_path, save_logs)
         cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
         _log("tc", f"starting loss steps on h1 → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
@@ -452,8 +460,8 @@ def run_experiment(net, args):
         dst = "10.0.1.2" if path_key == "a" else "10.0.2.2"
         srv_log = os.path.join(logs_dir, f"iperf_server_{run_id}.log")
         cli_log = os.path.join(logs_dir, f"iperf_client_{run_id}.log")
-        srv_f = open(srv_log, "w")
-        cli_f = open(cli_log, "w")
+        srv_f = _open_log_file(srv_log, save_logs)
+        cli_f = _open_log_file(cli_log, save_logs)
         iperf_aux_files.extend([srv_f, cli_f])
         _log("exp", f"bg-iperf3 server on h2 port {port} → {srv_log}")
         iperf_procs.append(
@@ -484,7 +492,7 @@ def run_experiment(net, args):
         env_prefix += " QUIC_GO_LOG_CONTROL=1"
     # ---- Start server on h2 ------------------------------------------------
     server_log_path = os.path.join(logs_dir, f"server_{run_id}.log")
-    server_log = open(server_log_path, "w")
+    server_log = _open_log_file(server_log_path, save_logs)
     server_cmd = f"{env_prefix} {server_bin} -protocol=quic -au=false"
     _log("server", f"starting on h2 → {server_log_path}")
     server_proc = h2.popen(
@@ -495,7 +503,7 @@ def run_experiment(net, args):
 
     # ---- Start pull on h1 --------------------------------------------------
     pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
-    pull_log = open(pull_log_path, "w")
+    pull_log = _open_log_file(pull_log_path, save_logs)
     open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
     # -log-control) must come before the URL, or the client prints "unsupport" and exits.
@@ -517,7 +525,7 @@ def run_experiment(net, args):
 
     # ---- Start push on h1 --------------------------------------------------
     push_log_path = os.path.join(logs_dir, f"push_{run_id}.log")
-    push_log = open(push_log_path, "w")
+    push_log = _open_log_file(push_log_path, save_logs)
     push_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
         f" -type=false -protocol=quic -multi=true -sch=rr"
@@ -635,7 +643,7 @@ def run_experiment(net, args):
         _log("tshark", f"generating throughput csv -> {throughput_csv}")
         try:
             import subprocess
-            with open(tshark_summary, "w") as out_f, open(tshark_err, "w") as err_f:
+            with _open_log_file(tshark_summary, save_logs) as out_f, _open_log_file(tshark_err, save_logs) as err_f:
                 subprocess.run(
                     [
                         "python3", analyzer,
@@ -662,26 +670,28 @@ def run_experiment(net, args):
     else:
         _log("tshark", "skip throughput csv: tshark or analyzer script not found")
 
-    combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
-    _write_combined_log(
-        combined_log_path,
-        [
-            ("SERVER", server_log_path),
-            ("PULL", pull_log_path),
-            ("PUSH", push_log_path),
-            ("TCPDUMP_PATH_A", tcpdump_a_log_path),
-            ("TCPDUMP_PATH_B", tcpdump_b_log_path),
-            ("TC", tc_log_path or ""),
-        ],
-    )
-    _log("exp", f"combined log -> {combined_log_path}")
+    if save_logs:
+        combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
+        _write_combined_log(
+            combined_log_path,
+            [
+                ("SERVER", server_log_path),
+                ("PULL", pull_log_path),
+                ("PUSH", push_log_path),
+                ("TCPDUMP_PATH_A", tcpdump_a_log_path),
+                ("TCPDUMP_PATH_B", tcpdump_b_log_path),
+                ("TC", tc_log_path or ""),
+            ],
+        )
+        _log("exp", f"combined log -> {combined_log_path}")
 
-    _log("exp", f"done! logs saved to {logdir}")
-    _log("exp", "--- quick check commands ---")
-    _log("exp", f"grep '[m]monitor path=' {pull_log_path} | head -30")
-    _log("exp", f"grep '[utility]'        {pull_log_path} | head -30")
-    if tc_log_path:
-        _log("exp", f"tc timeline log: {tc_log_path}")
+    _log("exp", f"done! outputs saved to {logdir}")
+    if save_logs:
+        _log("exp", "--- quick check commands ---")
+        _log("exp", f"grep '[m]monitor path=' {pull_log_path} | head -30")
+        _log("exp", f"grep '[utility]'        {pull_log_path} | head -30")
+        if tc_log_path:
+            _log("exp", f"tc timeline log: {tc_log_path}")
 
 
 def main():
@@ -718,6 +728,10 @@ def main():
     parser.add_argument(
         "--log-control", action="store_true",
         help="enable [control] ACK/LOSS cwnd logs (sets -log-control and QUIC_GO_LOG_CONTROL=1; very verbose)",
+    )
+    parser.add_argument(
+        "--disable-logs", action="store_true",
+        help="discard server/pull/push/tc/tcpdump/tshark logs and skip combined_*.log (pcaps/csv/output FLV are still produced)",
     )
     parser.add_argument(
         "--bg-iperf", action="store_true",
