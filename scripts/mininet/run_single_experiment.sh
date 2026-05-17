@@ -21,6 +21,7 @@ INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 UTILITY_MODE="${UTILITY_MODE:-T}"
 BW_PROFILE="${BW_PROFILE:-scripts/mininet/bw_profile.fig7_200s.env}"
+SAVE_LOGS="${SAVE_LOGS:-0}"
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "[error] please run with sudo (Mininet requires root)" >&2
@@ -56,6 +57,10 @@ CMD=(
   --run-label "$RUN_LABEL"
 )
 
+if [[ "$SAVE_LOGS" != "1" ]]; then
+  CMD+=(--disable-logs)
+fi
+
 if [[ -n "$INPUT_FLV" ]]; then
   CMD+=(--input-flv "$INPUT_FLV")
 fi
@@ -73,6 +78,7 @@ echo "[info] output root: $ROOT/$SESSION_DIR"
 echo "[info] timeout: $TIMEOUT"
 echo "[info] utility-mode: $UTILITY_MODE"
 echo "[info] bw-profile: ${BW_PROFILE:-<disabled>}"
+echo "[info] save-logs: $SAVE_LOGS"
 echo "[info] command: ${CMD[*]}"
 "${CMD[@]}"
 
