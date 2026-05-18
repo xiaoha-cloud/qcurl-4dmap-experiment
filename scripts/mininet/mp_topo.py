@@ -332,7 +332,13 @@ def run_experiment(net, args):
 
     videos_dir = os.path.join(effective_home(), "Videos")
     os.makedirs(videos_dir, exist_ok=True)
-    outfile = os.path.join(logdir, f"output_{run_id}.flv")
+    output_flv = os.environ.get("OUTPUT_FLV")
+    outfile = (
+        expand_user_path(output_flv)
+        if output_flv
+        else os.path.join(logdir, f"output_{run_id}.flv")
+    )
+    discard_output = outfile in ("/dev/null", os.devnull)
     input_flv = (
         expand_user_path(args.input_flv)
         if args.input_flv
@@ -504,7 +510,8 @@ def run_experiment(net, args):
     # ---- Start pull on h1 --------------------------------------------------
     pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
     pull_log = _open_log_file(pull_log_path, save_logs)
-    open(outfile, "w").close()  # touch
+    if not discard_output:
+        open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
     # -log-control) must come before the URL, or the client prints "unsupport" and exits.
     lc = " -log-control" if getattr(args, "log_control", False) else ""
@@ -564,20 +571,21 @@ def run_experiment(net, args):
             _log("watchdog", f"push exited naturally at {elapsed:.0f}s")
             break
 
-        try:
-            size = os.path.getsize(outfile)
-        except OSError:
-            size = 0
+        if not discard_output:
+            try:
+                size = os.path.getsize(outfile)
+            except OSError:
+                size = 0
 
-        if size > last_size:
-            _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
-            last_size = size
-            stable_rounds = 0
-        else:
-            stable_rounds += 1
-            if stable_rounds >= max_stable_rounds:
-                _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
-                break
+            if size > last_size:
+                _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
+                last_size = size
+                stable_rounds = 0
+            else:
+                stable_rounds += 1
+                if stable_rounds >= max_stable_rounds:
+                    _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
+                    break
 
         time.sleep(poll_sec)
 
