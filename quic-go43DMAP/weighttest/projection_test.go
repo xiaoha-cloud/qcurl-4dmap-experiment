@@ -26,13 +26,10 @@ func TestProjectToBoundedSimplex3Floor(t *testing.T) {
 	}
 }
 
-func TestLearnModeCompute(t *testing.T) {
-	uc := quic.NewUtilityController(quic.ModeLearn)
-	w := uc.GetWeights()
-	if math.Abs(w.WT+w.WD+w.WL-1) > 1e-9 {
-		t.Fatalf("initial sum != 1: %+v", w)
-	}
-	uc.BeginLearnRound()
+func TestQAccessTCompute(t *testing.T) {
+	uc := quic.NewUtilityController(quic.ModeQAccessT, "test")
+	uc.BeginMonitorRound()
+	uc.SetRoundGTotal(0.5)
 	pm := quic.PathMetrics{
 		PathID:   protocol.PathID(1),
 		BWbps:    20e6,
@@ -43,34 +40,40 @@ func TestLearnModeCompute(t *testing.T) {
 	if !sig.Active {
 		t.Fatal("expected active path")
 	}
-	info := uc.EndLearnRound()
-	if info.Reason != "init_baseline" {
-		t.Fatalf("first round reason: %s", info.Reason)
+	if sig.Gain < 0.8 || sig.Gain > 1.2 {
+		t.Fatalf("gain out of range: %v", sig.Gain)
 	}
-	w2 := uc.GetWeights()
-	if math.Abs(w2.WT+w2.WD+w2.WL-1) > 1e-6 {
-		t.Fatalf("after step sum != 1: %+v", w2)
+	c := uc.Coefficients()
+	if c.Alpha <= 0 {
+		t.Fatalf("expected default alpha > 0, got %v", c.Alpha)
 	}
 }
 
-func TestInactivePathSkippedForLearn(t *testing.T) {
-	uc := quic.NewUtilityController(quic.ModeLearn)
-	wBefore := uc.GetWeights()
-	uc.BeginLearnRound()
+func TestQAccessCollectProbesCoefficients(t *testing.T) {
+	uc := quic.NewUtilityController(quic.ModeQAccessCollect, "test")
+	uc.BeginMonitorRound()
+	pm := quic.PathMetrics{
+		PathID: protocol.PathID(1),
+		BWbps:  15e6,
+		OWDms:  30,
+	}
+	sig1 := uc.Compute(pm)
+	uc.BeginMonitorRound()
+	sig2 := uc.Compute(pm)
+	if sig1.Alpha == sig2.Alpha && sig1.Beta == sig2.Beta && sig1.Gamma == sig2.Gamma {
+		t.Fatal("qaccess_collect should rotate candidate coefficients each monitor round")
+	}
+}
+
+func TestInactivePathNeutralControl(t *testing.T) {
+	uc := quic.NewUtilityController(quic.ModeQAccessT, "test")
+	uc.BeginMonitorRound()
 	sig := uc.Compute(quic.PathMetrics{PathID: protocol.PathID(2)})
 	if sig.Active {
 		t.Fatal("zero metrics should be inactive")
 	}
 	if sig.Gain != 1.0 || sig.Backoff != 1.0 {
 		t.Fatalf("inactive should use neutral control: gain=%v backoff=%v", sig.Gain, sig.Backoff)
-	}
-	info := uc.EndLearnRound()
-	if info.Reason != "no_active_path" {
-		t.Fatalf("reason=%s", info.Reason)
-	}
-	wAfter := uc.GetWeights()
-	if math.Abs(wAfter.WT-wBefore.WT) > 1e-9 {
-		t.Fatal("inactive round should not change weights")
 	}
 }
 

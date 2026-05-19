@@ -38,9 +38,6 @@ type scheduler struct {
 
 	config *Config // session config; used for utility mode + [meta] once
 	metaLogged bool
-
-	// adaptive utility-mode (UtilityMode=auto): rate-limit SetMode calls
-	adaptiveLastChange time.Time
 }
 type monitor struct{
 	// separate path statis
@@ -82,8 +79,8 @@ func (m *monitor) setup() {
 
 }
 
-// utilityModeFromConfig maps Config.UtilityMode to runtime modes.
-// Deprecated aliases: LEARN/PG → qaccess_t; bare "T" remains fixed-T baseline (not Q-ACCeSS-T).
+// utilityModeFromConfig maps Config.UtilityMode to Q-ACCeSS runtime modes.
+// Supported final modes: baseline/off, qaccess_collect, qaccess_t.
 func utilityModeFromConfig(cfg *Config) UtilityMode {
 	if cfg == nil || cfg.UtilityMode == "" {
 		return ModeQAccessT
@@ -91,20 +88,15 @@ func utilityModeFromConfig(cfg *Config) UtilityMode {
 	switch strings.ToLower(strings.TrimSpace(cfg.UtilityMode)) {
 	case "baseline", "off", "none", "disable":
 		return ModeBaseline
-	case "t":
-		return ModeT
+	case "qaccess_collect", "qaccess-collect", "collect":
+		return ModeQAccessCollect
 	case "qaccess_t", "qaccess-t", "qaccesst":
 		return ModeQAccessT
-	case "qaccess_t_collect", "qaccess-t-collect", "qaccess_t_probe", "collect":
-		return ModeQAccessTCollect
-	// Deprecated: old online learn / fixed D/L / adaptive — not used in Q-ACCeSS evaluation.
-	case "learn", "pg", "grad", "learned":
-		utils.Infof("[qaccess_t] utility-mode=%q is deprecated; use qaccess_t", cfg.UtilityMode)
-		return ModeQAccessT
-	case "d", "l", "auto", "adapt":
-		utils.Infof("[qaccess_t] utility-mode=%q is deprecated; use baseline, T, or qaccess_t", cfg.UtilityMode)
-		return ModeQAccessT
+	case "qaccess_t_collect", "qaccess-t-collect":
+		utils.Infof("[qaccess_collect] qaccess_t_collect is deprecated; use qaccess_collect")
+		return ModeQAccessCollect
 	default:
+		utils.Infof("[qaccess_t] utility-mode=%q is deprecated and not part of final Q-ACCeSS modes; supported modes are baseline, qaccess_collect, qaccess_t; defaulting to qaccess_t", cfg.UtilityMode)
 		return ModeQAccessT
 	}
 }
@@ -2688,13 +2680,14 @@ func (m *monitor) monitorApplyUtility(pth *path) {
 	}
 
 	switch m.utilityController.Mode {
-	case ModeQAccessT, ModeQAccessTCollect:
+	case ModeQAccessT:
 		utils.Infof("[qaccess_t] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
 			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.GTotal,
 			sig.Alpha, sig.Beta, sig.Gamma, sig.Utility, sig.Gain, sig.Backoff)
-	case ModeT:
-		utils.Infof("[utility_T] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f U=%.4f gain=%.3f backoff=%.3f",
-			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.Utility, sig.Gain, sig.Backoff)
+	case ModeQAccessCollect:
+		utils.Infof("[qaccess_collect] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
+			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.GTotal,
+			sig.Alpha, sig.Beta, sig.Gamma, sig.Utility, sig.Gain, sig.Backoff)
 	}
 }
 

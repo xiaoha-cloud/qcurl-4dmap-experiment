@@ -135,8 +135,8 @@ type Config struct {
 	GenerateRedundancy bool
 	IPriority bool
 
-	// 4D-MAP experiment / logging (client-oriented; safe zero value = off or default T)
-	// UtilityMode: "T", "D", "L", "auto" (runtime L/D/T), "learn" (online reward-based global weights on simplex), or "baseline" (disables utility controller).
+	// 4D-MAP experiment / logging (client-oriented; safe zero value = qaccess_t)
+	// UtilityMode: "baseline"/"off" (no utility control), "qaccess_collect" (training CSV), "qaccess_t" (Q-ACCeSS-T runtime).
 	UtilityMode         string
 	LogControlActions     bool // emit [control] lines on ACK/LOSS (verbose)
 	ExperimentRunID       string

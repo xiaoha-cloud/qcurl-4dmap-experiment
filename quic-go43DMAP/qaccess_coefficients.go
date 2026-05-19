@@ -94,7 +94,7 @@ func resolveTrainingCSVPath() string {
 	if p := os.Getenv("QACCESS_TRAINING_CSV"); p != "" {
 		return p
 	}
-	return filepath.Join("derived", "qaccess_t_training_samples.csv")
+	return filepath.Join("derived", "qaccess_training_samples.csv")
 }
 
 func resolveCoeffsJSONPath() string {

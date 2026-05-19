@@ -14,7 +14,7 @@ Videos/
 *.mp4
 *.mkv
 *.csv
-
+*.pkl
 node_modules/
 .venv/
 venv/

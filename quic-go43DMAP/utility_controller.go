@@ -14,14 +14,11 @@ const (
 	// ModeBaseline: controller disabled in scheduler (original 4D-MAP without utility control).
 	ModeBaseline UtilityMode = "baseline"
 
-	// ModeT: fixed throughput-oriented linear utility baseline (WT/WD/WL), not Q-ACCeSS.
-	ModeT UtilityMode = "T"
-
 	// ModeQAccessT: Q-ACCeSS-T — RFR-optimized (alpha,beta,gamma) at runtime (JSON from Python).
 	ModeQAccessT UtilityMode = "qaccess_t"
 
-	// ModeQAccessTCollect: probing candidate coefficients + CSV export for RFR training.
-	ModeQAccessTCollect UtilityMode = "qaccess_t_collect"
+	// ModeQAccessCollect: generic Q-ACCeSS data collection (probes alpha/beta/gamma, exports CSV).
+	ModeQAccessCollect UtilityMode = "qaccess_collect"
 )
 
 // Experiment-aligned normalization (Fig.7-style, up to 30 Mbps steps).
@@ -80,7 +77,7 @@ type ControlSignal struct {
 	Active      bool
 }
 
-// UtilityController implements Q-ACCeSS-T and fixed-T baseline utility → gain/backoff for OLIA.
+// UtilityController implements Q-ACCeSS-T utility → gain/backoff for OLIA secondary paths.
 type UtilityController struct {
 	Mode   UtilityMode
 	RunID  string
@@ -94,9 +91,9 @@ type UtilityController struct {
 	// Q-ACCeSS-T runtime coefficients.
 	coeffs QAccessCoefficients
 
-	// qaccess_t_collect
-	collectIdx       int
-	trainCollector   *qaccessTrainCollector
+	// qaccess_collect
+	collectIdx     int
+	trainCollector *qaccessTrainCollector
 }
 
 func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
@@ -115,7 +112,7 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 		if c, err := LoadQAccessTCoefficients(resolveCoeffsJSONPath()); err == nil {
 			uc.coeffs = c
 		}
-	case ModeQAccessTCollect:
+	case ModeQAccessCollect:
 		uc.trainCollector = newQAccessTrainCollector(runID)
 	}
 	return uc
@@ -128,7 +125,7 @@ func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.coef
 // BeginMonitorRound resets per-tick state (call once per scheduler monitor cycle).
 func (uc *UtilityController) BeginMonitorRound() {
 	uc.roundGTotal = 0
-	if uc.Mode == ModeQAccessTCollect {
+	if uc.Mode == ModeQAccessCollect {
 		uc.collectIdx++
 	}
 }
@@ -202,16 +199,6 @@ func (uc *UtilityController) qaccessGainBackoff(gTotal, normD, normL, alpha, bet
 	return gain, backoff
 }
 
-func (uc *UtilityController) fixedTGainBackoff(normG, normD, normL float64) (float64, float64) {
-	gain := 1.0 + 0.20*normG - 0.10*normL - 0.05*normD
-	backoff := 1.0 - 0.08*normG + 0.05*normL + 0.03*normD
-	return clamp(gain, uc.MinGain, uc.MaxGain), clamp(backoff, uc.MinBackoff, uc.MaxBackoff)
-}
-
-func (uc *UtilityController) fixedTUtility(normG, normD, normL float64) float64 {
-	return 0.60*normG - 0.20*normD - 0.20*normL
-}
-
 func (uc *UtilityController) collectCoefficients() (alpha, beta, gamma float64) {
 	idx := uc.collectIdx % qaccessCandidateCount()
 	return QAccessCandidateAt(idx)
@@ -250,22 +237,13 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 	var u float64
 
 	switch uc.Mode {
-	case ModeQAccessT, ModeQAccessTCollect:
-		if uc.Mode == ModeQAccessTCollect {
+	case ModeQAccessT, ModeQAccessCollect:
+		if uc.Mode == ModeQAccessCollect {
 			alpha, beta, gamma = uc.collectCoefficients()
 		}
 		if active {
 			u = qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
 			gain, backoff = uc.qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma)
-		}
-	case ModeT:
-		u = uc.fixedTUtility(normG, normD, normL)
-		if active {
-			gain, backoff = uc.fixedTGainBackoff(normG, normD, normL)
-		}
-	default:
-		if active {
-			gain, backoff = uc.fixedTGainBackoff(normG, normD, normL)
 		}
 	}
 
@@ -286,7 +264,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		Active:     active,
 	}
 
-	if uc.Mode == ModeQAccessTCollect && active && uc.trainCollector != nil {
+	if uc.Mode == ModeQAccessCollect && active && uc.trainCollector != nil {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)

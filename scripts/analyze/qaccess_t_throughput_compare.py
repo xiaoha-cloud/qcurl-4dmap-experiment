@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Fig.7-style system evaluation: throughput windows + % improvement vs baseline.
+Q-ACCeSS-T final evaluation: baseline vs qaccess_t throughput windows.
 
-Generic label-based comparison (any method names). For Q-ACCeSS-T final eval, prefer
-``qaccess_t_throughput_compare.py`` (writes ``derived/qaccess_t_compare/``).
+Writes:
+  derived/qaccess_t_compare/qaccess_t_throughput_windows.csv
+  derived/qaccess_t_compare/qaccess_t_improvement_vs_baseline.csv
 
 Usage
 -----
-    python3 scripts/analyze/fig7_throughput_compare.py --out derived/fig7_compare \\
+    python3 scripts/analyze/qaccess_t_throughput_compare.py \\
         -r baseline:logs_exp/session_qaccess_t_X/fig7_baseline \\
         -r qaccess_t:logs_exp/session_qaccess_t_X/fig7_qaccess_t
 """
@@ -15,6 +16,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -22,27 +24,14 @@ import pandas as pd
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
+from fig7_throughput_compare import WINDOWS, _find_pull, mean_tp_in_window  # noqa: E402
 from throughput_timeline_eval import load_total_tp_mbps_timeseries  # noqa: E402
 
-WINDOWS = [
-    ("0-50", 0.0, 50.0),
-    ("50-60", 50.0, 60.0),
-    ("50-100", 50.0, 100.0),
-    ("100-110", 100.0, 110.0),
-    ("100-150", 100.0, 150.0),
-]
-
-
-def _find_pull(run_dir: Path) -> Path | None:
-    logs = run_dir / "logs"
-    if logs.is_dir():
-        hits = sorted(logs.glob("pull_*.log"))
-        if hits:
-            return hits[-1]
-    hits = sorted(run_dir.glob("**/pull_*.log"))
-    return hits[-1] if hits else None
+DEFAULT_OUT = _REPO / "derived" / "qaccess_t_compare"
 
 
 def _parse_r(s: str) -> tuple[str, Path]:
@@ -52,20 +41,11 @@ def _parse_r(s: str) -> tuple[str, Path]:
     return lab.strip(), Path(p.strip()).resolve()
 
 
-def mean_tp_in_window(ts: pd.DataFrame, lo: float, hi: float) -> float:
-    if ts.empty:
-        return float("nan")
-    w = ts[(ts["t_sec"] >= lo) & (ts["t_sec"] < hi)]
-    if w.empty:
-        return float("nan")
-    return float(w["tp_mbps_total"].mean())
-
-
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Fig.7 throughput windows vs baseline")
+    ap = argparse.ArgumentParser(description="Q-ACCeSS-T throughput vs baseline")
     ap.add_argument("-r", "--run", action="append", required=True, help="LABEL:run_dir")
-    ap.add_argument("--out", type=Path, required=True, help="output directory for CSVs")
-    ap.add_argument("--baseline", default="baseline", help="label treated as baseline")
+    ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--baseline", default="baseline")
     args = ap.parse_args()
 
     runs: dict[str, Path] = {}
@@ -81,15 +61,12 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
-    series: dict[str, pd.DataFrame] = {}
-
     for lab, rdir in runs.items():
         pull = _find_pull(rdir)
         if pull is None:
             print(f"[warn] no pull log under {rdir}", file=sys.stderr)
             continue
         ts = load_total_tp_mbps_timeseries(pull)
-        series[lab] = ts
         if not ts.empty:
             ts.to_csv(out / f"throughput_timeseries_{lab}.csv", index=False)
         for wname, lo, hi in WINDOWS:
@@ -103,7 +80,8 @@ def main() -> None:
             })
 
     df = pd.DataFrame(rows)
-    df.to_csv(out / "throughput_windows.csv", index=False)
+    windows_path = out / "qaccess_t_throughput_windows.csv"
+    df.to_csv(windows_path, index=False)
 
     base = df[df["method"] == args.baseline].set_index("window")["tp_mbps_mean"]
     imp_rows: list[dict] = []
@@ -125,10 +103,17 @@ def main() -> None:
                 "improvement_pct": pct,
             })
     imp = pd.DataFrame(imp_rows)
-    imp.to_csv(out / "improvement_vs_baseline.csv", index=False)
+    imp_path = out / "qaccess_t_improvement_vs_baseline.csv"
+    imp.to_csv(imp_path, index=False)
 
-    print(f"Wrote {out}/throughput_windows.csv")
-    print(f"Wrote {out}/improvement_vs_baseline.csv")
+    # Convenience copies at derived/ root (requested layout).
+    derived = _REPO / "derived"
+    derived.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(windows_path, derived / "qaccess_t_throughput_windows.csv")
+    shutil.copy2(imp_path, derived / "qaccess_t_improvement_vs_baseline.csv")
+
+    print(f"Wrote {windows_path}")
+    print(f"Wrote {imp_path}")
     if not imp.empty:
         print("\nImprovement vs baseline (%):")
         print(imp.pivot(index="window", columns="method", values="improvement_pct").to_string(float_format="%.2f"))
