@@ -8,7 +8,6 @@
 #
 # Optional env overrides:
 #   TIMEOUT=220 UTILITY_MODE=learn LOG_CONTROL=1 \
-#   INPUT_FLV=/path/to/input.flv OUTPUT_FLV=/dev/null \
 #   BW_PROFILE=scripts/mininet/bw_profile.fig7_200s.env \
 #   sudo ./scripts/mininet/run_single_experiment.sh
 
@@ -80,7 +79,6 @@ echo "[info] timeout: $TIMEOUT"
 echo "[info] utility-mode: $UTILITY_MODE"
 echo "[info] bw-profile: ${BW_PROFILE:-<disabled>}"
 echo "[info] save-logs: $SAVE_LOGS"
-echo "[info] output-flv: ${OUTPUT_FLV:-<logdir>/output_<RUN_ID>.flv}"
 echo "[info] command: ${CMD[*]}"
 "${CMD[@]}"
 

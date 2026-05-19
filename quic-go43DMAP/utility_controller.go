@@ -7,145 +7,146 @@ import (
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 )
 
+// UtilityMode selects Q-ACCeSS / baseline behavior (see interface.go Config.UtilityMode).
 type UtilityMode string
 
 const (
-	ModeT     UtilityMode = "T"     // throughput-first
-	ModeD     UtilityMode = "D"     // delay-first
-	ModeL     UtilityMode = "L"     // loss-first
-	ModeLearn UtilityMode = "learn" // online projected-gradient weights
+	// ModeBaseline: controller disabled in scheduler (original 4D-MAP without utility control).
+	ModeBaseline UtilityMode = "baseline"
+
+	// ModeT: fixed throughput-oriented linear utility baseline (WT/WD/WL), not Q-ACCeSS.
+	ModeT UtilityMode = "T"
+
+	// ModeQAccessT: Q-ACCeSS-T — RFR-optimized (alpha,beta,gamma) at runtime (JSON from Python).
+	ModeQAccessT UtilityMode = "qaccess_t"
+
+	// ModeQAccessTCollect: probing candidate coefficients + CSV export for RFR training.
+	ModeQAccessTCollect UtilityMode = "qaccess_t_collect"
 )
 
+// Experiment-aligned normalization (Fig.7-style, up to 30 Mbps steps).
+const (
+	bwRefBps          = 30 * 1000 * 1000
+	delayRefMs        = 100.0
+	delayTrendRefMs   = 50.0
+	lossRef           = 0.01
+	inflightActiveMin = 1024
+)
+
+// PathMetrics is the per-path snapshot passed into UtilityController.Compute.
 type PathMetrics struct {
-	PathID    protocol.PathID
-	BWbps     float64   // bandwidth estimate in bps
-	LossRate  float64   // cumulative / current loss rate
-	OWDms     float64   // one-way delay approximation in ms
-	CwndRoom  float64   // cwnd - inflight
-	Timestamp time.Time
+	PathID            protocol.PathID
+	BWbps             float64
+	OWDms             float64
+	DelayGradientMs   float64
+	LossRate          float64
+	LostBytesDelta    int64
+	RetransBytesDelta int64
+	CwndBytes         int64
+	InflightBytes     int64
+	CwndRoom          float64
+	Alpha             float64
+	Beta              float64
+	Gamma             float64
+	Gain              float64
+	Backoff           float64
+	Utility           float64
+	Timestamp         time.Time
 }
 
 type PathState struct {
-	LastOWDms float64
-	LastBWbps float64
-	LastLoss  float64
-	LastTime  time.Time
+	LastOWDms     float64
+	LastBWbps     float64
+	LastLoss      float64
+	LastLostBytes int64 // cumulative lost bytes (for delta in training CSV)
+	LastTime      time.Time
 }
 
+// ControlSignal is applied via sentPacketHandler.SetUtilityControl (OLIA secondary paths only).
 type ControlSignal struct {
-	PathID     protocol.PathID
-	Mode       UtilityMode
-	Utility    float64
-	Gain       float64
-	Backoff    float64
-	NormG      float64
-	NormD      float64
-	NormL      float64
-	DelayTrend float64
+	PathID      protocol.PathID
+	Mode        UtilityMode
+	Utility     float64
+	Gain        float64
+	Backoff     float64
+	NormG       float64
+	NormD       float64
+	NormL       float64
+	GTotal      float64
+	Alpha       float64
+	Beta        float64
+	Gamma       float64
+	DelayTrend  float64
+	Active      bool
 }
 
-type UtilityWeights struct {
-	WT float64
-	WD float64
-	WL float64
-}
-
-// UtilityController drives fixed T/D/L and ModeLearn (Route A) for multipath 4D-MAP: blended
-// gain/backoff to OLIA (sentPacketHandler.SetUtilityControl → OliaSender). In ModeLearn, weights
-// (wT,wD,wL) on a bounded simplex follow projected-gradient steps on EMA(G,D,L) on the leader path.
-// This is not ACCeSS: no RFR, no offline alpha/beta/gamma.
+// UtilityController implements Q-ACCeSS-T and fixed-T baseline utility → gain/backoff for OLIA.
 type UtilityController struct {
-	Mode UtilityMode
+	Mode   UtilityMode
+	RunID  string
+	Prev   map[protocol.PathID]*PathState
+	MinGain, MaxGain       float64
+	MinBackoff, MaxBackoff float64
 
-	// Previous state for trend calculation
-	Prev map[protocol.PathID]*PathState
+	// Per monitor-cycle aggregate (set before per-path Compute).
+	roundGTotal float64
 
-	// Normalization caps to keep first version stable
-	MaxBWbps    float64
-	MaxOWDms    float64
-	MaxLossRate float64
+	// Q-ACCeSS-T runtime coefficients.
+	coeffs QAccessCoefficients
 
-	// Optional bounds for control output
-	MinGain    float64
-	MaxGain    float64
-	MinBackoff float64
-	MaxBackoff float64
-
-	// learn mode: projected-gradient update on simplex (sum=1, w_i >= learnEps)
-	learnWT, learnWD, learnWL                      float64
-	learnEmaG, learnEmaD, learnEmaL                  float64
-	learnEmaInited                                 bool
-	learnEmaAlpha                                  float64
-	learnEta                                       float64
-	learnEps                                       float64
-	learnMinInterval                               time.Duration
-	learnLastStepTime                              time.Time
-	learnLeaderPathID                              protocol.PathID
-	learnLastGrad0, learnLastGrad1, learnLastGrad2 float64 // w.r.t. (wT,wD,wL); grad = (g, -d, -l) on EMA
+	// qaccess_t_collect
+	collectIdx       int
+	trainCollector   *qaccessTrainCollector
 }
 
-func NewUtilityController(mode UtilityMode) *UtilityController {
+func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	uc := &UtilityController{
-		Mode: mode,
-		Prev: make(map[protocol.PathID]*PathState),
-
-		// first version: fixed normalization ranges
-		MaxBWbps:    100 * 1000 * 1000, // 100 Mbps
-		MaxOWDms:    500.0,             // 500 ms
-		MaxLossRate: 0.20,              // 20%
-
+		Mode:   mode,
+		RunID:  runID,
+		Prev:   make(map[protocol.PathID]*PathState),
 		MinGain:    0.80,
 		MaxGain:    1.20,
 		MinBackoff: 0.90,
 		MaxBackoff: 1.10,
+		coeffs: defaultQAccessTCoefficients(),
 	}
-	if mode == ModeLearn {
-		uc.learnWT, uc.learnWD, uc.learnWL = 1.0/3.0, 1.0/3.0, 1.0/3.0
-		uc.learnEmaAlpha = 0.25
-		uc.learnEta = 0.04
-		uc.learnEps = 0.05
-		uc.learnMinInterval = 200 * time.Millisecond
-		uc.learnLeaderPathID = protocol.PathID(1) // first secondary path in typical MP-QUIC; no step on path 0
+	switch mode {
+	case ModeQAccessT:
+		if c, err := LoadQAccessTCoefficients(resolveCoeffsJSONPath()); err == nil {
+			uc.coeffs = c
+		}
+	case ModeQAccessTCollect:
+		uc.trainCollector = newQAccessTrainCollector(runID)
 	}
 	return uc
 }
 
-func (uc *UtilityController) SetMode(mode UtilityMode) {
-	uc.Mode = mode
-}
+func (uc *UtilityController) SetMode(mode UtilityMode) { uc.Mode = mode }
 
-func (uc *UtilityController) GetWeights() UtilityWeights {
-	if uc.Mode == ModeLearn {
-		return UtilityWeights{WT: uc.learnWT, WD: uc.learnWD, WL: uc.learnWL}
-	}
-	switch uc.Mode {
-	case ModeT:
-		return UtilityWeights{WT: 0.60, WD: 0.20, WL: 0.20}
-	case ModeD:
-		return UtilityWeights{WT: 0.20, WD: 0.60, WL: 0.20}
-	case ModeL:
-		return UtilityWeights{WT: 0.20, WD: 0.20, WL: 0.60}
-	default:
-		return UtilityWeights{WT: 0.34, WD: 0.33, WL: 0.33}
+func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.coeffs }
+
+// BeginMonitorRound resets per-tick state (call once per scheduler monitor cycle).
+func (uc *UtilityController) BeginMonitorRound() {
+	uc.roundGTotal = 0
+	if uc.Mode == ModeQAccessTCollect {
+		uc.collectIdx++
 	}
 }
 
-// GetLearnedWeights returns current (wT,wD,wL) in learn mode; in other modes returns GetWeights().
-func (uc *UtilityController) GetLearnedWeights() UtilityWeights {
-	return uc.GetWeights()
+// SetRoundGTotal sets normalized aggregate throughput across active paths for this tick.
+func (uc *UtilityController) SetRoundGTotal(gTotal float64) {
+	uc.roundGTotal = clamp(sanitizeMetric(gTotal), 0, 1)
 }
 
-// GetLastLearnGradient returns components of the last gradient used for a weight step: (dU/dwT, dU/dwD, dU/dwL) = (g, -d, -l) on EMA.
-func (uc *UtilityController) GetLastLearnGradient() (float64, float64, float64) {
-	return uc.learnLastGrad0, uc.learnLastGrad1, uc.learnLastGrad2
+func PathMetricsActive(pm PathMetrics) bool {
+	if sanitizeMetric(pm.BWbps) > 0 || sanitizeMetric(pm.OWDms) > 0 {
+		return true
+	}
+	if pm.InflightBytes > inflightActiveMin {
+		return true
+	}
+	return false
 }
-
-// LearnDebugEta / LearnDebugEps expose tuneables for [learn] log lines.
-func (uc *UtilityController) LearnDebugEta() float64 { return uc.learnEta }
-func (uc *UtilityController) LearnDebugEps() float64 { return uc.learnEps }
-
-// LearnLeaderPathID is the subflow that runs EMA / gradient steps (default path 1).
-func (uc *UtilityController) LearnLeaderPathID() protocol.PathID { return uc.learnLeaderPathID }
 
 func clamp(x, lo, hi float64) float64 {
 	if x < lo {
@@ -157,83 +158,63 @@ func clamp(x, lo, hi float64) float64 {
 	return x
 }
 
-func safeDiv(a, b float64) float64 {
-	if b == 0 {
+func sanitizeMetric(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
 		return 0
 	}
-	return a / b
+	return v
 }
 
 func (uc *UtilityController) normalizeG(bwBps float64) float64 {
-	return clamp(safeDiv(bwBps, uc.MaxBWbps), 0.0, 1.0)
+	return clamp(sanitizeMetric(bwBps)/bwRefBps, 0, 1)
 }
 
 func (uc *UtilityController) normalizeL(loss float64) float64 {
-	return clamp(safeDiv(loss, uc.MaxLossRate), 0.0, 1.0)
+	return clamp(sanitizeMetric(loss)/lossRef, 0, 1)
 }
 
-func (uc *UtilityController) normalizeD(owdMs float64, delayTrendMs float64) float64 {
-	// first version:
-	// combine current delay level and delay trend lightly
-	delayLevel := clamp(safeDiv(owdMs, uc.MaxOWDms), 0.0, 1.0)
-
-	// only positive trend is penalized
-	trendPenalty := 0.0
+func (uc *UtilityController) normalizeD(owdMs, delayTrendMs float64) float64 {
+	delayLevel := clamp(sanitizeMetric(owdMs)/delayRefMs, 0, 1)
+	trend := 0.0
 	if delayTrendMs > 0 {
-		trendPenalty = clamp(delayTrendMs/100.0, 0.0, 1.0)
+		trend = clamp(sanitizeMetric(delayTrendMs)/delayTrendRefMs, 0, 1)
 	}
-
-	// weighted mix: mostly delay level, some trend
-	return clamp(0.7*delayLevel+0.3*trendPenalty, 0.0, 1.0)
+	return clamp(0.7*delayLevel+0.3*trend, 0, 1)
 }
 
-func (uc *UtilityController) weightedGainBackoff(normG, normD, normL float64, w UtilityWeights) (float64, float64) {
-	gT := 1.0 + 0.20*normG - 0.10*normL - 0.05*normD
-	bT := 1.0 - 0.08*normG + 0.05*normL + 0.03*normD
-	gD := 1.0 - 0.20*normD - 0.05*normL + 0.05*normG
-	bD := 1.0 + 0.08*normD + 0.03*normL
-	gL := 1.0 - 0.20*normL - 0.08*normD + 0.03*normG
-	bL := 1.0 + 0.10*normL + 0.03*normD
-	gain := w.WT*gT + w.WD*gD + w.WL*gL
-	back := w.WT*bT + w.WD*bD + w.WL*bL
-	return clamp(gain, uc.MinGain, uc.MaxGain), clamp(back, uc.MinBackoff, uc.MaxBackoff)
+// qaccessUtility: U = GTotal^alpha - beta*GTotal*L - gamma*GTotal*D (ACCeSS-style structure).
+func qaccessUtility(gTotal, normD, normL, alpha, beta, gamma float64) float64 {
+	if gTotal <= 0 {
+		gTotal = 1e-9
+	}
+	reward := math.Pow(gTotal, alpha)
+	penalty := beta*gTotal*normL + gamma*gTotal*normD
+	return reward - penalty
 }
 
-// maybeProjectedLearnStep updates learnWT/learnWD/learnWL on the leader path only, rate-limited.
-func (uc *UtilityController) maybeProjectedLearnStep(pathID protocol.PathID, normG, normD, normL float64) {
-	if uc.Mode != ModeLearn {
-		return
-	}
-	if pathID != uc.learnLeaderPathID {
-		return
-	}
+func (uc *UtilityController) qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma float64) (float64, float64) {
+	u := qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
+	gain := 1.0 + 0.20*math.Pow(gTotal, alpha) - 0.10*beta*5*normL - 0.05*gamma*5*normD
+	backoff := 1.0 - 0.08*math.Pow(gTotal, alpha) + 0.05*beta*5*normL + 0.03*gamma*5*normD
+	_ = u
+	gain = clamp(gain, uc.MinGain, uc.MaxGain)
+	backoff = clamp(backoff, uc.MinBackoff, uc.MaxBackoff)
+	return gain, backoff
+}
 
-	a := uc.learnEmaAlpha
-	if !uc.learnEmaInited {
-		uc.learnEmaG, uc.learnEmaD, uc.learnEmaL = normG, normD, normL
-		uc.learnEmaInited = true
-	} else {
-		uc.learnEmaG = a*normG + (1.0-a)*uc.learnEmaG
-		uc.learnEmaD = a*normD + (1.0-a)*uc.learnEmaD
-		uc.learnEmaL = a*normL + (1.0-a)*uc.learnEmaL
-	}
+func (uc *UtilityController) fixedTGainBackoff(normG, normD, normL float64) (float64, float64) {
+	gain := 1.0 + 0.20*normG - 0.10*normL - 0.05*normD
+	backoff := 1.0 - 0.08*normG + 0.05*normL + 0.03*normD
+	return clamp(gain, uc.MinGain, uc.MaxGain), clamp(backoff, uc.MinBackoff, uc.MaxBackoff)
+}
 
-	now := time.Now()
-	if !uc.learnLastStepTime.IsZero() && now.Sub(uc.learnLastStepTime) < uc.learnMinInterval {
-		return
-	}
+func (uc *UtilityController) fixedTUtility(normG, normD, normL float64) float64 {
+	return 0.60*normG - 0.20*normD - 0.20*normL
+}
 
-	// U = wT*g - wD*d - wL*l  =>  grad = (g, -d, -l) w.r.t. (wT, wD, wL) for maximization
-	g0 := uc.learnEmaG
-	g1 := -uc.learnEmaD
-	g2 := -uc.learnEmaL
-	uc.learnLastGrad0, uc.learnLastGrad1, uc.learnLastGrad2 = g0, g1, g2
-
-	v0 := uc.learnWT + uc.learnEta*g0
-	v1 := uc.learnWD + uc.learnEta*g1
-	v2 := uc.learnWL + uc.learnEta*g2
-	uc.learnWT, uc.learnWD, uc.learnWL = ProjectToBoundedSimplex3(v0, v1, v2, uc.learnEps)
-	uc.learnLastStepTime = now
+func (uc *UtilityController) collectCoefficients() (alpha, beta, gamma float64) {
+	idx := uc.collectIdx % qaccessCandidateCount()
+	return QAccessCandidateAt(idx)
 }
 
 func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
@@ -241,64 +222,54 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 	if now.IsZero() {
 		now = time.Now()
 	}
+	pm.BWbps = sanitizeMetric(pm.BWbps)
+	pm.LossRate = sanitizeMetric(pm.LossRate)
+	pm.OWDms = sanitizeMetric(pm.OWDms)
+
+	active := PathMetricsActive(pm)
 
 	prev, ok := uc.Prev[pm.PathID]
 	if !ok {
-		prev = &PathState{
-			LastOWDms: pm.OWDms,
-			LastBWbps: pm.BWbps,
-			LastLoss:  pm.LossRate,
-			LastTime:  now,
-		}
+		prev = &PathState{LastOWDms: pm.OWDms, LastBWbps: pm.BWbps, LastLoss: pm.LossRate, LastTime: now}
 		uc.Prev[pm.PathID] = prev
 	}
-
-	delayTrend := pm.OWDms - prev.LastOWDms
+	if pm.DelayGradientMs == 0 {
+		pm.DelayGradientMs = pm.OWDms - prev.LastOWDms
+	}
 
 	normG := uc.normalizeG(pm.BWbps)
 	normL := uc.normalizeL(pm.LossRate)
-	normD := uc.normalizeD(pm.OWDms, delayTrend)
-
-	uc.maybeProjectedLearnStep(pm.PathID, normG, normD, normL)
-
-	w := uc.GetWeights()
-
-	// U = wT * G - wD * D - wL * L
-	u := w.WT*normG - w.WD*normD - w.WL*normL
-
-	// First version: simple rule-based control mapping
-	gain := 1.0
-	backoff := 1.0
-
-	switch uc.Mode {
-	case ModeLearn:
-		gain, backoff = uc.weightedGainBackoff(normG, normD, normL, w)
-
-	case ModeT:
-		// be more aggressive if bandwidth looks good and loss is not high
-		gain = 1.0 + 0.20*normG - 0.10*normL - 0.05*normD
-		backoff = 1.0 - 0.08*normG + 0.05*normL + 0.03*normD
-
-	case ModeD:
-		// reduce aggressiveness if delay is building up
-		gain = 1.0 - 0.20*normD - 0.05*normL + 0.05*normG
-		backoff = 1.0 + 0.08*normD + 0.03*normL
-
-	case ModeL:
-		// become conservative when loss is high
-		gain = 1.0 - 0.20*normL - 0.08*normD + 0.03*normG
-		backoff = 1.0 + 0.10*normL + 0.03*normD
+	normD := uc.normalizeD(pm.OWDms, pm.DelayGradientMs)
+	gTotal := uc.roundGTotal
+	if gTotal <= 0 && active {
+		gTotal = normG
 	}
 
-	gain = clamp(gain, uc.MinGain, uc.MaxGain)
-	backoff = clamp(backoff, uc.MinBackoff, uc.MaxBackoff)
+	alpha, beta, gamma := uc.coeffs.Alpha, uc.coeffs.Beta, uc.coeffs.Gamma
+	gain, backoff := 1.0, 1.0
+	var u float64
 
-	prev.LastOWDms = pm.OWDms
-	prev.LastBWbps = pm.BWbps
-	prev.LastLoss = pm.LossRate
-	prev.LastTime = now
+	switch uc.Mode {
+	case ModeQAccessT, ModeQAccessTCollect:
+		if uc.Mode == ModeQAccessTCollect {
+			alpha, beta, gamma = uc.collectCoefficients()
+		}
+		if active {
+			u = qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
+			gain, backoff = uc.qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma)
+		}
+	case ModeT:
+		u = uc.fixedTUtility(normG, normD, normL)
+		if active {
+			gain, backoff = uc.fixedTGainBackoff(normG, normD, normL)
+		}
+	default:
+		if active {
+			gain, backoff = uc.fixedTGainBackoff(normG, normD, normL)
+		}
+	}
 
-	return ControlSignal{
+	sig := ControlSignal{
 		PathID:     pm.PathID,
 		Mode:       uc.Mode,
 		Utility:    math.Round(u*10000) / 10000,
@@ -307,6 +278,37 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		NormG:      math.Round(normG*10000) / 10000,
 		NormD:      math.Round(normD*10000) / 10000,
 		NormL:      math.Round(normL*10000) / 10000,
-		DelayTrend: math.Round(delayTrend*10000) / 10000,
+		GTotal:     math.Round(gTotal*10000) / 10000,
+		Alpha:      alpha,
+		Beta:       beta,
+		Gamma:      gamma,
+		DelayTrend: math.Round(pm.DelayGradientMs*10000) / 10000,
+		Active:     active,
 	}
+
+	if uc.Mode == ModeQAccessTCollect && active && uc.trainCollector != nil {
+		pm.Timestamp = now
+		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
+		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
+		_ = uc.trainCollector.recordPending(row, pm.PathID, pm.BWbps)
+	}
+
+	prev.LastOWDms = pm.OWDms
+	prev.LastBWbps = pm.BWbps
+	prev.LastLoss = pm.LossRate
+	prev.LastTime = now
+
+	return sig
+}
+
+// ComputeRoundGTotal returns clamped sum of per-path normalized throughput / bwRef over active paths.
+func ComputeRoundGTotal(paths []PathMetrics) float64 {
+	var sum float64
+	for _, pm := range paths {
+		if !PathMetricsActive(pm) {
+			continue
+		}
+		sum += sanitizeMetric(pm.BWbps) / bwRefBps
+	}
+	return clamp(sum, 0, 1)
 }

@@ -16,7 +16,7 @@ func TestProjectUnitSimplex3Corner(t *testing.T) {
 }
 
 func TestProjectToBoundedSimplex3Floor(t *testing.T) {
-	floor := 0.05
+	floor := 0.10
 	w0, w1, w2 := quic.ProjectToBoundedSimplex3(0, 0, 0, floor)
 	if w0 < floor-1e-9 || w1 < floor-1e-9 || w2 < floor-1e-9 {
 		t.Fatalf("below floor: (%v,%v,%v)", w0, w1, w2)
@@ -32,15 +32,51 @@ func TestLearnModeCompute(t *testing.T) {
 	if math.Abs(w.WT+w.WD+w.WL-1) > 1e-9 {
 		t.Fatalf("initial sum != 1: %+v", w)
 	}
+	uc.BeginLearnRound()
 	pm := quic.PathMetrics{
-		PathID:    protocol.PathID(1),
-		BWbps:     50e6,
-		LossRate:  0,
-		OWDms:     10,
+		PathID:   protocol.PathID(1),
+		BWbps:    20e6,
+		LossRate: 0,
+		OWDms:    20,
 	}
-	_ = uc.Compute(pm)
+	sig := uc.Compute(pm)
+	if !sig.Active {
+		t.Fatal("expected active path")
+	}
+	info := uc.EndLearnRound()
+	if info.Reason != "init_baseline" {
+		t.Fatalf("first round reason: %s", info.Reason)
+	}
 	w2 := uc.GetWeights()
 	if math.Abs(w2.WT+w2.WD+w2.WL-1) > 1e-6 {
 		t.Fatalf("after step sum != 1: %+v", w2)
+	}
+}
+
+func TestInactivePathSkippedForLearn(t *testing.T) {
+	uc := quic.NewUtilityController(quic.ModeLearn)
+	wBefore := uc.GetWeights()
+	uc.BeginLearnRound()
+	sig := uc.Compute(quic.PathMetrics{PathID: protocol.PathID(2)})
+	if sig.Active {
+		t.Fatal("zero metrics should be inactive")
+	}
+	if sig.Gain != 1.0 || sig.Backoff != 1.0 {
+		t.Fatalf("inactive should use neutral control: gain=%v backoff=%v", sig.Gain, sig.Backoff)
+	}
+	info := uc.EndLearnRound()
+	if info.Reason != "no_active_path" {
+		t.Fatalf("reason=%s", info.Reason)
+	}
+	wAfter := uc.GetWeights()
+	if math.Abs(wAfter.WT-wBefore.WT) > 1e-9 {
+		t.Fatal("inactive round should not change weights")
+	}
+}
+
+func TestPathMetricsActiveInflight(t *testing.T) {
+	pm := quic.PathMetrics{InflightBytes: 2048}
+	if !quic.PathMetricsActive(pm) {
+		t.Fatal("expected active via inflight")
 	}
 }
