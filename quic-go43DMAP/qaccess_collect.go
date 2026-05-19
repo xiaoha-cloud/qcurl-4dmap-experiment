@@ -21,13 +21,13 @@ var qaccessTrainCSVHeader = []string{
 }
 
 type qaccessTrainCollector struct {
-	mu       sync.Mutex
-	path     string
-	runID    string
-	opened   bool
-	writer   *csv.Writer
-	file     *os.File
-	pending  map[protocol.PathID]map[string]string
+	mu      sync.Mutex
+	path    string
+	runID   string
+	opened  bool
+	writer  *csv.Writer
+	file    *os.File
+	pending map[protocol.PathID]map[string]string
 }
 
 func newQAccessTrainCollector(runID string) *qaccessTrainCollector {
@@ -97,11 +97,6 @@ func (c *qaccessTrainCollector) recordPending(row map[string]string, pathID prot
 	}
 	c.pending[pathID] = row
 	return nil
-}
-
-func parseFloat(s string) float64 {
-	v, _ := strconv.ParseFloat(s, 64)
-	return v
 }
 
 func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta, gamma float64) map[string]string {
