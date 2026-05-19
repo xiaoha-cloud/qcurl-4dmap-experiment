@@ -82,95 +82,31 @@ func (m *monitor) setup() {
 
 }
 
+// utilityModeFromConfig maps Config.UtilityMode to runtime modes.
+// Deprecated aliases: LEARN/PG → qaccess_t; bare "T" remains fixed-T baseline (not Q-ACCeSS-T).
 func utilityModeFromConfig(cfg *Config) UtilityMode {
 	if cfg == nil || cfg.UtilityMode == "" {
+		return ModeQAccessT
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.UtilityMode)) {
+	case "baseline", "off", "none", "disable":
+		return ModeBaseline
+	case "t":
 		return ModeT
-	}
-	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
-	case "D":
-		return ModeD
-	case "L":
-		return ModeL
-	case "AUTO", "ADAPT":
-		return ModeT // initial mode; applyAdaptiveUtilityModeIfNeeded updates live
-	case "BASELINE", "OFF", "NONE", "DISABLE":
-		return ModeT // placeholder; controller will stay nil
-	case "LEARN", "PG", "GRAD", "LEARNED":
-		return ModeLearn
+	case "qaccess_t", "qaccess-t", "qaccesst":
+		return ModeQAccessT
+	case "qaccess_t_collect", "qaccess-t-collect", "qaccess_t_probe", "collect":
+		return ModeQAccessTCollect
+	// Deprecated: old online learn / fixed D/L / adaptive — not used in Q-ACCeSS evaluation.
+	case "learn", "pg", "grad", "learned":
+		utils.Infof("[qaccess_t] utility-mode=%q is deprecated; use qaccess_t", cfg.UtilityMode)
+		return ModeQAccessT
+	case "d", "l", "auto", "adapt":
+		utils.Infof("[qaccess_t] utility-mode=%q is deprecated; use baseline, T, or qaccess_t", cfg.UtilityMode)
+		return ModeQAccessT
 	default:
-		return ModeT
+		return ModeQAccessT
 	}
-}
-
-func isUtilityLearned(cfg *Config) bool {
-	if cfg == nil {
-		return false
-	}
-	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
-	case "LEARN", "PG", "GRAD", "LEARNED":
-		return true
-	default:
-		return false
-	}
-}
-
-func isUtilityAdaptive(cfg *Config) bool {
-	if cfg == nil {
-		return false
-	}
-	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
-	case "AUTO", "ADAPT":
-		return true
-	default:
-		return false
-	}
-}
-
-// pickAdaptiveUtilityMode maps aggregated loss / OWD to T/D/L with minimal hysteresis.
-func pickAdaptiveUtilityMode(maxLoss, maxOwdMs float64, cur UtilityMode) UtilityMode {
-	if maxLoss >= 0.02 {
-		return ModeL
-	}
-	if cur == ModeL && maxLoss >= 0.008 {
-		return ModeL
-	}
-	if maxOwdMs >= 100 {
-		return ModeD
-	}
-	if cur == ModeD && maxOwdMs >= 60 {
-		return ModeD
-	}
-	return ModeT
-}
-
-func (sch *scheduler) applyAdaptiveUtilityModeIfNeeded(s *session) {
-	if s == nil || sch.config == nil || sch.utilityController == nil || !isUtilityAdaptive(sch.config) {
-		return
-	}
-	var maxLoss float64
-	var maxOwdMs float64
-	for _, pth := range s.paths {
-		pid := pth.pathID
-		if l, ok := sch.monitor.state_loss[pid]; ok && l > maxLoss {
-			maxLoss = l
-		}
-		owd := sch.monitor.state_owd[pid]
-		ms := float64(owd.Nanoseconds()) / 1e6
-		if ms > maxOwdMs {
-			maxOwdMs = ms
-		}
-	}
-	cur := sch.utilityController.Mode
-	want := pickAdaptiveUtilityMode(maxLoss, maxOwdMs, cur)
-	if want == cur {
-		return
-	}
-	if !sch.adaptiveLastChange.IsZero() && time.Since(sch.adaptiveLastChange) < 2*time.Second {
-		return
-	}
-	sch.utilityController.SetMode(want)
-	sch.adaptiveLastChange = time.Now()
-	utils.Infof("[utility_mode] adaptive %s -> %s (max_loss=%.4f max_owd_ms=%.1f)", cur, want, maxLoss, maxOwdMs)
 }
 
 func isUtilityBaseline(cfg *Config) bool {
@@ -193,12 +129,13 @@ func (sch *scheduler) setup() {
 	sch.redundancy = 0
 	if isUtilityBaseline(sch.config) {
 		sch.utilityController = nil
-	} else if isUtilityLearned(sch.config) {
-		sch.utilityController = NewUtilityController(ModeLearn)
-	} else if isUtilityAdaptive(sch.config) {
-		sch.utilityController = NewUtilityController(ModeT)
 	} else {
-		sch.utilityController = NewUtilityController(utilityModeFromConfig(sch.config))
+		mode := utilityModeFromConfig(sch.config)
+		runID := ""
+		if sch.config != nil {
+			runID = sch.config.ExperimentRunID
+		}
+		sch.utilityController = NewUtilityController(mode, runID)
 	}
 	sch.monitor = &monitor{}
 	sch.monitor.utilityController = sch.utilityController
@@ -213,7 +150,7 @@ func (sch *scheduler) setup() {
 		sch.metaLogged = true
 		um := strings.TrimSpace(sch.config.UtilityMode)
 		if um == "" {
-			um = "T"
+			um = "qaccess_t"
 		}
 		rid := sch.config.ExperimentRunID
 		inp := sch.config.ExperimentInputFile
@@ -1260,9 +1197,12 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 				paths_init = append(paths_init, pth)
 			}
 			// 2. monitor return current state
-			sch.monitor.monitorCurrentPathState(pth)
+			sch.monitor.monitorUpdatePathState(pth)
 		}
-		sch.applyAdaptiveUtilityModeIfNeeded(s)
+		sch.monitor.monitorPrepareUtilityRound(s)
+		for _, pth := range s.paths {
+			sch.monitor.monitorApplyUtility(pth)
+		}
 
 		if len(s.paths) <= 1{
 			firstpath = s.paths[protocol.InitialPathID]
@@ -1937,9 +1877,12 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 			if( i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID ) || firstpath == nil ) ){
 				paths = append(paths, pth)
 			}
-			sch.monitor.monitorCurrentPathState(pth)
+			sch.monitor.monitorUpdatePathState(pth)
 		}
-		sch.applyAdaptiveUtilityModeIfNeeded(s)
+		sch.monitor.monitorPrepareUtilityRound(s)
+		for _, pth := range s.paths {
+			sch.monitor.monitorApplyUtility(pth)
+		}
 		
 		//sch.monitor.isHighlossrate(sch, s)
 		
@@ -2107,9 +2050,12 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 			if( i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID ) || firstpath == nil ) ){
 				paths = append(paths, pth)
 			}
-			sch.monitor.monitorCurrentPathState(pth)
+			sch.monitor.monitorUpdatePathState(pth)
 		}
-		sch.applyAdaptiveUtilityModeIfNeeded(s)
+		sch.monitor.monitorPrepareUtilityRound(s)
+		for _, pth := range s.paths {
+			sch.monitor.monitorApplyUtility(pth)
+		}
 		
 		//sch.monitor.isHighlossrate(sch, s)
 		
@@ -2248,10 +2194,13 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 				//continue
 			}
 
-			sch.monitor.monitorCurrentPathState(pth)
+			sch.monitor.monitorUpdatePathState(pth)
 
 		}
-		sch.applyAdaptiveUtilityModeIfNeeded(s)
+		sch.monitor.monitorPrepareUtilityRound(s)
+		for _, pth := range s.paths {
+			sch.monitor.monitorApplyUtility(pth)
+		}
 		sch.monitor.monitorCurrentSessionState(s)
 	
 		numStreams := uint32(len(s.streamsMap.streams))		
@@ -2477,10 +2426,13 @@ func (sch *scheduler) sendPacket(s *session) error {
 				//continue
 			}
 
-			sch.monitor.monitorCurrentPathState(pth)
+			sch.monitor.monitorUpdatePathState(pth)
 
 		}
-		sch.applyAdaptiveUtilityModeIfNeeded(s)
+		sch.monitor.monitorPrepareUtilityRound(s)
+		for _, pth := range s.paths {
+			sch.monitor.monitorApplyUtility(pth)
+		}
 		sch.monitor.monitorCurrentSessionState(s)
 		sch.monitor.mutex.Unlock()
 		numStreams := uint32(len(s.streamsMap.streams))		
@@ -2659,56 +2611,95 @@ func (m *monitor) monitorClear(){
 	m.totalbw = 0
 	m.totalcwnd = 0
 	m.retransBytes = 0
+	if m.utilityController != nil {
+		m.utilityController.BeginMonitorRound()
+	}
 }
 
-func (m *monitor) monitorCurrentPathState(pth *path) {
+func (m *monitor) monitorPrepareUtilityRound(s *session) {
+	if m.utilityController == nil || s == nil {
+		return
+	}
+	var snapshots []PathMetrics
+	for _, pth := range s.paths {
+		owdNs := m.state_owd[pth.pathID].Nanoseconds()
+		snapshots = append(snapshots, PathMetrics{
+			PathID:        pth.pathID,
+			BWbps:         float64(m.state_bw[pth.pathID]) * 8,
+			OWDms:         float64(owdNs) / 1e6,
+			InflightBytes: m.state_inflight[pth.pathID],
+		})
+	}
+	m.utilityController.SetRoundGTotal(ComputeRoundGTotal(snapshots))
+}
+
+func (m *monitor) monitorUpdatePathState(pth *path) {
 	nowRTT := pth.rttStats.SmoothedRTT()
-	/*monitor info*/
-	m.state_owd[pth.pathID] = nowRTT  / 2           // owd
-	m.state_bw[pth.pathID] = int64(pth.sentPacketHandler.GetBandwidthEstimate())   //bw
+	m.state_owd[pth.pathID] = nowRTT / 2
+	m.state_bw[pth.pathID] = int64(pth.sentPacketHandler.GetBandwidthEstimate())
 	m.state_loss[pth.pathID] = float64(pth.sentPacketHandler.GetLossRate())
-	m.state_cwnd[pth.pathID] = int64(pth.sentPacketHandler.GetCWND() - pth.sentPacketHandler.GetBytesInflight()) //cwnd
 	m.state_inflight[pth.pathID] = int64(pth.sentPacketHandler.GetBytesInflight())
-	
-	if(pth.pathID != protocol.PathID(0) &&  int64(m.state_owd[pth.pathID]) > 0 ) {
-		
-		m.totalbw += ( float64(m.state_cwnd[pth.pathID]) / (float64(m.state_owd[pth.pathID]) / 1000000000.0))
+	m.state_cwnd[pth.pathID] = int64(pth.sentPacketHandler.GetCWND()) - m.state_inflight[pth.pathID]
+
+	if pth.pathID != protocol.PathID(0) && int64(m.state_owd[pth.pathID]) > 0 {
+		m.totalbw += float64(m.state_cwnd[pth.pathID]) / (float64(m.state_owd[pth.pathID]) / 1e9)
 		m.totalcwnd += m.state_cwnd[pth.pathID]
 		m.retransBytes += pth.sentPacketHandler.GetLostByte()
 	}
-	// [m]monitor: per-path network snapshot (cwnd_room = GetCWND()-GetBytesInflight(); owd ≈ RTT/2; bw = BandwidthEstimate B/s).
+
 	cwndFull := pth.sentPacketHandler.GetCWND()
 	lostB := pth.sentPacketHandler.GetLostByte()
-	minRTT := pth.rttStats.MinRTT()
-	latestRTT := pth.rttStats.LatestRTT()
-	meanDev := pth.rttStats.MeanDeviation()
-	srvInx := m.state_serverinx[pth.pathID]
 	utils.Infof("[m]monitor path=%v rtt_smoothed=%v rtt_min=%v rtt_latest=%v rtt_mean_dev=%v owd=%v bw=%vB/s inflight=%vB cwnd_full=%vB cwnd_room=%vB loss=%v lost_B=%v serverinx=%v",
-		pth.pathID, nowRTT, minRTT, latestRTT, meanDev, m.state_owd[pth.pathID], m.state_bw[pth.pathID], m.state_inflight[pth.pathID], cwndFull, m.state_cwnd[pth.pathID], m.state_loss[pth.pathID], lostB, srvInx)
+		pth.pathID, nowRTT, pth.rttStats.MinRTT(), pth.rttStats.LatestRTT(), pth.rttStats.MeanDeviation(),
+		m.state_owd[pth.pathID], m.state_bw[pth.pathID], m.state_inflight[pth.pathID], cwndFull, m.state_cwnd[pth.pathID],
+		m.state_loss[pth.pathID], lostB, m.state_serverinx[pth.pathID])
 	utils.Infof("[m]retransBytes:%vB", m.retransBytes)
+}
 
-	// Utility controller: compute gain/backoff and pass to congestion control
-	if m.utilityController != nil {
-		owdNs := m.state_owd[pth.pathID].Nanoseconds()
-		pm := PathMetrics{
-			PathID:    pth.pathID,
-			BWbps:     float64(m.state_bw[pth.pathID]) * 8, // bytes/sec -> bits/sec
-			LossRate:  m.state_loss[pth.pathID],
-			OWDms:     float64(owdNs) / 1e6,
-			CwndRoom:  float64(m.state_cwnd[pth.pathID]),
-			Timestamp: time.Now(),
-		}
-		sig := m.utilityController.Compute(pm)
-		pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
-		utils.Infof("[utility] path=%v mode=%s G=%.4f D=%.4f L=%.4f bw=%.2fMbps loss=%.4f owd=%.2fms gain=%.3f backoff=%.3f U=%.4f trend_ms=%.4f",
-			pth.pathID, sig.Mode, sig.NormG, sig.NormD, sig.NormL, pm.BWbps/1e6, pm.LossRate, pm.OWDms, sig.Gain, sig.Backoff, sig.Utility, sig.DelayTrend)
-		if m.utilityController.Mode == ModeLearn && pth.pathID == m.utilityController.LearnLeaderPathID() {
-			w := m.utilityController.GetLearnedWeights()
-			g0, g1, g2 := m.utilityController.GetLastLearnGradient()
-			utils.Infof("[learn] path=%v wT=%.4f wD=%.4f wL=%.4f grad=(%.4f,%.4f,%.4f) eta=%.4f floor=%.4f",
-				pth.pathID, w.WT, w.WD, w.WL, g0, g1, g2, m.utilityController.LearnDebugEta(), m.utilityController.LearnDebugEps())
+func (m *monitor) monitorApplyUtility(pth *path) {
+	if m.utilityController == nil {
+		return
+	}
+	owdNs := m.state_owd[pth.pathID].Nanoseconds()
+	lostCum := int64(pth.sentPacketHandler.GetLostByte())
+	lostDelta := int64(0)
+	if prev, ok := m.utilityController.Prev[pth.pathID]; ok {
+		lostDelta = lostCum - prev.LastLostBytes
+		if lostDelta < 0 {
+			lostDelta = 0
 		}
 	}
+	pm := PathMetrics{
+		PathID:            pth.pathID,
+		BWbps:             float64(m.state_bw[pth.pathID]) * 8,
+		OWDms:             float64(owdNs) / 1e6,
+		LossRate:          m.state_loss[pth.pathID],
+		LostBytesDelta:    lostDelta,
+		RetransBytesDelta: 0,
+		CwndBytes:         int64(pth.sentPacketHandler.GetCWND()),
+		InflightBytes:     m.state_inflight[pth.pathID],
+		CwndRoom:          float64(m.state_cwnd[pth.pathID]),
+		Timestamp:         time.Now(),
+	}
+	sig := m.utilityController.Compute(pm)
+	pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
+	if prev, ok := m.utilityController.Prev[pth.pathID]; ok {
+		prev.LastLostBytes = lostCum
+	}
+
+	switch m.utilityController.Mode {
+	case ModeQAccessT, ModeQAccessTCollect:
+		utils.Infof("[qaccess_t] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
+			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.GTotal,
+			sig.Alpha, sig.Beta, sig.Gamma, sig.Utility, sig.Gain, sig.Backoff)
+	case ModeT:
+		utils.Infof("[utility_T] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f U=%.4f gain=%.3f backoff=%.3f",
+			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.Utility, sig.Gain, sig.Backoff)
+	}
+}
+
+func (m *monitor) monitorCurrentPathState(pth *path) {
+	m.monitorUpdatePathState(pth)
 }
 
 func (m *monitor) monitorCurrentSessionState(s *session){
