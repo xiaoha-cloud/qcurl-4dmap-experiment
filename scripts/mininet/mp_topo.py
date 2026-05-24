@@ -1,46 +1,53 @@
 #!/usr/bin/env python3
 """
-Minimal 2-path Mininet topology for qcurl-4dmap-experiment.
+Fig.7-style 2-path Mininet topology for Q ACCeSS evaluation (qcurl-4dmap-experiment).
 
 Hosts:
   h1 (client): 10.0.1.1/24 on eth0, 10.0.2.1/24 on eth1
   h2 (server): 10.0.1.2/24 on eth0, 10.0.2.2/24 on eth1
 
-Links:
-  Path A: h1 <-> s1 <-> h2  (lower delay)
-  Path B: h1 <-> s2 <-> h2  (higher delay, optional loss)
+Links (scenario fig7):
+  Path A: h1 <-> s1 <-> h2  (10.0.1.0/24)
+  Path B: h1 <-> s2 <-> h2  (10.0.2.0/24)
+
+Each --run-exp captures pcaps on h1-eth0/h1-eth1, derives throughput CSVs, and writes
+role logs under --log-parent / --run-label. Optional --dynamic-bw-profile applies TBF
+steps on server egress (h2-eth1) so pull goodput follows the Fig.7 capacity trace.
 
 Usage:
-  Interactive (default):
+  Interactive:
     sudo python3 scripts/mininet/mp_topo.py
 
-  One-shot experiment (server on h2, pull+push on h1, logs saved):
-    sudo python3 scripts/mininet/mp_topo.py --run-exp
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 90 --input-flv ~/Videos/push_input.flv
-    # Under sudo, ~/Videos resolves to the invoking user's home (SUDO_USER), not /root.
-
-  Paper Fig.7-like baseline scenario:
-    sudo python3 scripts/mininet/mp_topo.py --scenario fig7 --run-exp --utility-mode baseline
+  List scenarios:
     sudo python3 scripts/mininet/mp_topo.py --list-scenarios
 
-  Phase 2 (dynamic perturbation; use one mode per run):
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 300 \\
-      --utility-mode T --dynamic-bw-profile scripts/mininet/bw_profile.example.env
-    # Route A: online (wT,wD,wL) on simplex, ~200s media, capacity steps at 0/50/100s (see bw_profile.route_a_200s.env).
-    #   Copy new_video_200s.mp4 to ~/Videos/ and run:
-    #   If the publisher rejects MP4, remux once: ffmpeg -i new_video_200s.mp4 -c copy ~/Videos/new_video_200s.flv
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 220 \\
-      --utility-mode learn --log-control --dynamic-bw-profile scripts/mininet/bw_profile.route_a_200s.env \\
-      --input-flv ~/Videos/new_video_200s.mp4
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
-      --dynamic-delay-profile scripts/mininet/delay_profile.example.env
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --timeout 120 \\
-      --dynamic-loss-profile scripts/mininet/loss_profile.example.env
+  Baseline:
+    sudo python3 scripts/mininet/mp_topo.py --run-exp \\
+      --scenario fig7 \\
+      --utility-mode baseline \\
+      --timeout 420 \\
+      --log-parent logs_exp/session7 \\
+      --run-label baseline
 
-  Group runs under one session directory (see run_experiment_matrix.sh):
-    sudo python3 scripts/mininet/mp_topo.py --run-exp --log-parent logs_exp/session_20260402_001 \\
-      --run-label phase1_default_T
-    # → logs_exp/session_20260402_001/phase1_default_T/  (files still named *_<RUN_ID>.log)
+  Q ACCeSS data collection:
+    sudo python3 scripts/mininet/mp_topo.py --run-exp \\
+      --scenario fig7 \\
+      --utility-mode qaccess_collect \\
+      --timeout 420 \\
+      --dynamic-bw-profile scripts/mininet/bw_profile.fig7_200s.env \\
+      --log-parent logs_exp/session7 \\
+      --run-label qaccess_collect
+
+  Q ACCeSS T mode:
+    sudo python3 scripts/mininet/mp_topo.py --run-exp \\
+      --scenario fig7 \\
+      --utility-mode qaccess_t \\
+      --timeout 420 \\
+      --dynamic-bw-profile scripts/mininet/bw_profile.fig7_200s.env \\
+      --log-parent logs_exp/session7 \\
+      --run-label qaccess_t
+
+  # Under sudo, ~/Videos resolves to SUDO_USER's home, not /root.
 """
 
 
@@ -311,7 +318,7 @@ def run_experiment(net, args):
         parent = os.path.join(ROOT, "logs_exp")
 
     scen = getattr(args, "scenario", "fig7")
-    um = getattr(args, "utility_mode", "T")
+    um = getattr(args, "utility_mode", "qaccess_t")
     if run_label:
         subdir = sanitize_run_label(run_label)
     else:
@@ -332,13 +339,7 @@ def run_experiment(net, args):
 
     videos_dir = os.path.join(effective_home(), "Videos")
     os.makedirs(videos_dir, exist_ok=True)
-    output_flv = os.environ.get("OUTPUT_FLV")
-    outfile = (
-        expand_user_path(output_flv)
-        if output_flv
-        else os.path.join(logdir, f"output_{run_id}.flv")
-    )
-    discard_output = outfile in ("/dev/null", os.devnull)
+    outfile = os.path.join(logdir, f"output_{run_id}.flv")
     input_flv = (
         expand_user_path(args.input_flv)
         if args.input_flv
@@ -510,8 +511,7 @@ def run_experiment(net, args):
     # ---- Start pull on h1 --------------------------------------------------
     pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
     pull_log = _open_log_file(pull_log_path, save_logs)
-    if not discard_output:
-        open(outfile, "w").close()  # touch
+    open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
     # -log-control) must come before the URL, or the client prints "unsupport" and exits.
     lc = " -log-control" if getattr(args, "log_control", False) else ""
@@ -571,21 +571,20 @@ def run_experiment(net, args):
             _log("watchdog", f"push exited naturally at {elapsed:.0f}s")
             break
 
-        if not discard_output:
-            try:
-                size = os.path.getsize(outfile)
-            except OSError:
-                size = 0
+        try:
+            size = os.path.getsize(outfile)
+        except OSError:
+            size = 0
 
-            if size > last_size:
-                _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
-                last_size = size
-                stable_rounds = 0
-            else:
-                stable_rounds += 1
-                if stable_rounds >= max_stable_rounds:
-                    _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
-                    break
+        if size > last_size:
+            _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
+            last_size = size
+            stable_rounds = 0
+        else:
+            stable_rounds += 1
+            if stable_rounds >= max_stable_rounds:
+                _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
+                break
 
         time.sleep(poll_sec)
 
@@ -730,8 +729,8 @@ def main():
         help="path to input media for push, e.g. .flv or .mp4 (default: ~/Videos/push_input.flv)",
     )
     parser.add_argument(
-        "--utility-mode", default="T",
-        help="4D-MAP -utility-mode: T, D, L, auto (adaptive), learn (pg weights), or baseline (disables utility controller)",
+        "--utility-mode", default="qaccess_t",
+        help="Q-ACCeSS -utility-mode: baseline/off, qaccess_collect, or qaccess_t",
     )
     parser.add_argument(
         "--log-control", action="store_true",
@@ -785,7 +784,8 @@ def main():
         default=None,
         help=(
             "Place this run under ROOT/DIR (or absolute DIR). "
-            "Default parent is logs_exp. Subdir defaults to <scenario>_um_<utility-mode> unless --run-label is set."
+            "Default parent is logs_exp. Subdir defaults to <scenario>_um_<utility-mode> unless --run-label is set "
+            "(e.g. fig7_baseline, fig7_qaccess_t)."
         ),
     )
     parser.add_argument(
@@ -794,7 +794,7 @@ def main():
         default=None,
         help=(
             "Folder name under --log-parent (sanitized) instead of the default <scenario>_um_<utility-mode>. "
-            "Log files still use RUN_ID in their names. Example: fig7_um_learn."
+            "Log files still use RUN_ID in their names. Example: fig7_baseline, fig7_qaccess_t."
         ),
     )
     args = parser.parse_args()
