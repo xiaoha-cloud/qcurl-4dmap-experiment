@@ -7,8 +7,7 @@
 #   sudo ./scripts/mininet/run_single_experiment.sh
 #
 # Optional env overrides:
-#   TIMEOUT=220 UTILITY_MODE=learn LOG_CONTROL=1 \
-#   INPUT_FLV=/path/to/input.flv OUTPUT_FLV=/dev/null \
+#   TIMEOUT=220 UTILITY_MODE=qaccess_t LOG_CONTROL=1 \
 #   BW_PROFILE=scripts/mininet/bw_profile.fig7_200s.env \
 #   sudo ./scripts/mininet/run_single_experiment.sh
 
@@ -20,7 +19,7 @@ MP="$ROOT/scripts/mininet/mp_topo.py"
 TIMEOUT="${TIMEOUT:-220}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
-UTILITY_MODE="${UTILITY_MODE:-T}"
+UTILITY_MODE="${UTILITY_MODE:-qaccess_t}"
 BW_PROFILE="${BW_PROFILE:-scripts/mininet/bw_profile.fig7_200s.env}"
 SAVE_LOGS="${SAVE_LOGS:-0}"
 
@@ -80,7 +79,6 @@ echo "[info] timeout: $TIMEOUT"
 echo "[info] utility-mode: $UTILITY_MODE"
 echo "[info] bw-profile: ${BW_PROFILE:-<disabled>}"
 echo "[info] save-logs: $SAVE_LOGS"
-echo "[info] output-flv: ${OUTPUT_FLV:-<logdir>/output_<RUN_ID>.flv}"
 echo "[info] command: ${CMD[*]}"
 "${CMD[@]}"
 
