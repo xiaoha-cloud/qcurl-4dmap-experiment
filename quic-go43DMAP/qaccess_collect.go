@@ -47,12 +47,12 @@ func (c *qaccessTrainCollector) ensureOpen() error {
 	if c.opened {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(c.path), 0755); err != nil {
 		return err
 	}
 	_, statErr := os.Stat(c.path)
 	writeHeader := os.IsNotExist(statErr)
-	f, err := os.OpenFile(c.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(c.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return err
 	}
