@@ -144,10 +144,14 @@ func (sch *scheduler) setup() {
 		if um == "" {
 			um = "qaccess_t"
 		}
+		resolved := "baseline"
+		if sch.utilityController != nil {
+			resolved = string(sch.utilityController.Mode)
+		}
 		rid := sch.config.ExperimentRunID
 		inp := sch.config.ExperimentInputFile
-		utils.Infof("[meta] run_id=%s utility_mode=%s scheduler=%s multi=%v log_control=%v input=%s",
-			rid, um, sch.config.SchedulerName, sch.config.CreatePaths, sch.config.LogControlActions, inp)
+		utils.Infof("[meta] run_id=%s utility_mode=%s resolved=%s scheduler=%s multi=%v log_control=%v input=%s",
+			rid, um, resolved, sch.config.SchedulerName, sch.config.CreatePaths, sch.config.LogControlActions, inp)
 	}
 }
 

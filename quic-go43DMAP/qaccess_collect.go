@@ -38,6 +38,23 @@ func newQAccessTrainCollector(runID string) *qaccessTrainCollector {
 	}
 }
 
+// flushAllPending writes queued rows using nextBW(pathID) as the next_bw_bps label.
+func (c *qaccessTrainCollector) flushAllPending(nextBW func(protocol.PathID) float64) error {
+	if len(c.pending) == 0 {
+		return nil
+	}
+	ids := make([]protocol.PathID, 0, len(c.pending))
+	for pid := range c.pending {
+		ids = append(ids, pid)
+	}
+	for _, pid := range ids {
+		if err := c.flushPendingLabel(pid, nextBW(pid)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (c *qaccessTrainCollector) ensureOpen() error {
 	if c.opened {
 		return nil
@@ -101,7 +118,7 @@ func (c *qaccessTrainCollector) recordPending(row map[string]string, pathID prot
 
 func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta, gamma float64) map[string]string {
 	row := make(map[string]string, len(qaccessTrainCSVHeader))
-	row["timestamp_ms"] = strconv.FormatInt(pm.Timestamp.UnixMilli(), 10)
+	row["timestamp_ms"] = strconv.FormatInt(pm.Timestamp.UnixNano()/1e6, 10)
 	row["run_id"] = runID
 	row["path_id"] = strconv.FormatUint(uint64(pm.PathID), 10)
 	row["bw_bps"] = fmt.Sprintf("%.0f", pm.BWbps)

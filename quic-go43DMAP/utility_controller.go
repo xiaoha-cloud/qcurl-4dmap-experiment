@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
+	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
 // UtilityMode selects Q-ACCeSS / baseline behavior (see interface.go Config.UtilityMode).
@@ -114,6 +115,11 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 		}
 	case ModeQAccessCollect:
 		uc.trainCollector = newQAccessTrainCollector(runID)
+		if err := uc.trainCollector.ensureOpen(); err != nil {
+			utils.Infof("[qaccess_collect] failed to open training csv %s: %v", resolveTrainingCSVPath(), err)
+		} else {
+			utils.Infof("[qaccess_collect] training csv=%s", resolveTrainingCSVPath())
+		}
 	}
 	return uc
 }
@@ -124,10 +130,16 @@ func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.coef
 
 // BeginMonitorRound resets per-tick state (call once per scheduler monitor cycle).
 func (uc *UtilityController) BeginMonitorRound() {
-	uc.roundGTotal = 0
-	if uc.Mode == ModeQAccessCollect {
+	if uc.Mode == ModeQAccessCollect && uc.trainCollector != nil {
+		_ = uc.trainCollector.flushAllPending(func(pid protocol.PathID) float64 {
+			if prev, ok := uc.Prev[pid]; ok {
+				return prev.LastBWbps
+			}
+			return 0
+		})
 		uc.collectIdx++
 	}
+	uc.roundGTotal = 0
 }
 
 // SetRoundGTotal sets normalized aggregate throughput across active paths for this tick.
@@ -268,7 +280,9 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
-		_ = uc.trainCollector.recordPending(row, pm.PathID, pm.BWbps)
+		if err := uc.trainCollector.recordPending(row, pm.PathID, pm.BWbps); err != nil {
+			utils.Infof("[qaccess_collect] csv write error path=%v: %v", pm.PathID, err)
+		}
 	}
 
 	prev.LastOWDms = pm.OWDms
