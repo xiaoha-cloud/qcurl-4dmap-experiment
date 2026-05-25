@@ -60,13 +60,19 @@ def _load_csv(csv_path: Path, max_samples: int, from_tail: bool) -> pd.DataFrame
 
     if from_tail:
         print(f"[train_qaccess_t] loading last {max_samples} data rows via tail ...")
-        proc = subprocess.run(
-            ["tail", "-n", str(max_samples + 1), str(csv_path)],
+        header = subprocess.run(
+            ["head", "-n", "1", str(csv_path)],
             capture_output=True,
             text=True,
             check=True,
-        )
-        df = pd.read_csv(StringIO(proc.stdout))
+        ).stdout
+        body = subprocess.run(
+            ["tail", "-n", str(max_samples), str(csv_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        df = pd.read_csv(StringIO(header + body))
     else:
         print(f"[train_qaccess_t] loading full CSV then sampling {max_samples} rows ...")
         df = pd.read_csv(csv_path)

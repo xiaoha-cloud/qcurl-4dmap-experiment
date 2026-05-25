@@ -57,15 +57,36 @@ FEATURES = [
 
 
 def _load_csv_tail(csv_path: Path, tail_rows: int) -> pd.DataFrame:
+    """Load last N data rows; always prepend file header (tail alone omits it on large CSVs)."""
     if tail_rows <= 0:
         return pd.read_csv(csv_path)
-    proc = subprocess.run(
-        ["tail", "-n", str(tail_rows + 1), str(csv_path)],
+    header = subprocess.run(
+        ["head", "-n", "1", str(csv_path)],
         capture_output=True,
         text=True,
         check=True,
-    )
-    return pd.read_csv(StringIO(proc.stdout))
+    ).stdout
+    body = subprocess.run(
+        ["tail", "-n", str(tail_rows), str(csv_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    return pd.read_csv(StringIO(header + body))
+
+
+def _num_col(df: pd.DataFrame, name: str) -> pd.Series:
+    if name not in df.columns:
+        return pd.Series(0.0, index=df.index, dtype=float)
+    return pd.to_numeric(df[name], errors="coerce").fillna(0.0)
+
+
+def _require_columns(df: pd.DataFrame, names: list[str], context: str) -> None:
+    missing = [c for c in names if c not in df.columns]
+    if missing:
+        print(f"[error] {context}: CSV missing columns {missing}", file=sys.stderr)
+        print(f"[error] columns seen: {list(df.columns)[:20]}", file=sys.stderr)
+        sys.exit(1)
 
 
 def _load_rf_model(model_path: Path):
@@ -96,7 +117,7 @@ def _load_rf_model(model_path: Path):
         print(f"[error] {model_path} is not a valid sklearn model (no predict)", file=sys.stderr)
         sys.exit(1)
     try:
-        probe = np.zeros((1, len(FEATURES)), dtype=float)
+        probe = pd.DataFrame([np.zeros(len(FEATURES), dtype=float)], columns=FEATURES)
         model.predict(probe)
     except Exception as exc:
         print(f"[error] model predict probe failed (corrupt?): {exc}", file=sys.stderr)
@@ -106,9 +127,9 @@ def _load_rf_model(model_path: Path):
 
 def _path_active_mask(df: pd.DataFrame) -> pd.Series:
     """Vectorized PathMetricsActive (matches Go collect filter)."""
-    bw = pd.to_numeric(df.get("bw_bps", 0), errors="coerce").fillna(0.0)
-    owd = pd.to_numeric(df.get("owd_ms", 0), errors="coerce").fillna(0.0)
-    inflight = pd.to_numeric(df.get("inflight_bytes", 0), errors="coerce").fillna(0.0)
+    bw = _num_col(df, "bw_bps")
+    owd = _num_col(df, "owd_ms")
+    inflight = _num_col(df, "inflight_bytes")
     return (bw > 0) | (owd > 0) | (inflight > 1024)
 
 
@@ -127,8 +148,8 @@ def _samples_for_rf(df: pd.DataFrame, frac: float, min_rows: int, max_rows: int)
     if active_n > 0:
         work = df.loc[mask].copy()
     else:
-        cwnd = pd.to_numeric(df.get("cwnd_bytes", 0), errors="coerce").fillna(0.0)
-        util = pd.to_numeric(df.get("utility", 0), errors="coerce").fillna(0.0)
+        cwnd = _num_col(df, "cwnd_bytes")
+        util = _num_col(df, "utility")
         fb = (cwnd > 0) | (util != 0)
         fb_n = int(fb.sum())
         print(
@@ -262,6 +283,7 @@ def main() -> None:
     print(f"[optimize] input CSV: {csv_path}")
     print(f"[optimize] loading last {args.tail_rows} CSV rows ...")
     df = _load_csv_tail(csv_path, args.tail_rows)
+    _require_columns(df, FEATURES, "optimize")
     print(f"[optimize] rows loaded: {len(df)}")
 
     if args.mode == "direct":
