@@ -74,7 +74,7 @@ def qaccess_gain_backoff(
 def path_active(bw_bps: float, owd_ms: float, inflight_bytes: float, min_inflight: int = 1024) -> bool:
     if _sanitize(bw_bps) > 0 or _sanitize(owd_ms) > 0:
         return True
-    return inflight_bytes > min_inflight
+    return _sanitize(inflight_bytes) > min_inflight
 
 
 def candidate_triples() -> list[tuple[float, float, float]]:

@@ -29,7 +29,6 @@ from qaccess_math import (  # noqa: E402
     normalize_d,
     normalize_g,
     normalize_l,
-    path_active,
     qaccess_gain_backoff,
     qaccess_utility,
 )
@@ -105,25 +104,55 @@ def _load_rf_model(model_path: Path):
     return model
 
 
-def _recent_active(df: pd.DataFrame, frac: float, min_rows: int, max_rows: int) -> pd.DataFrame:
-    work = df.copy()
-    for c in FEATURES + ["bw_bps", "owd_ms", "inflight_bytes"]:
+def _path_active_mask(df: pd.DataFrame) -> pd.Series:
+    """Vectorized PathMetricsActive (matches Go collect filter)."""
+    bw = pd.to_numeric(df.get("bw_bps", 0), errors="coerce").fillna(0.0)
+    owd = pd.to_numeric(df.get("owd_ms", 0), errors="coerce").fillna(0.0)
+    inflight = pd.to_numeric(df.get("inflight_bytes", 0), errors="coerce").fillna(0.0)
+    return (bw > 0) | (owd > 0) | (inflight > 1024)
+
+
+def _samples_for_rf(df: pd.DataFrame, frac: float, min_rows: int, max_rows: int) -> pd.DataFrame:
+    """
+    Rows for RF coefficient scoring.
+
+    Prefer path-active rows (same as Go collect). If the CSV tail is from experiment
+    teardown (all metrics zero), fall back to rows with cwnd/utility or all tail rows.
+    """
+    total = len(df)
+    mask = _path_active_mask(df)
+    active_n = int(mask.sum())
+    print(f"[optimize] path-active rows in loaded tail: {active_n} / {total}")
+
+    if active_n > 0:
+        work = df.loc[mask].copy()
+    else:
+        cwnd = pd.to_numeric(df.get("cwnd_bytes", 0), errors="coerce").fillna(0.0)
+        util = pd.to_numeric(df.get("utility", 0), errors="coerce").fillna(0.0)
+        fb = (cwnd > 0) | (util != 0)
+        fb_n = int(fb.sum())
+        print(
+            f"[optimize] no path-active rows; fallback cwnd/utility: {fb_n} / {total}"
+        )
+        if fb_n > 0:
+            work = df.loc[fb].copy()
+        else:
+            print("[optimize] fallback: using all loaded tail rows (fillna 0)")
+            work = df.copy()
+
+    for c in FEATURES:
         if c in work.columns:
-            work[c] = pd.to_numeric(work[c], errors="coerce")
-    mask = work.apply(
-        lambda r: path_active(
-            r.get("bw_bps", 0.0),
-            r.get("owd_ms", 0.0),
-            r.get("inflight_bytes", 0.0),
-        ),
-        axis=1,
-    )
-    work = work[mask]
-    if work.empty:
-        return work
+            work[c] = pd.to_numeric(work[c], errors="coerce").fillna(0.0)
+
     n = max(min_rows, int(len(work) * frac))
     n = min(n, max_rows, len(work))
     return work.tail(n)
+
+
+def _rf_predict(model, X: np.ndarray) -> np.ndarray:
+    """Predict with feature names to match sklearn training on DataFrame."""
+    X_df = pd.DataFrame(X, columns=FEATURES)
+    return np.asarray(model.predict(X_df), dtype=float)
 
 
 def _feature_matrix(samples: pd.DataFrame, alpha: float, beta: float, gamma: float) -> np.ndarray:
@@ -218,8 +247,8 @@ def main() -> None:
     ap.add_argument("--min-recent", type=int, default=50)
     ap.add_argument("--max-recent", type=int, default=500)
     ap.add_argument(
-        "--tail-rows", type=int, default=50_000,
-        help="Only read last N CSV rows before optimization (default 50000)",
+        "--tail-rows", type=int, default=200_000,
+        help="Only read last N CSV rows before optimization (default 200000, match train tail)",
     )
     args = ap.parse_args()
 
@@ -262,18 +291,18 @@ def main() -> None:
     model_path = args.model.resolve()
     model = _load_rf_model(model_path)
 
-    samples = _recent_active(df, args.recent_frac, args.min_recent, args.max_recent)
+    samples = _samples_for_rf(df, args.recent_frac, args.min_recent, args.max_recent)
     if samples.empty:
-        print("[error] no active recent samples for RF optimization", file=sys.stderr)
+        print("[error] no samples for RF optimization (try --tail-rows 200000)", file=sys.stderr)
         sys.exit(1)
-    print(f"[optimize] active recent samples for RF scoring: {len(samples)}")
+    print(f"[optimize] RF scoring sample rows: {len(samples)}")
 
     best_alpha, best_beta, best_gamma = 0.70, 0.10, 0.10
     best_pred = -1.0
     n_candidates = len(list(candidate_triples()))
     for alpha, beta, gamma in candidate_triples():
         X = _feature_matrix(samples, alpha, beta, gamma)
-        preds = model.predict(X)
+        preds = _rf_predict(model, X)
         mean_pred = float(np.mean(preds))
         if mean_pred > best_pred:
             best_pred = mean_pred
