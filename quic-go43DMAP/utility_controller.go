@@ -110,8 +110,14 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	}
 	switch mode {
 	case ModeQAccessT:
-		if c, err := LoadQAccessTCoefficients(resolveCoeffsJSONPath()); err == nil {
+		jsonPath := resolveCoeffsJSONPath()
+		if c, err := LoadQAccessTCoefficients(jsonPath); err == nil {
 			uc.coeffs = c
+			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s",
+				c.Alpha, c.Beta, c.Gamma, c.Source)
+		} else {
+			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s (json=%s err=%v)",
+				uc.coeffs.Alpha, uc.coeffs.Beta, uc.coeffs.Gamma, uc.coeffs.Source, jsonPath, err)
 		}
 	case ModeQAccessCollect:
 		uc.trainCollector = newQAccessTrainCollector(runID)

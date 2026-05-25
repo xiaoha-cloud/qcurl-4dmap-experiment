@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Pick Q-ACCeSS-T (alpha, beta, gamma) by maximizing RFR-predicted next_bw_bps.
+Pick Q-ACCeSS-T (alpha, beta, gamma).
 
-Inputs:
-  derived/qaccess_t_model.pkl
-  derived/qaccess_training_samples.csv
-
-Output:
-  derived/qaccess_t_best_coefficients.json
+Modes:
+  rf     — use RFR model + CSV (needs qaccess_t_model.pkl) [strict Phase 1]
+  direct — pick candidate with highest mean next_bw_bps from collect CSV (no model, VM-friendly)
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
+from io import StringIO
 from pathlib import Path
 
 import joblib
@@ -56,6 +55,54 @@ FEATURES = [
     "gain",
     "backoff",
 ]
+
+
+def _load_csv_tail(csv_path: Path, tail_rows: int) -> pd.DataFrame:
+    if tail_rows <= 0:
+        return pd.read_csv(csv_path)
+    proc = subprocess.run(
+        ["tail", "-n", str(tail_rows + 1), str(csv_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return pd.read_csv(StringIO(proc.stdout))
+
+
+def _load_rf_model(model_path: Path):
+    """Load RFR model; fail clearly if missing or corrupt."""
+    if not model_path.is_file():
+        print(f"[error] missing model: {model_path}", file=sys.stderr)
+        print(
+            "[error] train first: python scripts/analyze/train_qaccess_t.py "
+            "--max-samples 200000 --n-estimators 80",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    size = model_path.stat().st_size
+    if size == 0:
+        print(f"[error] model file is empty (corrupt): {model_path}", file=sys.stderr)
+        sys.exit(1)
+    print(f"[optimize] loading RFR model: {model_path} ({size} bytes)")
+    try:
+        model = joblib.load(model_path)
+    except Exception as exc:
+        print(
+            f"[error] failed to load model (corrupt or incomplete?): {model_path}: {exc}",
+            file=sys.stderr,
+        )
+        print(f"[hint] remove and retrain: rm -f {model_path}", file=sys.stderr)
+        sys.exit(1)
+    if not hasattr(model, "predict"):
+        print(f"[error] {model_path} is not a valid sklearn model (no predict)", file=sys.stderr)
+        sys.exit(1)
+    try:
+        probe = np.zeros((1, len(FEATURES)), dtype=float)
+        model.predict(probe)
+    except Exception as exc:
+        print(f"[error] model predict probe failed (corrupt?): {exc}", file=sys.stderr)
+        sys.exit(1)
+    return model
 
 
 def _recent_active(df: pd.DataFrame, frac: float, min_rows: int, max_rows: int) -> pd.DataFrame:
@@ -112,34 +159,118 @@ def _feature_matrix(samples: pd.DataFrame, alpha: float, beta: float, gamma: flo
     return np.asarray(rows, dtype=float)
 
 
+def _optimize_direct(df: pd.DataFrame) -> tuple[float, float, float, float, int]:
+    """Pick (alpha,beta,gamma) with highest mean next_bw_bps in collect rows."""
+    work = df.copy()
+    for c in ("alpha", "beta", "gamma", "next_bw_bps"):
+        work[c] = pd.to_numeric(work[c], errors="coerce")
+    work = work.dropna(subset=["alpha", "beta", "gamma", "next_bw_bps"])
+    if work.empty:
+        raise ValueError("no rows with alpha/beta/gamma and next_bw_bps")
+    work["alpha"] = work["alpha"].round(2)
+    work["beta"] = work["beta"].round(2)
+    work["gamma"] = work["gamma"].round(2)
+    valid = set(candidate_triples())
+    grouped = (
+        work.groupby(["alpha", "beta", "gamma"], as_index=False)["next_bw_bps"]
+        .mean()
+        .sort_values("next_bw_bps", ascending=False)
+    )
+    for _, row in grouped.iterrows():
+        key = (float(row["alpha"]), float(row["beta"]), float(row["gamma"]))
+        if key in valid:
+            return key[0], key[1], key[2], float(row["next_bw_bps"]), int(
+                len(work[
+                    (work["alpha"] == row["alpha"])
+                    & (work["beta"] == row["beta"])
+                    & (work["gamma"] == row["gamma"])
+                ])
+            )
+    best_a, best_b, best_g = 0.70, 0.10, 0.10
+    best_mean = -1.0
+    best_n = 0
+    for a, b, g in candidate_triples():
+        sub = work[
+            (np.isclose(work["alpha"], a))
+            & (np.isclose(work["beta"], b))
+            & (np.isclose(work["gamma"], g))
+        ]
+        if sub.empty:
+            continue
+        m = float(sub["next_bw_bps"].mean())
+        if m > best_mean:
+            best_mean, best_a, best_b, best_g, best_n = m, a, b, g, len(sub)
+    if best_mean < 0:
+        return 0.70, 0.10, 0.10, 0.0, 0
+    return best_a, best_b, best_g, best_mean, best_n
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Optimize Q-ACCeSS-T coefficients via RFR")
+    ap = argparse.ArgumentParser(description="Optimize Q-ACCeSS-T coefficients")
+    ap.add_argument(
+        "--mode", choices=("rf", "direct"), default="direct",
+        help="rf=RandomForest predict (strict Phase 1); direct=mean next_bw_bps from CSV",
+    )
     ap.add_argument("--input", type=Path, default=DEFAULT_CSV)
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("--output", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--recent-frac", type=float, default=0.2)
     ap.add_argument("--min-recent", type=int, default=50)
-    ap.add_argument("--max-recent", type=int, default=2000)
+    ap.add_argument("--max-recent", type=int, default=500)
+    ap.add_argument(
+        "--tail-rows", type=int, default=50_000,
+        help="Only read last N CSV rows before optimization (default 50000)",
+    )
     args = ap.parse_args()
 
     csv_path = args.input.resolve()
-    model_path = args.model.resolve()
     if not csv_path.is_file():
         print(f"[error] missing CSV: {csv_path}", file=sys.stderr)
         sys.exit(1)
-    if not model_path.is_file():
-        print(f"[error] missing model: {model_path}", file=sys.stderr)
-        sys.exit(1)
 
-    model = joblib.load(model_path)
-    df = pd.read_csv(csv_path)
+    mode_label = "RF (RandomForest)" if args.mode == "rf" else "DIRECT (CSV mean, no model)"
+    print(f"[optimize] ===== mode={args.mode} ({mode_label}) =====")
+    print(f"[optimize] input CSV: {csv_path}")
+    print(f"[optimize] loading last {args.tail_rows} CSV rows ...")
+    df = _load_csv_tail(csv_path, args.tail_rows)
+    print(f"[optimize] rows loaded: {len(df)}")
+
+    if args.mode == "direct":
+        print("[optimize] DIRECT mode: selecting max mean next_bw_bps over candidate grid")
+        best_alpha, best_beta, best_gamma, best_score, n_used = _optimize_direct(df)
+        out = {
+            "alpha": best_alpha,
+            "beta": best_beta,
+            "gamma": best_gamma,
+            "source": "optimize_qaccess_t_coefficients.py",
+            "metric": "mean_next_bw_bps",
+            "mean_next_bw_bps": best_score,
+            "n_samples": n_used,
+            "input_csv": str(csv_path),
+            "mode": "direct",
+        }
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"[optimize] DIRECT selected alpha={best_alpha} beta={best_beta} gamma={best_gamma} "
+            f"mean_next_bw_bps={best_score:.0f} (n={n_used})"
+        )
+        print(f"[optimize] wrote {args.output.resolve()} (mode=direct)")
+        return
+
+    print("[optimize] RF mode: enumerating 64 candidate (alpha,beta,gamma) triples")
+    model_path = args.model.resolve()
+    model = _load_rf_model(model_path)
+
     samples = _recent_active(df, args.recent_frac, args.min_recent, args.max_recent)
     if samples.empty:
-        print("[error] no active recent samples for optimization", file=sys.stderr)
+        print("[error] no active recent samples for RF optimization", file=sys.stderr)
         sys.exit(1)
+    print(f"[optimize] active recent samples for RF scoring: {len(samples)}")
 
     best_alpha, best_beta, best_gamma = 0.70, 0.10, 0.10
     best_pred = -1.0
+    n_candidates = len(list(candidate_triples()))
     for alpha, beta, gamma in candidate_triples():
         X = _feature_matrix(samples, alpha, beta, gamma)
         preds = model.predict(X)
@@ -156,18 +287,20 @@ def main() -> None:
         "metric": "predicted_next_bw_bps",
         "predicted_next_bw_bps": best_pred,
         "n_samples": int(len(samples)),
+        "n_candidates": n_candidates,
         "input_csv": str(csv_path),
         "model": str(model_path),
+        "mode": "rf",
     }
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
 
     print(
-        f"[optimize] best alpha={best_alpha} beta={best_beta} gamma={best_gamma} "
-        f"predicted_next_bw_bps={best_pred:.0f} (n={len(samples)})"
+        f"[optimize] RF selected alpha={best_alpha} beta={best_beta} gamma={best_gamma} "
+        f"predicted_next_bw_bps={best_pred:.0f} (n={len(samples)}, candidates={n_candidates})"
     )
-    print(f"[optimize] wrote {args.output.resolve()}")
+    print(f"[optimize] wrote {args.output.resolve()} (mode=rf)")
 
 
 if __name__ == "__main__":
