@@ -2,6 +2,7 @@ package quic
 
 import (
 	"math"
+	"sync"
 	"time"
 
 	"github.com/lucas-clemente/quic-go/internal/protocol"
@@ -89,12 +90,26 @@ type UtilityController struct {
 	// Per monitor-cycle aggregate (set before per-path Compute).
 	roundGTotal float64
 
-	// Q-ACCeSS-T runtime coefficients.
-	coeffs QAccessCoefficients
+	// Q-ACCeSS-T runtime coefficients (protected by coeffsMu for Phase 2 reload).
+	coeffsMu sync.RWMutex
+	coeffs   QAccessCoefficients
+
+	// Phase 2 (qaccess_t only; disabled when env flags are 0).
+	phase2               qaccessPhase2Config
+	lastCoeffCheck       time.Time
+	lastCoeffMtime       time.Time
+	lastTriggerTime      time.Time
+	roundBwHistory       []float64
+	currentRoundTotalBwBps float64
+	currentRoundActivePaths int
+	lastRoundActivePaths    int
 
 	// qaccess_collect
 	collectIdx     int
 	trainCollector *qaccessTrainCollector
+
+	// qaccess_t runtime sample export (separate CSV from collect).
+	runtimeExporter *qaccessSampleExporter
 }
 
 func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
@@ -110,7 +125,8 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	}
 	switch mode {
 	case ModeQAccessT:
-		jsonPath := resolveCoeffsJSONPath()
+		uc.phase2 = loadQAccessPhase2Config()
+		jsonPath := uc.phase2.coeffJSONPath
 		if c, err := LoadQAccessTCoefficients(jsonPath); err == nil {
 			uc.coeffs = c
 			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s",
@@ -118,6 +134,15 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 		} else {
 			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s (json=%s err=%v)",
 				uc.coeffs.Alpha, uc.coeffs.Beta, uc.coeffs.Gamma, uc.coeffs.Source, jsonPath, err)
+		}
+		if uc.phase2.runtimeExport {
+			uc.runtimeExporter = newQAccessSampleExporter(
+				uc.phase2.runtimeSamples, runID, uc.phase2.runtimeBufferMax,
+			)
+			if err := uc.runtimeExporter.ensureOpen(); err != nil {
+				utils.Infof("[qaccess_t] runtime sample export open failed path=%s err=%v",
+					uc.phase2.runtimeSamples, err)
+			}
 		}
 	case ModeQAccessCollect:
 		uc.trainCollector = newQAccessTrainCollector(runID)
@@ -132,10 +157,16 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 
 func (uc *UtilityController) SetMode(mode UtilityMode) { uc.Mode = mode }
 
-func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.coeffs }
+func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.getCoefficients() }
 
 // BeginMonitorRound resets per-tick state (call once per scheduler monitor cycle).
 func (uc *UtilityController) BeginMonitorRound() {
+	now := time.Now()
+	if uc.Mode == ModeQAccessT {
+		uc.finalizeMonitorRoundThroughput()
+		uc.maybeReloadCoefficients(now)
+		uc.maybeTriggerCoefficientUpdate(now)
+	}
 	if uc.Mode == ModeQAccessCollect && uc.trainCollector != nil {
 		_ = uc.trainCollector.flushAllPending(func(pid protocol.PathID) float64 {
 			if prev, ok := uc.Prev[pid]; ok {
@@ -144,6 +175,14 @@ func (uc *UtilityController) BeginMonitorRound() {
 			return 0
 		})
 		uc.collectIdx++
+	}
+	if uc.Mode == ModeQAccessT && uc.runtimeExporter != nil {
+		_ = uc.runtimeExporter.flushAllPending(func(pid protocol.PathID) float64 {
+			if prev, ok := uc.Prev[pid]; ok {
+				return prev.LastBWbps
+			}
+			return 0
+		})
 	}
 	uc.roundGTotal = 0
 }
@@ -233,6 +272,10 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 
 	active := PathMetricsActive(pm)
 
+	if uc.Mode == ModeQAccessT {
+		uc.noteActivePathThroughput(pm)
+	}
+
 	prev, ok := uc.Prev[pm.PathID]
 	if !ok {
 		prev = &PathState{LastOWDms: pm.OWDms, LastBWbps: pm.BWbps, LastLoss: pm.LossRate, LastTime: now}
@@ -250,7 +293,8 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		gTotal = normG
 	}
 
-	alpha, beta, gamma := uc.coeffs.Alpha, uc.coeffs.Beta, uc.coeffs.Gamma
+	coeffs := uc.getCoefficients()
+	alpha, beta, gamma := coeffs.Alpha, coeffs.Beta, coeffs.Gamma
 	gain, backoff := 1.0, 1.0
 	var u float64
 
@@ -288,6 +332,15 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
 		if err := uc.trainCollector.recordPending(row, pm.PathID, pm.BWbps); err != nil {
 			utils.Infof("[qaccess_collect] csv write error path=%v: %v", pm.PathID, err)
+		}
+	}
+
+	if uc.Mode == ModeQAccessT && active && uc.runtimeExporter != nil {
+		pm.Timestamp = now
+		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
+		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
+		if err := uc.runtimeExporter.recordPending(row, pm.PathID, pm.BWbps); err != nil {
+			utils.Infof("[qaccess_t] runtime sample export error path=%v: %v", pm.PathID, err)
 		}
 	}
 

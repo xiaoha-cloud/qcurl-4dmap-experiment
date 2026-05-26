@@ -24,6 +24,7 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
+from qaccess_io import atomic_write_json  # noqa: E402
 from qaccess_math import (  # noqa: E402
     candidate_triples,
     normalize_d,
@@ -300,8 +301,7 @@ def main() -> None:
             "input_csv": str(csv_path),
             "mode": "direct",
         }
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+        atomic_write_json(args.output, out)
         print(
             f"[optimize] DIRECT selected alpha={best_alpha} beta={best_beta} gamma={best_gamma} "
             f"mean_next_bw_bps={best_score:.0f} (n={n_used})"
@@ -344,8 +344,7 @@ def main() -> None:
         "mode": "rf",
     }
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(json.dumps(out, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(args.output, out)
 
     print(
         f"[optimize] RF selected alpha={best_alpha} beta={best_beta} gamma={best_gamma} "
