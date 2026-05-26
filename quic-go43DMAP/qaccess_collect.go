@@ -17,9 +17,13 @@ var qaccessTrainCSVHeader = []string{
 	"lost_bytes_delta", "retrans_bytes_delta",
 	"cwnd_bytes", "inflight_bytes", "cwnd_room",
 	"alpha", "beta", "gamma", "utility", "gain", "backoff",
-	"next_bw_bps", "next_goodput_bps",
+	"next_bw_bps", "next_goodput_bps", // next_goodput_bps: reserved for future receiver-side goodput labelling; empty in Phase 1
 }
 
+// qaccessTrainCollector exports labelled training rows for offline RFR training.
+// It does not implement a separate monitor: it consumes PathMetrics built by the
+// existing scheduler monitor (monitorUpdatePathState / monitorApplyUtility) and
+// writes CSV samples only.
 type qaccessTrainCollector struct {
 	mu      sync.Mutex
 	path    string
@@ -137,6 +141,7 @@ func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta,
 	row["gain"] = fmt.Sprintf("%.4f", sig.Gain)
 	row["backoff"] = fmt.Sprintf("%.4f", sig.Backoff)
 	row["next_bw_bps"] = ""
+	// next_goodput_bps: reserved, intentionally blank in Phase 1 (see train_qaccess_t.py).
 	row["next_goodput_bps"] = ""
 	return row
 }
