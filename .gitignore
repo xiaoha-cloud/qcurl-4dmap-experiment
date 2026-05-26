@@ -12,5 +12,8 @@
 !/logs_exp/vm_run_*/
 !/logs_exp/vm_runs/
 
-# Local-only planning notes (not pushed to remote)
+# Local-only planning notes and editor metadata (not pushed to remote)
 local-online-projection-weights-plan.md
+AGENTS.md
+.cursorignore
+.cursor/
