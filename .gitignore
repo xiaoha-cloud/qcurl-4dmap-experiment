@@ -12,4 +12,5 @@
 !/logs_exp/vm_run_*/
 !/logs_exp/vm_runs/
 
-# Local-only planning notes (not pushed to remote)
+.cursorignore
+.cursor/
