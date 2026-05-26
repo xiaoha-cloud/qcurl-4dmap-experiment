@@ -12,5 +12,5 @@
 !/logs_exp/vm_run_*/
 !/logs_exp/vm_runs/
 
-.cursorignore
-.cursor/
+
+

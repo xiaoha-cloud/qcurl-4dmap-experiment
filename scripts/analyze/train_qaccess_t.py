@@ -2,10 +2,16 @@
 """
 Train Q-ACCeSS-T Random Forest Regression model on collect-mode CSV.
 
-Input:  derived/qaccess_training_samples.csv
+Preferred input: derived/qaccess_training_samples_clean.csv
+  (from scripts/analyze/preprocess_qaccess_training.py)
+Fallback input:  derived/qaccess_training_samples.csv
+
 Output: derived/qaccess_t_model.pkl
         derived/qaccess_t_validation_metrics.json
         derived/qaccess_t_feature_importance.csv
+
+next_goodput_bps is reserved for future receiver side goodput labelling and is
+ignored in Phase 1. Training uses FEATURES with target next_bw_bps only.
 """
 
 from __future__ import annotations
@@ -26,12 +32,14 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 
 _REPO = Path(__file__).resolve().parents[2]
-DEFAULT_CSV = _REPO / "derived" / "qaccess_training_samples.csv"
+DEFAULT_CSV_RAW = _REPO / "derived" / "qaccess_training_samples.csv"
+DEFAULT_CSV_CLEAN = _REPO / "derived" / "qaccess_training_samples_clean.csv"
 DEFAULT_MODEL = _REPO / "derived" / "qaccess_t_model.pkl"
 DEFAULT_METRICS = _REPO / "derived" / "qaccess_t_validation_metrics.json"
 DEFAULT_IMPORTANCE = _REPO / "derived" / "qaccess_t_feature_importance.csv"
 
 TARGET = "next_bw_bps"
+# next_goodput_bps: present in qaccess_collect CSV header but unused in Phase 1; not loaded.
 FEATURES = [
     "bw_bps",
     "owd_ms",
@@ -49,6 +57,35 @@ FEATURES = [
     "gain",
     "backoff",
 ]
+
+
+def resolve_training_csv(explicit: Path | None) -> Path:
+    """Prefer preprocessed clean CSV; fall back to raw collect CSV."""
+    if explicit is not None:
+        path = explicit.resolve()
+        print(f"[train_qaccess_t] input CSV (explicit): {path}")
+        return path
+
+    clean = DEFAULT_CSV_CLEAN.resolve()
+    raw = DEFAULT_CSV_RAW.resolve()
+    if clean.is_file():
+        print(f"[train_qaccess_t] input CSV (preprocessed): {clean}")
+        return clean
+
+    if raw.is_file():
+        print(
+            "[train_qaccess_t] warning: preprocessed CSV not found; using raw collect CSV",
+            file=sys.stderr,
+        )
+        print(
+            "[train_qaccess_t] hint: run python3 scripts/analyze/preprocess_qaccess_training.py",
+            file=sys.stderr,
+        )
+        print(f"[train_qaccess_t] input CSV (raw collect): {raw}")
+        return raw
+
+    print(f"[train_qaccess_t] input CSV (expected clean, missing): {clean}")
+    return clean
 
 
 def _load_csv(csv_path: Path, max_samples: int, from_tail: bool) -> pd.DataFrame:
@@ -135,7 +172,12 @@ def _safe_joblib_dump(model: object, path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Train Q-ACCeSS-T RFR on collect CSV")
-    ap.add_argument("--input", type=Path, default=DEFAULT_CSV)
+    ap.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help="Training CSV (default: clean CSV if present, else raw collect CSV)",
+    )
     ap.add_argument("--model-out", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("--metrics-out", type=Path, default=DEFAULT_METRICS)
     ap.add_argument("--importance-out", type=Path, default=DEFAULT_IMPORTANCE)
@@ -161,12 +203,11 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    csv_path = args.input.resolve()
+    csv_path = resolve_training_csv(args.input)
     model_path = args.model_out.resolve()
     metrics_path = args.metrics_out.resolve()
     importance_path = args.importance_out.resolve()
 
-    print(f"[train_qaccess_t] input CSV: {csv_path}")
     if not csv_path.is_file():
         print(f"[error] missing training CSV: {csv_path}", file=sys.stderr)
         sys.exit(1)
