@@ -99,6 +99,8 @@ type UtilityController struct {
 	lastCoeffCheck       time.Time
 	lastCoeffMtime       time.Time
 	lastTriggerTime      time.Time
+	lastPeriodicTrigger  time.Time
+	triggerCount         int64
 	roundBwHistory       []float64
 	currentRoundTotalBwBps float64
 	currentRoundActivePaths int
