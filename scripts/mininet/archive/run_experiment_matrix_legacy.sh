@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ARCHIVED — not part of final Q-ACCeSS-T workflow. Use ../run_qaccess_t_eval_matrix.sh instead.
+# ARCHIVED — not part of final Q-ACCeSS-T workflow. Use ../run_qaccess_t_fig7_dynamic_eval.sh instead.
 #
 # Batch runner for mp_topo.py: Phase 1 (static) + Phase 2 (fixed T/D/L + dynamic tc) + Phase 3 (auto).
 #

@@ -3,7 +3,7 @@
 Final evaluation uses only (parent directory):
 
 - `mp_topo.py`
-- `run_qaccess_t_eval_matrix.sh`
+- `run_qaccess_t_fig7_dynamic_eval.sh`
 - `tc_bw_steps.sh`
 - `bw_profile.fig7_200s.env`
 
