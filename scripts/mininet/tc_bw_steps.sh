@@ -31,15 +31,35 @@ done < "$PROFILE"
 
 log() { echo "[$(date -Iseconds)] [tc_bw] $*" >&2; }
 
+log_qdisc_state() {
+  local mbit="$1"
+  log "tc_cmd: tc qdisc replace dev ${IFACE} root tbf rate ${mbit}mbit burst 64kbit latency 400ms"
+  tc qdisc show dev "$IFACE" 2>&1 | while IFS= read -r line; do
+    log "qdisc_show: ${line}"
+  done
+  tc -s qdisc show dev "$IFACE" 2>&1 | while IFS= read -r line; do
+    log "qdisc_stats: ${line}"
+  done
+}
+
+log "profile=${PROFILE}"
+log "parsed IFACE=${IFACE} step_count=${#T_AT[@]}"
+for i in "${!T_AT[@]}"; do
+  log "profile_step[$i] at=${T_AT[$i]}s bw=${T_BW[$i]}mbit"
+done
+log "timeline_origin=tc_bw_steps.sh start (sleep/s steps are relative to this moment)"
+
 apply_bw() {
   local mbit="$1"
   # Use TBF to force egress shaping to the target capacity.
   if tc qdisc replace dev "$IFACE" root tbf rate "${mbit}mbit" burst 64kbit latency 400ms 2>/dev/null; then
+    log_qdisc_state "$mbit"
     return 0
   fi
   log "replace failed, trying del+add (may drop Mininet TCLink qdisc on this iface)"
   tc qdisc del dev "$IFACE" root 2>/dev/null || true
   tc qdisc add dev "$IFACE" root tbf rate "${mbit}mbit" burst 64kbit latency 400ms
+  log_qdisc_state "$mbit"
 }
 
 prev=0
