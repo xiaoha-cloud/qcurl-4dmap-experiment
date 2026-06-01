@@ -83,6 +83,17 @@ SCENARIOS = {
         "path_a": (20, "40ms", 0),
         "path_b": (20, "20ms", 0.001),
     },
+    # Path B stress validation: lower Path A static cap so multipath uses Path B more.
+    # Same loss/delay as fig7; combine with bw_profile.fig7_200s.env on h2-eth1 (Path B egress).
+    "pathB_stress": {
+        "path_a": (10, "40ms", 0),
+        "path_b": (20, "20ms", 0.001),
+    },
+    # Stronger variant: Path A 5 Mbps so Path B should carry more before 100s TBF drop (30→10 Mbps).
+    "pathB_stress_strong": {
+        "path_a": (5, "40ms", 0),
+        "path_b": (20, "20ms", 0.001),
+    },
 }
 
 
