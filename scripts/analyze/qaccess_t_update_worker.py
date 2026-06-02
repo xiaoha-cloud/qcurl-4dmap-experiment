@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Q-ACCeSS-T Phase 2 update worker (offline / application-layer optimization).
+Q-ACCeSS-T Phase 2 update worker (buffer-full trigger).
 
-Polls qaccess_update_request.json written by Go when throughput drops.
-Reads recent runtime samples, scores 64 coefficient candidates with the Phase 1 RFR,
-writes qaccess_t_best_coefficients.json atomically for Go reload.
+Polls qaccess_update_request.json written by Go when the runtime MI buffer is full.
+Each request_id is processed at most once; on success the request is archived and
+runtime samples are rotated (archive + truncate) so the next cycle uses a clean buffer.
+
+Writes only derived/qaccess_t_runtime_coefficients.json (never qaccess_t_initial_coefficients.json).
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import subprocess
+import re
+import shutil
 import sys
 import time
-from io import StringIO
 from pathlib import Path
 
 import joblib
@@ -26,14 +28,23 @@ if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
 from qaccess_io import atomic_write_json  # noqa: E402
-from qaccess_math import candidate_triples, normalize_d, normalize_g, normalize_l  # noqa: E402
-from qaccess_math import qaccess_gain_backoff, qaccess_utility  # noqa: E402
+from qaccess_math import (  # noqa: E402
+    normalize_d,
+    normalize_g,
+    normalize_l,
+    phase2_candidate_triples,
+    qaccess_gain_backoff,
+    qaccess_utility,
+)
 
 DEFAULT_REQUEST = _REPO / "derived" / "qaccess_update_request.json"
 DEFAULT_SAMPLES = _REPO / "derived" / "qaccess_runtime_samples.csv"
 DEFAULT_MODEL = _REPO / "derived" / "qaccess_t_model.pkl"
-DEFAULT_COEFFS = _REPO / "derived" / "qaccess_t_best_coefficients.json"
+DEFAULT_INITIAL_COEFFS = _REPO / "derived" / "qaccess_t_initial_coefficients.json"
+DEFAULT_COEFFS = _REPO / "derived" / "qaccess_t_runtime_coefficients.json"
 DEFAULT_RESPONSE = _REPO / "derived" / "qaccess_update_response.json"
+DEFAULT_STATE = _REPO / "derived" / "qaccess_worker_state.json"
+DEFAULT_ARCHIVE_DIR = _REPO / "derived" / "qaccess_processed_buffers"
 
 FEATURES = [
     "bw_bps",
@@ -53,23 +64,32 @@ FEATURES = [
     "backoff",
 ]
 
+IMPROVEMENT_MIN_PCT = 3.0
+MAX_COEFF_STEP = 0.1
+MIN_BETA_GAMMA = 0.1
 
-def _load_csv_tail(csv_path: Path, tail_rows: int) -> pd.DataFrame:
-    if tail_rows <= 0:
-        return pd.read_csv(csv_path)
-    header = subprocess.run(
-        ["head", "-n", "1", str(csv_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    body = subprocess.run(
-        ["tail", "-n", str(tail_rows), str(csv_path)],
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout
-    return pd.read_csv(StringIO(header + body))
+
+def _load_state(path: Path) -> dict:
+    if not path.is_file():
+        return {"processed_request_ids": []}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"processed_request_ids": []}
+
+
+def _save_state(path: Path, state: dict) -> None:
+    atomic_write_json(path, state)
+
+
+def _safe_archive_name(request_id: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", request_id) or "unknown"
+
+
+def _load_runtime_samples(samples_path: Path) -> pd.DataFrame:
+    if not samples_path.is_file():
+        return pd.DataFrame()
+    return pd.read_csv(samples_path)
 
 
 def _clean_runtime_samples(df: pd.DataFrame) -> pd.DataFrame:
@@ -124,17 +144,62 @@ def _feature_matrix(samples: pd.DataFrame, alpha: float, beta: float, gamma: flo
     return pd.DataFrame(rows, columns=FEATURES)
 
 
-def _pick_coefficients_rf(samples: pd.DataFrame, model) -> tuple[float, float, float, float]:
-    best_alpha, best_beta, best_gamma = 0.70, 0.10, 0.10
+def _mean_predicted_bw(samples: pd.DataFrame, model, alpha: float, beta: float, gamma: float) -> float:
+    X = _feature_matrix(samples, alpha, beta, gamma)
+    if X.empty:
+        return -1.0
+    preds = np.asarray(model.predict(X), dtype=float)
+    return float(np.mean(preds))
+
+
+def _pick_best_candidate(
+    samples: pd.DataFrame, model
+) -> tuple[float, float, float, float]:
+    best_alpha, best_beta, best_gamma = 0.70, MIN_BETA_GAMMA, MIN_BETA_GAMMA
     best_pred = -1.0
-    for alpha, beta, gamma in candidate_triples():
-        X = _feature_matrix(samples, alpha, beta, gamma)
-        preds = np.asarray(model.predict(X), dtype=float)
-        mean_pred = float(np.mean(preds))
+    for alpha, beta, gamma in phase2_candidate_triples():
+        mean_pred = _mean_predicted_bw(samples, model, alpha, beta, gamma)
         if mean_pred > best_pred:
             best_pred = mean_pred
             best_alpha, best_beta, best_gamma = alpha, beta, gamma
     return best_alpha, best_beta, best_gamma, best_pred
+
+
+def _apply_max_step(current: float, target: float, max_step: float = MAX_COEFF_STEP) -> float:
+    delta = max(-max_step, min(max_step, target - current))
+    return current + delta
+
+
+def _archive_and_truncate_buffer(
+    samples_path: Path,
+    archive_dir: Path,
+    request_id: str,
+    request_path: Path,
+) -> None:
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    safe = _safe_archive_name(request_id)
+    if samples_path.is_file() and samples_path.stat().st_size > 0:
+        dest = archive_dir / f"qaccess_runtime_samples_{safe}.csv"
+        shutil.copy2(samples_path, dest)
+        header = samples_path.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        with samples_path.open("w", encoding="utf-8", newline="") as f:
+            if header:
+                f.write(header[0] + "\n")
+    if request_path.is_file():
+        req_dest = archive_dir / f"qaccess_update_request_{safe}.json"
+        shutil.copy2(request_path, req_dest)
+        request_path.unlink()
+
+
+def _assert_runtime_coeffs_path(coeffs_out: Path) -> None:
+    resolved = coeffs_out.resolve()
+    if resolved == DEFAULT_INITIAL_COEFFS.resolve():
+        raise ValueError(
+            f"refusing to write initial coefficients file: {coeffs_out}\n"
+            f"use --coeffs-out {DEFAULT_COEFFS.relative_to(_REPO)}"
+        )
+    if resolved.name == "qaccess_t_initial_coefficients.json":
+        raise ValueError(f"refusing to write initial coefficients file: {coeffs_out}")
 
 
 def _process_request(
@@ -143,108 +208,156 @@ def _process_request(
     model_path: Path,
     coeffs_out: Path,
     response_out: Path,
+    state_path: Path,
+    archive_dir: Path,
     mode: str,
-    recent_rows: int,
-    retrain: bool,
 ) -> bool:
     if not request_path.is_file():
         return False
     try:
         req = json.loads(request_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[worker] skip: invalid request json: {exc}", file=sys.stderr)
         return False
 
-    if not samples_path.is_file():
-        print(f"[worker] skip: missing runtime samples {samples_path}", file=sys.stderr)
+    request_id = str(req.get("request_id") or "").strip()
+    if not request_id:
+        print("[worker] skip: request missing request_id", file=sys.stderr)
         return False
 
-    df = _load_csv_tail(samples_path, recent_rows)
+    state = _load_state(state_path)
+    processed: list[str] = list(state.get("processed_request_ids") or [])
+    if request_id in processed:
+        if request_path.is_file():
+            request_path.unlink()
+        return False
+
+    df = _load_runtime_samples(samples_path)
     samples = _clean_runtime_samples(df)
     if samples.empty:
-        print("[worker] skip: no valid runtime samples after clean", file=sys.stderr)
+        print("[worker] skip: no valid runtime samples", file=sys.stderr)
         return False
-
-    if retrain:
-        print("[worker] retrain not implemented; using existing model", file=sys.stderr)
 
     if mode != "rf":
-        print(f"[worker] unsupported mode {mode!r}; use rf", file=sys.stderr)
+        print(f"[worker] unsupported mode {mode!r}", file=sys.stderr)
         return False
-
     if not model_path.is_file():
         print(f"[worker] missing model {model_path}", file=sys.stderr)
         return False
 
     model = joblib.load(model_path)
-    alpha, beta, gamma, pred = _pick_coefficients_rf(samples, model)
+    cur_alpha = float(req.get("current_alpha", 0.6) or 0.6)
+    cur_beta = float(req.get("current_beta", 0.1) or 0.1)
+    cur_gamma = float(req.get("current_gamma", 0.1) or 0.1)
 
-    out = {
-        "alpha": alpha,
-        "beta": beta,
-        "gamma": gamma,
-        "source": "qaccess_t_update_worker.py",
-        "metric": "predicted_next_bw_bps",
-        "predicted_next_bw_bps": pred,
-        "n_samples": int(len(samples)),
-        "request": req,
-        "mode": mode,
-    }
-    atomic_write_json(coeffs_out, out)
+    pred_current = _mean_predicted_bw(samples, model, cur_alpha, cur_beta, cur_gamma)
+    best_alpha, best_beta, best_gamma, pred_best = _pick_best_candidate(samples, model)
 
-    response = {
-        "timestamp_ms": int(time.time() * 1000),
-        "status": "ok",
-        "coeffs_out": str(coeffs_out.resolve()),
-        "alpha": alpha,
-        "beta": beta,
-        "gamma": gamma,
-        "predicted_next_bw_bps": pred,
-        "n_samples": int(len(samples)),
+    improvement_ok = pred_current <= 0 or pred_best >= pred_current * (1.0 + IMPROVEMENT_MIN_PCT / 100.0)
+
+    applied_alpha = _apply_max_step(cur_alpha, best_alpha)
+    applied_beta = max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, best_beta))
+    applied_gamma = max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, best_gamma))
+
+    ts_ms = int(time.time() * 1000)
+    response: dict = {
+        "request_id": request_id,
+        "timestamp_ms": ts_ms,
+        "status": "ok" if improvement_ok else "skipped",
         "request_reason": req.get("reason"),
+        "n_samples": int(len(samples)),
+        "predicted_current_bw_bps": pred_current,
+        "predicted_best_bw_bps": pred_best,
+        "improvement_min_pct": IMPROVEMENT_MIN_PCT,
+        "current_alpha": cur_alpha,
+        "current_beta": cur_beta,
+        "current_gamma": cur_gamma,
+        "candidate_alpha": best_alpha,
+        "candidate_beta": best_beta,
+        "candidate_gamma": best_gamma,
     }
-    atomic_write_json(response_out, response)
 
-    print(
-        f"[worker] updated coeffs alpha={alpha:.4f} beta={beta:.4f} gamma={gamma:.4f} "
-        f"predicted_next_bw_bps={pred:.0f} n={len(samples)}"
-    )
+    _assert_runtime_coeffs_path(coeffs_out)
+
+    if improvement_ok:
+        coeffs_payload = {
+            "alpha": applied_alpha,
+            "beta": applied_beta,
+            "gamma": applied_gamma,
+            "source": "qaccess_t_update_worker.py",
+            "metric": "predicted_next_bw_bps",
+            "predicted_next_bw_bps": pred_best,
+            "n_samples": int(len(samples)),
+            "request_id": request_id,
+            "request": req,
+            "mode": mode,
+        }
+        atomic_write_json(coeffs_out, coeffs_payload)
+        response.update({
+            "alpha": applied_alpha,
+            "beta": applied_beta,
+            "gamma": applied_gamma,
+            "coeffs_out": str(coeffs_out.resolve()),
+            "skip_reason": "",
+        })
+        print(
+            f"[worker] request_id={request_id} updated coeffs "
+            f"alpha={applied_alpha:.4f} beta={applied_beta:.4f} gamma={applied_gamma:.4f} "
+            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} n={len(samples)}"
+        )
+    else:
+        response.update({
+            "alpha": cur_alpha,
+            "beta": cur_beta,
+            "gamma": cur_gamma,
+            "skip_reason": "improvement_gate",
+        })
+        print(
+            f"[worker] request_id={request_id} skipped (improvement gate) "
+            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
+            f"need>={pred_current * (1 + IMPROVEMENT_MIN_PCT/100):.0f}"
+        )
+
+    atomic_write_json(response_out, response)
+    _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
+
+    processed.append(request_id)
+    state["processed_request_ids"] = processed[-200:]
+    state["last_processed_request_id"] = request_id
+    _save_state(state_path, state)
     return True
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Q-ACCeSS-T Phase 2 coefficient update worker")
+    ap = argparse.ArgumentParser(description="Q-ACCeSS-T Phase 2 buffer-full update worker")
     ap.add_argument("--request", type=Path, default=DEFAULT_REQUEST)
     ap.add_argument("--runtime-samples", type=Path, default=DEFAULT_SAMPLES)
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
     ap.add_argument("--coeffs-out", type=Path, default=DEFAULT_COEFFS)
     ap.add_argument("--response-out", type=Path, default=DEFAULT_RESPONSE)
+    ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
+    ap.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR)
     ap.add_argument("--mode", choices=["rf"], default="rf")
     ap.add_argument("--poll-interval", type=float, default=5.0)
-    ap.add_argument("--recent-rows", type=int, default=5000)
-    ap.add_argument("--retrain", action="store_true", help="Retrain RFR (not implemented)")
     ap.add_argument("--once", action="store_true", help="Process one request if present, then exit")
     args = ap.parse_args()
 
-    last_mtime = 0.0
-    print(f"[worker] polling {args.request.resolve()} every {args.poll_interval}s")
+    print(
+        f"[worker] buffer-full mode; polling {args.request.resolve()} every {args.poll_interval}s",
+        flush=True,
+    )
 
     while True:
-        req_path = args.request.resolve()
-        if req_path.is_file():
-            mtime = req_path.stat().st_mtime
-            if mtime > last_mtime:
-                if _process_request(
-                    req_path,
-                    args.runtime_samples.resolve(),
-                    args.model.resolve(),
-                    args.coeffs_out.resolve(),
-                    args.response_out.resolve(),
-                    args.mode,
-                    args.recent_rows,
-                    args.retrain,
-                ):
-                    last_mtime = mtime
-
+        _process_request(
+            args.request.resolve(),
+            args.runtime_samples.resolve(),
+            args.model.resolve(),
+            args.coeffs_out.resolve(),
+            args.response_out.resolve(),
+            args.state.resolve(),
+            args.archive_dir.resolve(),
+            args.mode,
+        )
         if args.once:
             break
         time.sleep(args.poll_interval)

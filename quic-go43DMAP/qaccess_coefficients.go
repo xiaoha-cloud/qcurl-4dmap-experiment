@@ -19,7 +19,9 @@ const (
 	defaultQAccessAlpha = 0.70
 	defaultQAccessBeta  = 0.10
 	defaultQAccessGamma = 0.10
-	defaultCoeffsJSON   = "derived/qaccess_t_best_coefficients.json"
+	// Phase 1 optimize / static qaccess_t default; Phase 2 dynamic runs should set
+	// QACCESS_COEFFS_JSON=derived/qaccess_t_runtime_coefficients.json (see reset_qaccess_phase2_runtime.sh).
+	defaultCoeffsJSON = "derived/qaccess_t_best_coefficients.json"
 )
 
 var qaccessAlphaCandidates = []float64{0.60, 0.70, 0.80, 0.90}

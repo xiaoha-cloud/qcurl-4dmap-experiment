@@ -2,6 +2,7 @@ package quic
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,10 +17,8 @@ const (
 	defaultCoeffReloadIntervalMs = 5000
 	defaultCoeffSmoothing        = 0.2
 	defaultTriggerDropPct        = 5.0
-	defaultTriggerCooldownMs     = 30000
-	defaultTriggerMinSamples     = 100
-	defaultTriggerWarmupSamples  = 200
-	defaultRuntimeBufferSize     = 10000
+	defaultTriggerCooldownMs     = 60000
+	defaultRuntimeBufferSize     = 5000
 	maxRoundBwHistory            = 32
 )
 
@@ -33,14 +32,14 @@ type qaccessPhase2Config struct {
 	runtimeSamples   string
 	runtimeBufferMax int64
 
-	triggerUpdate         bool
-	triggerDropPct        float64
-	triggerCooldown       time.Duration
-	triggerMinSamples     int64
-	triggerOnBufferReady  bool
-	triggerWarmupSamples  int64
-	triggerPeriodicMs     int
-	updateRequestPath     string
+	triggerUpdate           bool
+	triggerOnBufferFull     bool
+	triggerOnThroughputDrop bool
+	triggerDropPct          float64
+	triggerCooldown         time.Duration
+	triggerPeriodicMs       int
+	updateRequestPath       string
+	updateResponsePath      string
 }
 
 func loadQAccessPhase2Config() qaccessPhase2Config {
@@ -54,14 +53,14 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		runtimeSamples:   resolveRuntimeSamplesCSVPath(),
 		runtimeBufferMax: int64(envInt("QACCESS_RUNTIME_BUFFER_SIZE", defaultRuntimeBufferSize)),
 
-		triggerUpdate:        envBool("QACCESS_TRIGGER_UPDATE", false),
-		triggerDropPct:       envFloat("QACCESS_TRIGGER_DROP_PCT", defaultTriggerDropPct),
-		triggerCooldown:      time.Duration(envInt("QACCESS_TRIGGER_COOLDOWN_MS", defaultTriggerCooldownMs)) * time.Millisecond,
-		triggerMinSamples:    int64(envInt("QACCESS_TRIGGER_MIN_SAMPLES", defaultTriggerMinSamples)),
-		triggerOnBufferReady: envBool("QACCESS_TRIGGER_ON_BUFFER_READY", true),
-		triggerWarmupSamples: int64(envInt("QACCESS_TRIGGER_WARMUP_SAMPLES", defaultTriggerWarmupSamples)),
-		triggerPeriodicMs:    envInt("QACCESS_TRIGGER_PERIODIC_MS", 0),
-		updateRequestPath:    resolveUpdateRequestJSONPath(),
+		triggerUpdate:           envBool("QACCESS_TRIGGER_UPDATE", false),
+		triggerOnBufferFull:     envBool("QACCESS_TRIGGER_ON_BUFFER_FULL", true),
+		triggerOnThroughputDrop: envBool("QACCESS_TRIGGER_ON_THROUGHPUT_DROP", false),
+		triggerDropPct:          envFloat("QACCESS_TRIGGER_DROP_PCT", defaultTriggerDropPct),
+		triggerCooldown:         time.Duration(envInt("QACCESS_TRIGGER_COOLDOWN_MS", defaultTriggerCooldownMs)) * time.Millisecond,
+		triggerPeriodicMs:       envInt("QACCESS_TRIGGER_PERIODIC_MS", 0),
+		updateRequestPath:       resolveUpdateRequestJSONPath(),
+		updateResponsePath:      resolveUpdateResponseJSONPath(),
 	}
 }
 
@@ -69,14 +68,21 @@ func resolveRuntimeSamplesCSVPath() string {
 	if p := os.Getenv("QACCESS_RUNTIME_SAMPLES_CSV"); p != "" {
 		return p
 	}
-	return "derived/qaccess_runtime_samples.csv"
+	return filepath.Join("derived", "qaccess_runtime_samples.csv")
 }
 
 func resolveUpdateRequestJSONPath() string {
 	if p := os.Getenv("QACCESS_UPDATE_REQUEST_JSON"); p != "" {
 		return p
 	}
-	return "derived/qaccess_update_request.json"
+	return filepath.Join("derived", "qaccess_update_request.json")
+}
+
+func resolveUpdateResponseJSONPath() string {
+	if p := os.Getenv("QACCESS_UPDATE_RESPONSE_JSON"); p != "" {
+		return p
+	}
+	return filepath.Join("derived", "qaccess_update_response.json")
 }
 
 func envBool(key string, def bool) bool {
@@ -234,8 +240,6 @@ func (uc *UtilityController) noteActivePathThroughput(pm PathMetrics) {
 	uc.currentRoundActivePaths++
 }
 
-// roundBwDropStats returns half-window average throughput and drop percentage from monitor history.
-// When history is too short or prevAvg is zero, prev/recent/drop are all zero.
 func (uc *UtilityController) roundBwDropStats() (prevAvg, recentAvg, dropPct float64) {
 	n := len(uc.roundBwHistory)
 	if n < 4 {
@@ -265,44 +269,72 @@ func (uc *UtilityController) runtimeBufferSize() int64 {
 	return uc.runtimeExporter.bufferSize()
 }
 
-func (uc *UtilityController) writeTriggerRequest(now time.Time, reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) bool {
+func (uc *UtilityController) newRequestID(now time.Time) string {
+	uc.requestSerial++
+	return fmt.Sprintf("%s_%d_%d", uc.RunID, now.UnixNano()/1e6, uc.requestSerial)
+}
+
+func (uc *UtilityController) writeBufferFullTrigger(now time.Time, bufSize int64) bool {
+	if uc.updateInProgress {
+		return false
+	}
+	if _, err := os.Stat(uc.phase2.updateRequestPath); err == nil {
+		return false
+	}
+
 	c := uc.getCoefficients()
-	uc.triggerCount++
+	requestID := uc.newRequestID(now)
 	req := map[string]interface{}{
+		"request_id":          requestID,
 		"timestamp_ms":        now.UnixNano() / 1e6,
-		"reason":              reason,
-		"previous_avg_bw_bps": prevAvg,
-		"recent_avg_bw_bps":   recentAvg,
-		"drop_pct":            dropPct,
+		"reason":              "buffer_full",
+		"runtime_buffer_size": bufSize,
+		"buffer_capacity":     uc.phase2.runtimeBufferMax,
 		"current_alpha":       c.Alpha,
 		"current_beta":        c.Beta,
 		"current_gamma":       c.Gamma,
-		"active_paths":        uc.lastRoundActivePaths,
-		"runtime_buffer_size": bufSize,
-		"trigger_count":       uc.triggerCount,
+		"run_id":              uc.RunID,
 	}
 	if err := writeJSONAtomic(uc.phase2.updateRequestPath, req); err != nil {
-		uc.triggerCount--
 		return false
 	}
+	uc.updateInProgress = true
+	uc.inflightRequestID = requestID
 	uc.lastTriggerTime = now
+	utils.Infof(
+		"[qaccess_t] buffer_full trigger request_id=%s runtime_buffer_size=%d capacity=%d alpha=%.4f beta=%.4f gamma=%.4f",
+		requestID, bufSize, uc.phase2.runtimeBufferMax, c.Alpha, c.Beta, c.Gamma,
+	)
 	return true
 }
 
-func (uc *UtilityController) logTriggerUpdate(reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) {
-	switch reason {
-	case "buffer_ready":
-		utils.Infof("[qaccess_t] trigger update reason=buffer_ready runtime_buffer_size=%d trigger_count=%d",
-			bufSize, uc.triggerCount)
-	case "throughput_drop":
-		utils.Infof("[qaccess_t] trigger update reason=throughput_drop previous_avg_bw=%.0f recent_avg_bw=%.0f drop_pct=%.2f runtime_buffer_size=%d trigger_count=%d",
-			prevAvg, recentAvg, dropPct, bufSize, uc.triggerCount)
-	case "periodic":
-		utils.Infof("[qaccess_t] trigger update reason=periodic runtime_buffer_size=%d trigger_count=%d",
-			bufSize, uc.triggerCount)
-	default:
-		utils.Infof("[qaccess_t] trigger update reason=%s runtime_buffer_size=%d trigger_count=%d",
-			reason, bufSize, uc.triggerCount)
+func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
+	if !uc.updateInProgress || uc.inflightRequestID == "" {
+		return
+	}
+	data, err := os.ReadFile(uc.phase2.updateResponsePath)
+	if err != nil {
+		return
+	}
+	var resp map[string]interface{}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return
+	}
+	rid, _ := resp["request_id"].(string)
+	if rid == "" || rid != uc.inflightRequestID {
+		return
+	}
+	status, _ := resp["status"].(string)
+	utils.Infof("[qaccess_t] update response request_id=%s status=%s", rid, status)
+
+	uc.updateInProgress = false
+	uc.inflightRequestID = ""
+	uc.lastTriggerTime = now
+
+	if uc.runtimeExporter != nil {
+		if err := uc.runtimeExporter.resetBuffer(); err != nil {
+			utils.Infof("[qaccess_t] runtime buffer reset after response failed: %v", err)
+		}
 	}
 }
 
@@ -311,20 +343,26 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 		return
 	}
 
-	bufSize := uc.runtimeBufferSize()
-	prevAvg, recentAvg, dropPct := uc.roundBwDropStats()
-	inCooldown := !uc.lastTriggerTime.IsZero() && now.Sub(uc.lastTriggerTime) < uc.phase2.triggerCooldown
-
-	// One-shot buffer-ready trigger: enough runtime MI samples collected (ACCeSS-like warmup).
-	if uc.phase2.triggerOnBufferReady && uc.phase2.runtimeExport && uc.runtimeExporter != nil &&
-		uc.triggerCount == 0 && bufSize >= uc.phase2.triggerWarmupSamples {
-		if uc.writeTriggerRequest(now, "buffer_ready", prevAvg, recentAvg, dropPct, bufSize) {
-			uc.logTriggerUpdate("buffer_ready", prevAvg, recentAvg, dropPct, bufSize)
-		}
+	uc.maybeCheckUpdateResponse(now)
+	if uc.updateInProgress {
 		return
 	}
 
-	if uc.runtimeExporter != nil && bufSize < uc.phase2.triggerMinSamples {
+	if !uc.phase2.runtimeExport || uc.runtimeExporter == nil {
+		return
+	}
+
+	bufSize := uc.runtimeBufferSize()
+	threshold := uc.phase2.runtimeBufferMax
+	if threshold <= 0 {
+		threshold = defaultRuntimeBufferSize
+	}
+
+	inCooldown := !uc.lastTriggerTime.IsZero() && now.Sub(uc.lastTriggerTime) < uc.phase2.triggerCooldown
+
+	// Primary trigger: full runtime training buffer (ACCeSS-like).
+	if uc.phase2.triggerOnBufferFull && bufSize >= threshold && !inCooldown {
+		uc.writeBufferFullTrigger(now, bufSize)
 		return
 	}
 
@@ -332,23 +370,61 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 		return
 	}
 
+	prevAvg, recentAvg, dropPct := uc.roundBwDropStats()
+
 	// Optional periodic debug trigger (off by default).
 	if uc.phase2.triggerPeriodicMs > 0 {
 		interval := time.Duration(uc.phase2.triggerPeriodicMs) * time.Millisecond
 		if uc.lastPeriodicTrigger.IsZero() || now.Sub(uc.lastPeriodicTrigger) >= interval {
-			if uc.writeTriggerRequest(now, "periodic", prevAvg, recentAvg, dropPct, bufSize) {
+			if uc.writeLegacyTriggerRequest(now, "periodic", prevAvg, recentAvg, dropPct, bufSize) {
 				uc.lastPeriodicTrigger = now
-				uc.logTriggerUpdate("periodic", prevAvg, recentAvg, dropPct, bufSize)
+				utils.Infof("[qaccess_t] periodic trigger (debug) runtime_buffer_size=%d", bufSize)
 			}
-			return
 		}
+		return
 	}
 
-	// Throughput-drop trigger (default threshold 5%).
-	n := len(uc.roundBwHistory)
-	if n >= 4 && prevAvg > 0 && dropPct >= uc.phase2.triggerDropPct {
-		if uc.writeTriggerRequest(now, "throughput_drop", prevAvg, recentAvg, dropPct, bufSize) {
-			uc.logTriggerUpdate("throughput_drop", prevAvg, recentAvg, dropPct, bufSize)
+	// Optional throughput-drop trigger (off by default; not primary).
+	if uc.phase2.triggerOnThroughputDrop {
+		n := len(uc.roundBwHistory)
+		if n >= 4 && prevAvg > 0 && dropPct >= uc.phase2.triggerDropPct {
+			if uc.writeLegacyTriggerRequest(now, "throughput_drop", prevAvg, recentAvg, dropPct, bufSize) {
+				utils.Infof(
+					"[qaccess_t] throughput_drop trigger drop_pct=%.2f runtime_buffer_size=%d",
+					dropPct, bufSize,
+				)
+			}
 		}
 	}
+}
+
+func (uc *UtilityController) writeLegacyTriggerRequest(now time.Time, reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) bool {
+	if uc.updateInProgress {
+		return false
+	}
+	if _, err := os.Stat(uc.phase2.updateRequestPath); err == nil {
+		return false
+	}
+	c := uc.getCoefficients()
+	requestID := uc.newRequestID(now)
+	req := map[string]interface{}{
+		"request_id":          requestID,
+		"timestamp_ms":        now.UnixNano() / 1e6,
+		"reason":              reason,
+		"previous_avg_bw_bps": prevAvg,
+		"recent_avg_bw_bps":   recentAvg,
+		"drop_pct":            dropPct,
+		"current_alpha":       c.Alpha,
+		"current_beta":        c.Beta,
+		"current_gamma":       c.Gamma,
+		"runtime_buffer_size": bufSize,
+		"run_id":              uc.RunID,
+	}
+	if err := writeJSONAtomic(uc.phase2.updateRequestPath, req); err != nil {
+		return false
+	}
+	uc.updateInProgress = true
+	uc.inflightRequestID = requestID
+	uc.lastTriggerTime = now
+	return true
 }
