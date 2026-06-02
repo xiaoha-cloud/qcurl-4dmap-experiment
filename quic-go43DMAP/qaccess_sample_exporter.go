@@ -137,6 +137,26 @@ func (e *qaccessSampleExporter) flushPendingLabelLocked(pathID protocol.PathID, 
 	return nil
 }
 
+// resetBuffer closes the CSV and clears in-memory counters after the worker archives a full buffer.
+func (e *qaccessSampleExporter) resetBuffer() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.writer != nil {
+		e.writer.Flush()
+	}
+	if e.file != nil {
+		if err := e.file.Close(); err != nil {
+			return err
+		}
+	}
+	e.file = nil
+	e.writer = nil
+	e.opened = false
+	e.rowsWritten = 0
+	e.pending = make(map[protocol.PathID]map[string]string)
+	return nil
+}
+
 func (e *qaccessSampleExporter) recordPending(row map[string]string, pathID protocol.PathID, nextBWbps float64) error {
 	if e.atCapacity() {
 		return nil

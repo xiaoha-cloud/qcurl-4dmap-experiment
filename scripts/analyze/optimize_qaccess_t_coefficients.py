@@ -37,6 +37,8 @@ from qaccess_math import (  # noqa: E402
 DEFAULT_CSV = _REPO / "derived" / "qaccess_training_samples.csv"
 DEFAULT_MODEL = _REPO / "derived" / "qaccess_t_model.pkl"
 DEFAULT_OUT = _REPO / "derived" / "qaccess_t_best_coefficients.json"
+# To seed Phase 2 experiments, copy the chosen row to derived/qaccess_t_initial_coefficients.json
+# (read-only baseline). Do not point the Phase 2 worker at the initial file.
 
 FEATURES = [
     "bw_bps",

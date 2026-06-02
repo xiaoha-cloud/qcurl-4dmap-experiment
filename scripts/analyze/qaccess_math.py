@@ -84,3 +84,18 @@ def candidate_triples() -> list[tuple[float, float, float]]:
             for g in GAMMA_CANDIDATES:
                 out.append((a, b, g))
     return out
+
+
+# Phase 2 runtime worker grid (beta/gamma >= 0.1; does not change Phase 1 optimize grid).
+PHASE2_ALPHA_CANDIDATES = [0.60, 0.70, 0.80]
+PHASE2_BETA_CANDIDATES = [0.10, 0.20, 0.30]
+PHASE2_GAMMA_CANDIDATES = [0.10, 0.20, 0.30]
+
+
+def phase2_candidate_triples() -> list[tuple[float, float, float]]:
+    out: list[tuple[float, float, float]] = []
+    for a in PHASE2_ALPHA_CANDIDATES:
+        for b in PHASE2_BETA_CANDIDATES:
+            for g in PHASE2_GAMMA_CANDIDATES:
+                out.append((a, b, g))
+    return out

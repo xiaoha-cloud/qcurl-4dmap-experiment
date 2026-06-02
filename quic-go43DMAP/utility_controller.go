@@ -100,7 +100,9 @@ type UtilityController struct {
 	lastCoeffMtime       time.Time
 	lastTriggerTime      time.Time
 	lastPeriodicTrigger  time.Time
-	triggerCount         int64
+	requestSerial        int64
+	updateInProgress     bool
+	inflightRequestID    string
 	roundBwHistory       []float64
 	currentRoundTotalBwBps float64
 	currentRoundActivePaths int
