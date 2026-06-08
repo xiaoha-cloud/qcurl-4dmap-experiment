@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Delay-only experiment (NOT throughput-primary, NOT Fig.8).
 #
-# Primary metrics: OWD/RTT proxy, jitter, path shift, recovery after delay spike.
-# Secondary metrics: total / per-path QUIC wire throughput.
+# Primary analysis: OWD/RTT proxy, jitter, path shift, recovery after delay spike.
+# Secondary analysis: total / per-path QUIC wire throughput.
 #
-# Fixed delay-sensitive coefficients (worker disabled):
-#   alpha=0.6  beta=0.1  gamma=0.3
+# Dynamic leg uses online worker updates (throughput-oriented RF model) to observe
+# how alpha/beta/gamma change under delay stress — delay/loss metrics remain primary.
 #
 # Topology (--scenario fig7):
 #   Path A: 20 Mbps, 40 ms, 0%
@@ -13,10 +13,16 @@
 #     0s: 20ms  90s: 80ms  100s: 20ms
 #
 # Runs:
-#   delay_baseline
-#   delay_qaccess_dynamic  (fixed coeffs, no throughput-oriented worker)
+#   delay_baseline        — no qaccess, no worker
+#   delay_qaccess_dynamic — qaccess + buffer_full worker (start worker first)
 #
 # Usage (VM, repo root):
+#   # Terminal 1 — start worker BEFORE dynamic leg:
+#   python3 scripts/analyze/qaccess_t_update_worker.py --poll-interval 5 \
+#     --model derived/qaccess_t_model.pkl \
+#     --coeffs-out derived/qaccess_t_runtime_coefficients.json
+#
+#   # Terminal 2:
 #   SAVE_LOGS=1 INPUT_FLV=~/Videos/push_input.flv \
 #     sudo -E ./scripts/mininet/run_qaccess_delay_only_eval.sh
 
@@ -25,23 +31,24 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
-COEFF_PROFILE="$ROOT/derived/qaccess_delay_sensitive_coefficients.json"
-RUNTIME_COEFFS="$ROOT/derived/qaccess_t_runtime_coefficients.json"
+RUNTIME_COEFFS="${QACCESS_COEFFS_JSON:-derived/qaccess_t_runtime_coefficients.json}"
 SCENARIO="${SCENARIO:-fig7}"
 DELAY_PROFILE="${DELAY_PROFILE:-scripts/mininet/delay_profile.pathB_200s.env}"
 TIMEOUT="${TIMEOUT:-220}"
 SAVE_LOGS="${SAVE_LOGS:-1}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
-BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-5000}"
+BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
+
+WORKER_CMD=(
+  python3 scripts/analyze/qaccess_t_update_worker.py
+  --poll-interval 5
+  --model derived/qaccess_t_model.pkl
+  --coeffs-out derived/qaccess_t_runtime_coefficients.json
+)
 
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "[error] run with sudo (Mininet needs root)" >&2
-  exit 1
-fi
-
-if [[ ! -f "$COEFF_PROFILE" ]]; then
-  echo "[error] missing coefficient profile: $COEFF_PROFILE" >&2
   exit 1
 fi
 
@@ -52,12 +59,28 @@ SESSION_DIR="logs_exp/session_delay_only_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SESSION_DIR"
 echo "$SESSION_DIR" > "logs_exp/.last_session"
 
-archive_runtime_samples() {
+print_worker_instructions() {
+  echo ""
+  echo "================================================================"
+  echo "WARNING: Start qaccess_t_update_worker.py in another terminal"
+  echo "         BEFORE the dynamic leg begins."
+  echo ""
+  echo "  cd $ROOT"
+  printf '  %q ' "${WORKER_CMD[@]}"
+  echo ""
+  echo ""
+  echo "Note (d8df254 branch): improvement gate is hardcoded at 3% in worker."
+  echo "       No --min-improvement-pct CLI on this branch."
+  echo "================================================================"
+  echo ""
+}
+
+archive_runtime_artifacts() {
   local dest_dir="$1"
-  local src="$ROOT/derived/qaccess_runtime_samples.csv"
-  if [[ -f "$src" ]]; then
-    cp "$src" "$dest_dir/qaccess_runtime_samples.csv"
-  fi
+  local samples="$ROOT/derived/qaccess_runtime_samples.csv"
+  local coeffs="$ROOT/$RUNTIME_COEFFS"
+  [[ -f "$samples" ]] && cp "$samples" "$dest_dir/qaccess_runtime_samples.csv"
+  [[ -f "$coeffs" ]] && cp "$coeffs" "$dest_dir/qaccess_t_runtime_coefficients.json"
 }
 
 run_one() {
@@ -74,29 +97,31 @@ run_one() {
   [[ "$LOG_CONTROL" == "1" ]] && cmd+=(--log-control)
   echo "[delay_only] scenario=$SCENARIO utility-mode=$um label=$label profile=$DELAY_PROFILE"
   env "$@" "${cmd[@]}"
-  archive_runtime_samples "$SESSION_DIR/$label"
+  archive_runtime_artifacts "$SESSION_DIR/$label"
 }
 
-echo "[delay_only] baseline leg (no Q-ACCeSS dynamic env)"
+echo "[delay_only] baseline leg (no qaccess, no worker)"
 bash "$RESET"
 run_one baseline delay_baseline
 
-echo "[delay_only] reset runtime + install delay-sensitive fixed coefficients"
+echo "[delay_only] reset runtime + initialize coefficients from initial (worker may update during run)"
 bash "$RESET"
-cp "$COEFF_PROFILE" "$RUNTIME_COEFFS"
-echo "[delay_only] runtime coefficients for dynamic leg:"
-cat "$RUNTIME_COEFFS"
+echo "[delay_only] runtime coefficients at dynamic leg start:"
+cat "$ROOT/$RUNTIME_COEFFS"
 
-echo "[delay_only] dynamic leg: fixed coeffs, worker DISABLED (throughput RF not used)"
+print_worker_instructions
+
+echo "[delay_only] dynamic leg: qaccess enabled, worker enabled, delay-only impairment"
 run_one qaccess_t delay_qaccess_dynamic \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
   QACCESS_COEFF_RELOAD=1 \
-  QACCESS_TRIGGER_UPDATE=0 \
+  QACCESS_TRIGGER_UPDATE=1 \
   QACCESS_RUNTIME_SAMPLE_EXPORT=1 \
-  QACCESS_TRIGGER_ON_BUFFER_FULL=0 \
-  QACCESS_RUNTIME_BUFFER_SIZE="$BUFFER_SIZE" \
+  QACCESS_TRIGGER_ON_BUFFER_FULL=1 \
+  QACCESS_TRIGGER_ON_THROUGHPUT_DROP=0 \
   QACCESS_TRIGGER_PERIODIC_MS=0 \
-  QACCESS_TRIGGER_ON_THROUGHPUT_DROP=0
+  QACCESS_TRIGGER_COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}" \
+  QACCESS_RUNTIME_BUFFER_SIZE="$BUFFER_SIZE"
 
 echo ""
 echo "[delay_only] session: $ROOT/$SESSION_DIR"
