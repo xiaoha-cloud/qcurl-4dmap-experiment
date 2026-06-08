@@ -1,0 +1,8 @@
+{
+  "alpha": 0.6,
+  "beta": 0.1,
+  "gamma": 0.3,
+  "source": "delay_sensitive_static_profile",
+  "metric": "fixed_coefficients_no_worker",
+  "note": "Delay-only experiment: higher gamma weights loss/delay gradient; worker disabled."
+}
