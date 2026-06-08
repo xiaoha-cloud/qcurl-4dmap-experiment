@@ -22,8 +22,8 @@
 #     --model derived/qaccess_t_model.pkl \
 #     --coeffs-out derived/qaccess_t_runtime_coefficients.json
 #
-#   # Terminal 2:
-#   SAVE_LOGS=1 INPUT_FLV=~/Videos/push_input.flv \
+#   # Terminal 2 (default SAVE_LOGS=0 — pcaps only, no pull/server log files):
+#   INPUT_FLV=~/Videos/push_input.flv \
 #     sudo -E ./scripts/mininet/run_qaccess_loss_only_eval.sh
 
 set -euo pipefail
@@ -35,7 +35,7 @@ RUNTIME_COEFFS="${QACCESS_COEFFS_JSON:-derived/qaccess_t_runtime_coefficients.js
 SCENARIO="${SCENARIO:-fig7}"
 LOSS_PROFILE="${LOSS_PROFILE:-scripts/mininet/loss_profile.pathB_200s.env}"
 TIMEOUT="${TIMEOUT:-220}"
-SAVE_LOGS="${SAVE_LOGS:-1}"
+SAVE_LOGS="${SAVE_LOGS:-0}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
@@ -125,5 +125,7 @@ run_one qaccess_t loss_qaccess_dynamic \
 
 echo ""
 echo "[loss_only] session: $ROOT/$SESSION_DIR"
-echo "[loss_only] Primary analysis (loss / retrans / path usage / recovery):"
-echo "  python3 scripts/analyze/qaccess_delay_loss_eval_analyze.py --preset loss --session $SESSION_DIR --full-hi 200"
+echo "[loss_only] SAVE_LOGS=$SAVE_LOGS (pcaps always kept; pull/server logs discarded when 0)"
+echo "[loss_only] PCAP analysis (primary — no pull logs):"
+echo "  jupyter notebook scripts/analyze/qaccess_delay_loss_pcap_analysis.ipynb"
+echo "  # set LOSS_SESSION=$SESSION_DIR in notebook §1"
