@@ -446,9 +446,11 @@ def run_experiment(net, args):
         tc_log_path = os.path.join(logs_dir, f"tc_delay_{run_id}.log")
         tc_log_f = _open_log_file(tc_log_path, save_logs)
         cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
-        _log("tc", f"starting delay steps on h1 → {tc_log_path}")
+        tc_node = _tc_bw_host_for_profile(prof_path)
+        tc_h = net.get(tc_node)
+        _log("tc", f"starting delay steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
-        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+        tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
     elif loss_prof:
         prof_path = expand_user_path(loss_prof)
         if not os.path.isfile(prof_path):
@@ -460,9 +462,11 @@ def run_experiment(net, args):
         tc_log_path = os.path.join(logs_dir, f"tc_loss_{run_id}.log")
         tc_log_f = _open_log_file(tc_log_path, save_logs)
         cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
-        _log("tc", f"starting loss steps on h1 → {tc_log_path}")
+        tc_node = _tc_bw_host_for_profile(prof_path)
+        tc_h = net.get(tc_node)
+        _log("tc", f"starting loss steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
-        tc_proc = h1.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+        tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
     iperf_procs = []
     iperf_aux_files = []
