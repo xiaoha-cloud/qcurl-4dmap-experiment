@@ -18,7 +18,9 @@
 #
 # Worker (separate terminal, before dynamic leg):
 #   python3 scripts/analyze/qaccess_t_update_worker.py --poll-interval 5 \
-#     --coeffs-out derived/qaccess_t_runtime_coefficients.json
+#     --model derived/qaccess_t_model.pkl \
+#     --coeffs-out derived/qaccess_t_runtime_coefficients.json \
+#     --min-improvement-pct 1.0
 #
 # Usage (VM, repo root):
 #   chmod +x scripts/mininet/run_qaccess_t_fig7_dynamic_eval.sh

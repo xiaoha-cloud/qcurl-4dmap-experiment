@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shutil
 import sys
@@ -64,9 +65,10 @@ FEATURES = [
     "backoff",
 ]
 
-IMPROVEMENT_MIN_PCT = 3.0
+DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
 MAX_COEFF_STEP = 0.1
 MIN_BETA_GAMMA = 0.1
+DEFAULT_COEFFS_PREV = _REPO / "derived" / "qaccess_t_runtime_coefficients_prev.json"
 
 
 def _load_state(path: Path) -> dict:
@@ -202,6 +204,31 @@ def _assert_runtime_coeffs_path(coeffs_out: Path) -> None:
         raise ValueError(f"refusing to write initial coefficients file: {coeffs_out}")
 
 
+def _save_coeffs_backup(
+    coeffs_out: Path,
+    archive_dir: Path,
+    request_id: str,
+    prev_out: Path,
+) -> Path | None:
+    """Copy runtime coefficients before an accepted update (audit / rollback)."""
+    if not coeffs_out.is_file():
+        return None
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    safe = _safe_archive_name(request_id)
+    archived = archive_dir / f"qaccess_t_runtime_coefficients_before_{safe}.json"
+    shutil.copy2(coeffs_out, archived)
+    shutil.copy2(coeffs_out, prev_out)
+    return archived
+
+
+def _improvement_pct(pred_current: float, pred_best: float) -> float:
+    if pred_current > 0 and math.isfinite(pred_current) and math.isfinite(pred_best):
+        return (pred_best - pred_current) / pred_current * 100.0
+    if pred_current <= 0 and pred_best > 0:
+        return float("inf")
+    return float("nan")
+
+
 def _process_request(
     request_path: Path,
     samples_path: Path,
@@ -210,7 +237,9 @@ def _process_request(
     response_out: Path,
     state_path: Path,
     archive_dir: Path,
+    prev_coeffs_out: Path,
     mode: str,
+    min_improvement_pct: float,
 ) -> bool:
     if not request_path.is_file():
         return False
@@ -253,7 +282,9 @@ def _process_request(
     pred_current = _mean_predicted_bw(samples, model, cur_alpha, cur_beta, cur_gamma)
     best_alpha, best_beta, best_gamma, pred_best = _pick_best_candidate(samples, model)
 
-    improvement_ok = pred_current <= 0 or pred_best >= pred_current * (1.0 + IMPROVEMENT_MIN_PCT / 100.0)
+    improvement_pct = _improvement_pct(pred_current, pred_best)
+    need_pred = pred_current * (1.0 + min_improvement_pct / 100.0) if pred_current > 0 else 0.0
+    improvement_ok = pred_current <= 0 or pred_best >= need_pred
 
     applied_alpha = _apply_max_step(cur_alpha, best_alpha)
     applied_beta = max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, best_beta))
@@ -268,7 +299,8 @@ def _process_request(
         "n_samples": int(len(samples)),
         "predicted_current_bw_bps": pred_current,
         "predicted_best_bw_bps": pred_best,
-        "improvement_min_pct": IMPROVEMENT_MIN_PCT,
+        "improvement_pct": improvement_pct,
+        "improvement_min_pct": min_improvement_pct,
         "current_alpha": cur_alpha,
         "current_beta": cur_beta,
         "current_gamma": cur_gamma,
@@ -279,7 +311,16 @@ def _process_request(
 
     _assert_runtime_coeffs_path(coeffs_out)
 
+    log_common = (
+        f"request_id={request_id} gate={min_improvement_pct:.1f}% "
+        f"current=({cur_alpha:.4f},{cur_beta:.4f},{cur_gamma:.4f}) "
+        f"candidate=({best_alpha:.4f},{best_beta:.4f},{best_gamma:.4f}) "
+        f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
+        f"improvement_pct={improvement_pct:.2f} need_pred>={need_pred:.0f} n={len(samples)}"
+    )
+
     if improvement_ok:
+        backup_path = _save_coeffs_backup(coeffs_out, archive_dir, request_id, prev_coeffs_out)
         coeffs_payload = {
             "alpha": applied_alpha,
             "beta": applied_beta,
@@ -291,19 +332,30 @@ def _process_request(
             "request_id": request_id,
             "request": req,
             "mode": mode,
+            "improvement_min_pct": min_improvement_pct,
+            "improvement_pct": improvement_pct,
+            "previous_alpha": cur_alpha,
+            "previous_beta": cur_beta,
+            "previous_gamma": cur_gamma,
+            "previous_coeffs_backup": str(backup_path) if backup_path else "",
         }
         atomic_write_json(coeffs_out, coeffs_payload)
         response.update({
             "alpha": applied_alpha,
             "beta": applied_beta,
             "gamma": applied_gamma,
+            "applied_alpha": applied_alpha,
+            "applied_beta": applied_beta,
+            "applied_gamma": applied_gamma,
             "coeffs_out": str(coeffs_out.resolve()),
+            "previous_coeffs_backup": str(backup_path) if backup_path else "",
+            "previous_coeffs_prev": str(prev_coeffs_out.resolve()) if backup_path else "",
             "skip_reason": "",
         })
         print(
-            f"[worker] request_id={request_id} updated coeffs "
-            f"alpha={applied_alpha:.4f} beta={applied_beta:.4f} gamma={applied_gamma:.4f} "
-            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} n={len(samples)}"
+            f"[worker] UPDATED {log_common} "
+            f"applied=({applied_alpha:.4f},{applied_beta:.4f},{applied_gamma:.4f}) "
+            f"backup={backup_path or 'none'}"
         )
     else:
         response.update({
@@ -312,11 +364,7 @@ def _process_request(
             "gamma": cur_gamma,
             "skip_reason": "improvement_gate",
         })
-        print(
-            f"[worker] request_id={request_id} skipped (improvement gate) "
-            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
-            f"need>={pred_current * (1 + IMPROVEMENT_MIN_PCT/100):.0f}"
-        )
+        print(f"[worker] SKIPPED {log_common}")
 
     atomic_write_json(response_out, response)
     _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
@@ -339,11 +387,24 @@ def main() -> None:
     ap.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR)
     ap.add_argument("--mode", choices=["rf"], default="rf")
     ap.add_argument("--poll-interval", type=float, default=5.0)
+    ap.add_argument(
+        "--min-improvement-pct",
+        type=float,
+        default=DEFAULT_MIN_IMPROVEMENT_PCT,
+        help="Minimum predicted throughput improvement (%%) required to accept coefficient update (default: 3.0)",
+    )
+    ap.add_argument(
+        "--prev-coeffs-out",
+        type=Path,
+        default=DEFAULT_COEFFS_PREV,
+        help="Latest pre-update runtime coefficients copy for audit/rollback",
+    )
     ap.add_argument("--once", action="store_true", help="Process one request if present, then exit")
     args = ap.parse_args()
 
     print(
-        f"[worker] buffer-full mode; polling {args.request.resolve()} every {args.poll_interval}s",
+        f"[worker] buffer-full mode; polling {args.request.resolve()} every {args.poll_interval}s "
+        f"min_improvement_pct={args.min_improvement_pct}",
         flush=True,
     )
 
@@ -356,7 +417,9 @@ def main() -> None:
             args.response_out.resolve(),
             args.state.resolve(),
             args.archive_dir.resolve(),
+            args.prev_coeffs_out.resolve(),
             args.mode,
+            args.min_improvement_pct,
         )
         if args.once:
             break
