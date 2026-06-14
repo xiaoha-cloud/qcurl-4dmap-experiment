@@ -161,10 +161,15 @@ func writeJSONAtomic(path string, payload interface{}) error {
 	}
 	data = append(data, '\n')
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0666); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	// Worker (non-root) must read/unlink request JSON and read response after sudo Mininet runs.
+	_ = os.Chmod(path, 0666)
+	return nil
 }
 
 func (uc *UtilityController) getCoefficients() QAccessCoefficients {

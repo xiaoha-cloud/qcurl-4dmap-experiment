@@ -91,10 +91,12 @@ func (e *qaccessSampleExporter) ensureOpenLocked() error {
 	}
 	_, statErr := os.Stat(e.path)
 	writeHeader := os.IsNotExist(statErr)
-	f, err := os.OpenFile(e.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(e.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return err
 	}
+	// Mininet runs 4dmap as root; Phase 2 worker runs as the normal user and must truncate this CSV.
+	_ = f.Chmod(0666)
 	e.file = f
 	e.writer = csv.NewWriter(f)
 	if writeHeader {

@@ -29,12 +29,33 @@ EOF
   echo "[reset] created $INITIAL"
 fi
 
-rm -f \
+# Phase 2 artifacts are often root-owned after sudo Mininet; remove with sudo when needed.
+_phase2_rm() {
+  local f
+  for f in "$@"; do
+    if [[ -e "$f" ]]; then
+      rm -f "$f" 2>/dev/null || sudo rm -f "$f" 2>/dev/null || true
+    fi
+  done
+}
+_phase2_rm \
   "$DERIVED/qaccess_runtime_samples.csv" \
   "$DERIVED/qaccess_update_request.json" \
   "$DERIVED/qaccess_update_response.json"
 
+# Prior sudo Mininet runs may leave root-owned Phase 2 files the worker cannot truncate.
+for f in qaccess_runtime_samples.csv qaccess_update_request.json qaccess_update_response.json; do
+  if [[ -f "$DERIVED/$f" && ! -w "$DERIVED/$f" ]]; then
+    if [[ -n "${SUDO_UID:-}" ]]; then
+      chown "${SUDO_UID}:${SUDO_GID}" "$DERIVED/$f"
+    elif command -v sudo >/dev/null 2>&1; then
+      sudo chown "$(id -u):$(id -g)" "$DERIVED/$f" 2>/dev/null || true
+    fi
+  fi
+done
+
 cp "$INITIAL" "$RUNTIME"
+chmod 0666 "$RUNTIME" 2>/dev/null || true
 echo "[reset] copied initial -> runtime coefficients"
 echo "  initial: $INITIAL"
 echo "  runtime: $RUNTIME"
