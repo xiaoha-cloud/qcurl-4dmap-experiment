@@ -40,6 +40,7 @@ DEFAULT_INPUT = _REPO / "derived" / "qaccess_training_samples_coeff_sweep.csv"
 DEFAULT_OUTPUT = _REPO / "derived" / "qaccess_training_samples_coeff_sweep_windowed.csv"
 DEFAULT_OLIA_OUTPUT = _REPO / "derived" / "qaccess_training_samples_coeff_sweep_olia_windowed.csv"
 DEFAULT_SWEEP_DIR = _REPO / "derived" / "coeff_sweep"
+DEFAULT_PARTS_DIR = _REPO / "derived" / "qaccess_windowed_parts"
 DEFAULT_STREAMING_THRESHOLD_MB = 512
 
 REQUIRED_COLS = [
@@ -709,10 +710,25 @@ def _print_group_counts(df: pd.DataFrame) -> None:
         print(per_run.to_string(index=False))
 
 
+def _ensure_writable_dir(path: Path, *, label: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        print(
+            f"[build_windowed] error: cannot create {label} directory: {path}\n"
+            f"[build_windowed] hint: coeff sweep CSVs are often root-owned after sudo collect.\n"
+            f"[build_windowed]       use --parts-dir derived/qaccess_windowed_parts (default), or:\n"
+            f"[build_windowed]       sudo chown -R \"$USER:$USER\" derived/coeff_sweep derived",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from exc
+
+
 def process_per_sweep(
     sweep_dir: Path,
     output_path: Path,
     *,
+    parts_dir: Path,
     window_ms: int,
     horizon_windows: int,
     future_avg_windows: int,
@@ -725,8 +741,9 @@ def process_per_sweep(
         print(f"[build_windowed] error: no qaccess_samples_*.csv under {sweep_dir}", file=sys.stderr)
         sys.exit(1)
 
-    part_dir = sweep_dir / "windowed_parts"
-    part_dir.mkdir(parents=True, exist_ok=True)
+    part_dir = parts_dir.resolve()
+    _ensure_writable_dir(part_dir, label="windowed parts")
+    print(f"[build_windowed] parts_dir={part_dir}")
     if output_path.is_file():
         output_path.unlink()
 
@@ -843,7 +860,13 @@ def main() -> None:
         "--sweep-dir",
         type=Path,
         default=DEFAULT_SWEEP_DIR,
-        help="Directory containing qaccess_samples_*.csv for --per-sweep",
+        help="Directory containing qaccess_samples_*.csv for --per-sweep (read-only OK)",
+    )
+    ap.add_argument(
+        "--parts-dir",
+        type=Path,
+        default=DEFAULT_PARTS_DIR,
+        help="Writable directory for per-sweep windowed intermediates (default: derived/qaccess_windowed_parts)",
     )
     args = ap.parse_args()
 
@@ -888,6 +911,7 @@ def main() -> None:
         totals = process_per_sweep(
             sweep_dir,
             output_path,
+            parts_dir=args.parts_dir,
             window_ms=args.window_ms,
             horizon_windows=args.horizon_windows,
             future_avg_windows=args.future_avg_windows,
