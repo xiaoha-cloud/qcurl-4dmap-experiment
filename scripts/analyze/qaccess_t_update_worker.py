@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shutil
 import sys
@@ -172,6 +173,24 @@ def _apply_max_step(current: float, target: float, max_step: float = MAX_COEFF_S
     return current + delta
 
 
+def _ensure_path_writable(path: Path) -> None:
+    """Allow worker to rotate files created by root during sudo Mininet runs."""
+    if not path.is_file():
+        return
+    if os.access(path, os.W_OK):
+        return
+    try:
+        path.chmod(0o666)
+    except OSError:
+        pass
+    if not os.access(path, os.W_OK):
+        raise PermissionError(
+            f"cannot write {path.resolve()} (owned by root?). "
+            "Fix once: sudo chown $USER:$USER derived/qaccess_runtime_samples.csv "
+            "derived/qaccess_update_request.json; rebuild 4dmap after pull for 0666 exports."
+        )
+
+
 def _archive_and_truncate_buffer(
     samples_path: Path,
     archive_dir: Path,
@@ -181,6 +200,7 @@ def _archive_and_truncate_buffer(
     archive_dir.mkdir(parents=True, exist_ok=True)
     safe = _safe_archive_name(request_id)
     if samples_path.is_file() and samples_path.stat().st_size > 0:
+        _ensure_path_writable(samples_path)
         dest = archive_dir / f"qaccess_runtime_samples_{safe}.csv"
         shutil.copy2(samples_path, dest)
         header = samples_path.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
@@ -188,6 +208,7 @@ def _archive_and_truncate_buffer(
             if header:
                 f.write(header[0] + "\n")
     if request_path.is_file():
+        _ensure_path_writable(request_path)
         req_dest = archive_dir / f"qaccess_update_request_{safe}.json"
         shutil.copy2(request_path, req_dest)
         request_path.unlink()
@@ -410,12 +431,19 @@ def _process_request(
         )
 
     atomic_write_json(response_out, response)
-    _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
 
     processed.append(request_id)
     state["processed_request_ids"] = processed[-200:]
     state["last_processed_request_id"] = request_id
     _save_state(state_path, state)
+
+    try:
+        _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
+    except (OSError, PermissionError) as exc:
+        print(
+            f"[worker] warning: archive/truncate failed for request_id={request_id}: {exc}",
+            file=sys.stderr,
+        )
     return True
 
 

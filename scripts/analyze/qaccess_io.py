@@ -15,7 +15,12 @@ def atomic_write_json(path: Path, payload: Any) -> None:
     tmp = path.with_name(path.name + ".tmp")
     try:
         tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o666)
         os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o666)
+        except OSError:
+            pass
     except OSError:
         if tmp.exists():
             try:
