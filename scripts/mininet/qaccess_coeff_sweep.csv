@@ -1,0 +1,6 @@
+name,alpha,beta,gamma
+phase1_default,0.6,0.3,0.1
+throughput_biased,0.7,0.2,0.1
+delay_sensitive,0.6,0.3,0.2
+loss_sensitive,0.6,0.4,0.1
+balanced,0.7,0.3,0.2
