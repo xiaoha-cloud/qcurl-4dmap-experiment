@@ -69,6 +69,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 MININET_DIR = os.path.join(ROOT, "scripts", "mininet")
 TC_DELAY_SCRIPT = os.path.join(MININET_DIR, "tc_delay_steps.sh")
 TC_LOSS_SCRIPT = os.path.join(MININET_DIR, "tc_loss_steps.sh")
+TC_DETERIORATION_SCRIPT = os.path.join(MININET_DIR, "tc_deterioration_steps.sh")
 TC_BW_SCRIPT = os.path.join(MININET_DIR, "tc_bw_steps.sh")
 
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
@@ -82,6 +83,14 @@ SCENARIOS = {
     "fig7": {
         "path_a": (20, "40ms", 0),
         "path_b": (20, "20ms", 0.001),
+    },
+    # Fig.8-style combined deterioration (heterogeneous paths):
+    #   Path A: 20 Mbps, 40 ms, 0%
+    #   Path B: 30 Mbps, 20 ms, 0% static; combined delay+loss steps on h2-eth1 via
+    #   combined_deterioration_profile.env (90–100s: 80 ms + 0.05% loss).
+    "fig8": {
+        "path_a": (20, "40ms", 0),
+        "path_b": (30, "20ms", 0),
     },
     # Path B stress validation: lower Path A static cap so multipath uses Path B more.
     # Same loss/delay as fig7; combine with bw_profile.fig7_200s.env on h2-eth1 (Path B egress).
@@ -192,6 +201,8 @@ def _scenario_tag_for_dir(name):
     """Compact scenario tag used in default run directory names."""
     if name == "fig7":
         return "figure7"
+    if name == "fig8":
+        return "fig8"
     return sanitize_run_label(name)
 
 
@@ -419,6 +430,7 @@ def run_experiment(net, args):
     bw_prof = getattr(args, "dynamic_bw_profile", None)
     delay_prof = getattr(args, "dynamic_delay_profile", None)
     loss_prof = getattr(args, "dynamic_loss_profile", None)
+    deterioration_prof = getattr(args, "dynamic_deterioration_profile", None)
     if bw_prof:
         prof_path = expand_user_path(bw_prof)
         if not os.path.isfile(prof_path):
@@ -465,6 +477,22 @@ def run_experiment(net, args):
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)
         _log("tc", f"starting loss steps on {tc_node} → {tc_log_path}")
+        _log("tc", f"profile = {prof_path}")
+        tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+    elif deterioration_prof:
+        prof_path = expand_user_path(deterioration_prof)
+        if not os.path.isfile(prof_path):
+            _log("error", f"deterioration profile not found: {prof_path}")
+            return
+        if not os.path.isfile(TC_DETERIORATION_SCRIPT):
+            _log("error", f"tc_deterioration_steps.sh not found: {TC_DETERIORATION_SCRIPT}")
+            return
+        tc_log_path = os.path.join(logs_dir, f"tc_deterioration_{run_id}.log")
+        tc_log_f = _open_log_file(tc_log_path, save_logs)
+        cmd = f"bash {shlex.quote(TC_DETERIORATION_SCRIPT)} {shlex.quote(prof_path)}"
+        tc_node = _tc_bw_host_for_profile(prof_path)
+        tc_h = net.get(tc_node)
+        _log("tc", f"starting combined deterioration steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
@@ -791,7 +819,13 @@ def main():
         "--dynamic-loss-profile",
         metavar="PATH",
         default=None,
-        help="Phase 2: path-B loss steps only (tc_loss_steps.sh); requires --run-exp; mutually exclusive with --dynamic-delay-profile",
+        help="Phase 2: path-B loss steps only (tc_loss_steps.sh); requires --run-exp; mutually exclusive with other dynamic profiles",
+    )
+    dyn.add_argument(
+        "--dynamic-deterioration-profile",
+        metavar="PATH",
+        default=None,
+        help="Fig.8: combined delay+loss steps on one interface (tc_deterioration_steps.sh); requires --run-exp",
     )
     parser.add_argument(
         "--log-parent",
@@ -814,8 +848,16 @@ def main():
     )
     args = parser.parse_args()
 
-    if (args.dynamic_bw_profile or args.dynamic_delay_profile or args.dynamic_loss_profile) and not args.run_exp:
-        parser.error("--dynamic-bw-profile / --dynamic-delay-profile / --dynamic-loss-profile require --run-exp")
+    if (
+        args.dynamic_bw_profile
+        or args.dynamic_delay_profile
+        or args.dynamic_loss_profile
+        or args.dynamic_deterioration_profile
+    ) and not args.run_exp:
+        parser.error(
+            "--dynamic-bw-profile / --dynamic-delay-profile / --dynamic-loss-profile / "
+            "--dynamic-deterioration-profile require --run-exp"
+        )
 
     if args.list_scenarios:
         print("SCENARIOS (path_a = 10.0.1.x path, path_b = 10.0.2.x path):")

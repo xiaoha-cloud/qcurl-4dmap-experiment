@@ -229,6 +229,39 @@ def _improvement_pct(pred_current: float, pred_best: float) -> float:
     return float("nan")
 
 
+def _fmt_pct(v: float) -> str:
+    if math.isinf(v):
+        return "inf"
+    if math.isnan(v):
+        return "nan"
+    return f"{v:.2f}"
+
+
+def _worker_log_fields(
+    *,
+    request_id: str,
+    min_improvement_pct: float,
+    cur_alpha: float,
+    cur_beta: float,
+    cur_gamma: float,
+    best_alpha: float,
+    best_beta: float,
+    best_gamma: float,
+    pred_current: float,
+    pred_best: float,
+    improvement_pct: float,
+    n_samples: int,
+) -> str:
+    return (
+        f"request_id={request_id} "
+        f"gate_pct={min_improvement_pct:.1f} required_pct={min_improvement_pct:.1f} "
+        f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
+        f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
+        f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
+        f"improvement_pct={_fmt_pct(improvement_pct)} n={n_samples}"
+    )
+
+
 def _process_request(
     request_path: Path,
     samples_path: Path,
@@ -311,12 +344,19 @@ def _process_request(
 
     _assert_runtime_coeffs_path(coeffs_out)
 
-    log_common = (
-        f"request_id={request_id} gate={min_improvement_pct:.1f}% "
-        f"current=({cur_alpha:.4f},{cur_beta:.4f},{cur_gamma:.4f}) "
-        f"candidate=({best_alpha:.4f},{best_beta:.4f},{best_gamma:.4f}) "
-        f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
-        f"improvement_pct={improvement_pct:.2f} need_pred>={need_pred:.0f} n={len(samples)}"
+    log_fields = _worker_log_fields(
+        request_id=request_id,
+        min_improvement_pct=min_improvement_pct,
+        cur_alpha=cur_alpha,
+        cur_beta=cur_beta,
+        cur_gamma=cur_gamma,
+        best_alpha=best_alpha,
+        best_beta=best_beta,
+        best_gamma=best_gamma,
+        pred_current=pred_current,
+        pred_best=pred_best,
+        improvement_pct=improvement_pct,
+        n_samples=len(samples),
     )
 
     if improvement_ok:
@@ -353,9 +393,9 @@ def _process_request(
             "skip_reason": "",
         })
         print(
-            f"[worker] UPDATED {log_common} "
-            f"applied=({applied_alpha:.4f},{applied_beta:.4f},{applied_gamma:.4f}) "
-            f"backup={backup_path or 'none'}"
+            f"[worker] status=UPDATED {log_fields} "
+            f"applied_alpha={applied_alpha:.4f} applied_beta={applied_beta:.4f} applied_gamma={applied_gamma:.4f} "
+            f"skip_reason=accepted backup={backup_path or 'none'}"
         )
     else:
         response.update({
@@ -364,7 +404,10 @@ def _process_request(
             "gamma": cur_gamma,
             "skip_reason": "improvement_gate",
         })
-        print(f"[worker] SKIPPED {log_common}")
+        print(
+            f"[worker] status=SKIPPED {log_fields} "
+            f"skip_reason=improvement_gate need_pred>={need_pred:.0f}"
+        )
 
     atomic_write_json(response_out, response)
     _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
