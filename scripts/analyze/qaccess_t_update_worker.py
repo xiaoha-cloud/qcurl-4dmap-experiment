@@ -12,6 +12,7 @@ Writes only derived/qaccess_t_runtime_coefficients.json (never qaccess_t_initial
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import shutil
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import joblib
 import numpy as np
@@ -66,7 +68,11 @@ FEATURES = [
     "backoff",
 ]
 
+TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s")
+
 DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
+DEFAULT_MIN_DELTA_GAIN_BPS = 500_000.0
+DEFAULT_MIN_RELATIVE_DELTA_GAIN = 0.01
 MAX_COEFF_STEP = 0.1
 MIN_BETA_GAMMA = 0.1
 DEFAULT_COEFFS_PREV = _REPO / "derived" / "qaccess_t_runtime_coefficients_prev.json"
@@ -147,12 +153,56 @@ def _feature_matrix(samples: pd.DataFrame, alpha: float, beta: float, gamma: flo
     return pd.DataFrame(rows, columns=FEATURES)
 
 
-def _mean_predicted_bw(samples: pd.DataFrame, model, alpha: float, beta: float, gamma: float) -> float:
+def _mean_prediction(samples: pd.DataFrame, model, alpha: float, beta: float, gamma: float) -> float:
     X = _feature_matrix(samples, alpha, beta, gamma)
     if X.empty:
         return -1.0
     preds = np.asarray(model.predict(X), dtype=float)
     return float(np.mean(preds))
+
+
+def _mean_predicted_bw(samples: pd.DataFrame, model, alpha: float, beta: float, gamma: float) -> float:
+    return _mean_prediction(samples, model, alpha, beta, gamma)
+
+
+def _score_all_candidates(
+    samples: pd.DataFrame,
+    model,
+    *,
+    cur_alpha: float,
+    cur_beta: float,
+    cur_gamma: float,
+) -> tuple[list[dict[str, Any]], float, float, float, float, float]:
+    pred_current = _mean_prediction(samples, model, cur_alpha, cur_beta, cur_gamma)
+    candidates: list[dict[str, Any]] = []
+    best_alpha, best_beta, best_gamma = cur_alpha, cur_beta, cur_gamma
+    best_pred = pred_current
+
+    for alpha, beta, gamma in phase2_candidate_triples():
+        mean_pred = _mean_prediction(samples, model, alpha, beta, gamma)
+        candidates.append({
+            "alpha": alpha,
+            "beta": beta,
+            "gamma": gamma,
+            "mean_prediction": mean_pred,
+            "is_current": (
+                abs(alpha - cur_alpha) < 1e-9
+                and abs(beta - cur_beta) < 1e-9
+                and abs(gamma - cur_gamma) < 1e-9
+            ),
+        })
+        if mean_pred > best_pred:
+            best_pred = mean_pred
+            best_alpha, best_beta, best_gamma = alpha, beta, gamma
+
+    for row in candidates:
+        row["is_best"] = (
+            abs(row["alpha"] - best_alpha) < 1e-9
+            and abs(row["beta"] - best_beta) < 1e-9
+            and abs(row["gamma"] - best_gamma) < 1e-9
+        )
+
+    return candidates, pred_current, best_alpha, best_beta, best_gamma, best_pred
 
 
 def _pick_best_candidate(
@@ -161,7 +211,7 @@ def _pick_best_candidate(
     best_alpha, best_beta, best_gamma = 0.70, MIN_BETA_GAMMA, MIN_BETA_GAMMA
     best_pred = -1.0
     for alpha, beta, gamma in phase2_candidate_triples():
-        mean_pred = _mean_predicted_bw(samples, model, alpha, beta, gamma)
+        mean_pred = _mean_prediction(samples, model, alpha, beta, gamma)
         if mean_pred > best_pred:
             best_pred = mean_pred
             best_alpha, best_beta, best_gamma = alpha, beta, gamma
@@ -258,10 +308,67 @@ def _fmt_pct(v: float) -> str:
     return f"{v:.2f}"
 
 
+def _metric_field(target_mode: str) -> str:
+    return {
+        "next_bw_bps": "predicted_next_bw_bps",
+        "delta_bw_1s": "predicted_delta_bw_1s",
+        "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
+    }[target_mode]
+
+
+def _evaluate_gate(
+    target_mode: str,
+    pred_current: float,
+    pred_best: float,
+    *,
+    min_improvement_pct: float,
+    min_delta_gain_bps: float,
+    min_relative_delta_gain: float,
+) -> tuple[bool, str, str, float, float | None, str]:
+    score_gain = pred_best - pred_current
+
+    if target_mode == "next_bw_bps":
+        need_pred = pred_current * (1.0 + min_improvement_pct / 100.0) if pred_current > 0 else 0.0
+        ok = pred_current <= 0 or pred_best >= need_pred
+        return (
+            ok,
+            "multiplicative_pct",
+            "improvement_gate",
+            min_improvement_pct,
+            None,
+            f"need_pred>={need_pred:.0f}",
+        )
+
+    if target_mode == "delta_bw_1s":
+        score_gain_bps = score_gain
+        ok = pred_best > pred_current and score_gain_bps >= min_delta_gain_bps
+        return (
+            ok,
+            "delta_bps",
+            "delta_gain_gate",
+            min_delta_gain_bps,
+            score_gain_bps,
+            f"required_gain_bps={min_delta_gain_bps:.0f}",
+        )
+
+    if target_mode == "relative_delta_bw_1s":
+        ok = pred_best > pred_current and score_gain >= min_relative_delta_gain
+        return (
+            ok,
+            "relative_delta",
+            "relative_delta_gain_gate",
+            min_relative_delta_gain,
+            None,
+            f"required_gain={min_relative_delta_gain:.4f}",
+        )
+
+    raise ValueError(f"unsupported target_mode: {target_mode}")
+
+
 def _worker_log_fields(
     *,
+    target_mode: str,
     request_id: str,
-    min_improvement_pct: float,
     cur_alpha: float,
     cur_beta: float,
     cur_gamma: float,
@@ -271,16 +378,186 @@ def _worker_log_fields(
     pred_current: float,
     pred_best: float,
     improvement_pct: float,
+    score_gain_bps: float | None,
+    required_gain_bps: float | None,
+    gate_type: str,
+    gate_threshold: float,
     n_samples: int,
+    min_improvement_pct: float,
 ) -> str:
+    if target_mode == "next_bw_bps":
+        return (
+            f"target_mode={target_mode} request_id={request_id} "
+            f"gate_pct={min_improvement_pct:.1f} required_pct={min_improvement_pct:.1f} "
+            f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
+            f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
+            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
+            f"improvement_pct={_fmt_pct(improvement_pct)} n={n_samples}"
+        )
+
+    if target_mode == "delta_bw_1s":
+        gain = score_gain_bps if score_gain_bps is not None else (pred_best - pred_current)
+        req = required_gain_bps if required_gain_bps is not None else gate_threshold
+        return (
+            f"target_mode={target_mode} request_id={request_id} "
+            f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
+            f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
+            f"pred_current_delta_bps={pred_current:.0f} pred_best_delta_bps={pred_best:.0f} "
+            f"score_gain_bps={gain:.0f} required_gain_bps={req:.0f} "
+            f"gate_type={gate_type} n={n_samples} "
+            f"improvement_pct_diag={_fmt_pct(improvement_pct)}"
+        )
+
+    gain = pred_best - pred_current
     return (
-        f"request_id={request_id} "
-        f"gate_pct={min_improvement_pct:.1f} required_pct={min_improvement_pct:.1f} "
+        f"target_mode={target_mode} request_id={request_id} "
         f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
         f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
-        f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
-        f"improvement_pct={_fmt_pct(improvement_pct)} n={n_samples}"
+        f"pred_current={pred_current:.6f} pred_best={pred_best:.6f} "
+        f"score_gain={gain:.6f} required_gain={gate_threshold:.4f} "
+        f"gate_type={gate_type} n={n_samples} "
+        f"improvement_pct_diag={_fmt_pct(improvement_pct)}"
     )
+
+
+def _write_candidate_scores_csv(
+    out_path: Path,
+    *,
+    candidates: list[dict[str, Any]],
+    target_mode: str,
+) -> None:
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["alpha", "beta", "gamma", "mean_prediction", "is_current", "is_best", "target_mode"]
+    with out_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in candidates:
+            writer.writerow({
+                "alpha": row["alpha"],
+                "beta": row["beta"],
+                "gamma": row["gamma"],
+                "mean_prediction": row["mean_prediction"],
+                "is_current": int(bool(row["is_current"])),
+                "is_best": int(bool(row["is_best"])),
+                "target_mode": target_mode,
+            })
+
+
+def _load_request_and_samples(
+    request_path: Path,
+    samples_path: Path,
+    *,
+    skip_processed: bool,
+    state_path: Path,
+) -> tuple[dict | None, pd.DataFrame, str]:
+    if not request_path.is_file():
+        return None, pd.DataFrame(), ""
+
+    try:
+        req = json.loads(request_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[worker] skip: invalid request json: {exc}", file=sys.stderr)
+        return None, pd.DataFrame(), ""
+
+    request_id = str(req.get("request_id") or "").strip()
+    if not request_id:
+        print("[worker] skip: request missing request_id", file=sys.stderr)
+        return None, pd.DataFrame(), ""
+
+    if skip_processed:
+        state = _load_state(state_path)
+        processed: list[str] = list(state.get("processed_request_ids") or [])
+        if request_id in processed:
+            if request_path.is_file():
+                request_path.unlink()
+            return None, pd.DataFrame(), request_id
+
+    df = _load_runtime_samples(samples_path)
+    samples = _clean_runtime_samples(df)
+    if samples.empty:
+        print("[worker] skip: no valid runtime samples", file=sys.stderr)
+        return None, pd.DataFrame(), request_id
+
+    return req, samples, request_id
+
+
+def _dry_run(
+    request_path: Path,
+    samples_path: Path,
+    model_path: Path,
+    *,
+    target_mode: str,
+    min_improvement_pct: float,
+    min_delta_gain_bps: float,
+    min_relative_delta_gain: float,
+) -> int:
+    req, samples, request_id = _load_request_and_samples(
+        request_path,
+        samples_path,
+        skip_processed=False,
+        state_path=DEFAULT_STATE,
+    )
+    if req is None or samples.empty or not request_id:
+        return 1
+    if not model_path.is_file():
+        print(f"[worker] missing model {model_path}", file=sys.stderr)
+        return 1
+
+    model = joblib.load(model_path)
+    cur_alpha = float(req.get("current_alpha", 0.6) or 0.6)
+    cur_beta = float(req.get("current_beta", 0.1) or 0.1)
+    cur_gamma = float(req.get("current_gamma", 0.1) or 0.1)
+
+    candidates, pred_current, best_alpha, best_beta, best_gamma, pred_best = _score_all_candidates(
+        samples,
+        model,
+        cur_alpha=cur_alpha,
+        cur_beta=cur_beta,
+        cur_gamma=cur_gamma,
+    )
+
+    improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
+        target_mode,
+        pred_current,
+        pred_best,
+        min_improvement_pct=min_improvement_pct,
+        min_delta_gain_bps=min_delta_gain_bps,
+        min_relative_delta_gain=min_relative_delta_gain,
+    )
+
+    improvement_pct = _improvement_pct(pred_current, pred_best)
+    required_gain_bps = gate_threshold if target_mode == "delta_bw_1s" else None
+
+    log_fields = _worker_log_fields(
+        target_mode=target_mode,
+        request_id=request_id,
+        cur_alpha=cur_alpha,
+        cur_beta=cur_beta,
+        cur_gamma=cur_gamma,
+        best_alpha=best_alpha,
+        best_beta=best_beta,
+        best_gamma=best_gamma,
+        pred_current=pred_current,
+        pred_best=pred_best,
+        improvement_pct=improvement_pct,
+        score_gain_bps=score_gain_bps,
+        required_gain_bps=required_gain_bps,
+        gate_type=gate_type,
+        gate_threshold=gate_threshold,
+        n_samples=len(samples),
+        min_improvement_pct=min_improvement_pct,
+    )
+
+    scores_path = _REPO / "derived" / f"qaccess_candidate_scores_{_safe_archive_name(request_id)}.csv"
+    _write_candidate_scores_csv(scores_path, candidates=candidates, target_mode=target_mode)
+
+    status = "would_update" if improvement_ok else "would_skip"
+    print(
+        f"[worker] dry_run status={status.upper()} {log_fields} "
+        f"skip_reason={'' if improvement_ok else skip_reason} {gate_detail} "
+        f"candidate_scores_csv={scores_path.resolve()}"
+    )
+    return 0
 
 
 def _process_request(
@@ -293,32 +570,18 @@ def _process_request(
     archive_dir: Path,
     prev_coeffs_out: Path,
     mode: str,
+    target_mode: str,
     min_improvement_pct: float,
+    min_delta_gain_bps: float,
+    min_relative_delta_gain: float,
 ) -> bool:
-    if not request_path.is_file():
-        return False
-    try:
-        req = json.loads(request_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        print(f"[worker] skip: invalid request json: {exc}", file=sys.stderr)
-        return False
-
-    request_id = str(req.get("request_id") or "").strip()
-    if not request_id:
-        print("[worker] skip: request missing request_id", file=sys.stderr)
-        return False
-
-    state = _load_state(state_path)
-    processed: list[str] = list(state.get("processed_request_ids") or [])
-    if request_id in processed:
-        if request_path.is_file():
-            request_path.unlink()
-        return False
-
-    df = _load_runtime_samples(samples_path)
-    samples = _clean_runtime_samples(df)
-    if samples.empty:
-        print("[worker] skip: no valid runtime samples", file=sys.stderr)
+    req, samples, request_id = _load_request_and_samples(
+        request_path,
+        samples_path,
+        skip_processed=True,
+        state_path=state_path,
+    )
+    if req is None or samples.empty or not request_id:
         return False
 
     if mode != "rf":
@@ -333,41 +596,71 @@ def _process_request(
     cur_beta = float(req.get("current_beta", 0.1) or 0.1)
     cur_gamma = float(req.get("current_gamma", 0.1) or 0.1)
 
-    pred_current = _mean_predicted_bw(samples, model, cur_alpha, cur_beta, cur_gamma)
-    best_alpha, best_beta, best_gamma, pred_best = _pick_best_candidate(samples, model)
+    candidates, pred_current, best_alpha, best_beta, best_gamma, pred_best = _score_all_candidates(
+        samples,
+        model,
+        cur_alpha=cur_alpha,
+        cur_beta=cur_beta,
+        cur_gamma=cur_gamma,
+    )
 
     improvement_pct = _improvement_pct(pred_current, pred_best)
-    need_pred = pred_current * (1.0 + min_improvement_pct / 100.0) if pred_current > 0 else 0.0
-    improvement_ok = pred_current <= 0 or pred_best >= need_pred
+    improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
+        target_mode,
+        pred_current,
+        pred_best,
+        min_improvement_pct=min_improvement_pct,
+        min_delta_gain_bps=min_delta_gain_bps,
+        min_relative_delta_gain=min_relative_delta_gain,
+    )
 
     applied_alpha = _apply_max_step(cur_alpha, best_alpha)
     applied_beta = max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, best_beta))
     applied_gamma = max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, best_gamma))
 
     ts_ms = int(time.time() * 1000)
-    response: dict = {
+    metric_field = _metric_field(target_mode)
+    score_gain = pred_best - pred_current
+
+    response: dict[str, Any] = {
         "request_id": request_id,
         "timestamp_ms": ts_ms,
         "status": "ok" if improvement_ok else "skipped",
         "request_reason": req.get("reason"),
         "n_samples": int(len(samples)),
-        "predicted_current_bw_bps": pred_current,
-        "predicted_best_bw_bps": pred_best,
-        "improvement_pct": improvement_pct,
-        "improvement_min_pct": min_improvement_pct,
+        "target_mode": target_mode,
+        "pred_current": pred_current,
+        "pred_best": pred_best,
+        "score_gain": score_gain,
+        "score_gain_bps": score_gain_bps,
+        "gate_type": gate_type,
+        "gate_threshold": gate_threshold,
         "current_alpha": cur_alpha,
         "current_beta": cur_beta,
         "current_gamma": cur_gamma,
         "candidate_alpha": best_alpha,
         "candidate_beta": best_beta,
         "candidate_gamma": best_gamma,
+        "final_alpha": applied_alpha if improvement_ok else cur_alpha,
+        "final_beta": applied_beta if improvement_ok else cur_beta,
+        "final_gamma": applied_gamma if improvement_ok else cur_gamma,
+        "skip_reason": "" if improvement_ok else skip_reason,
     }
+
+    if target_mode == "next_bw_bps":
+        response.update({
+            "predicted_current_bw_bps": pred_current,
+            "predicted_best_bw_bps": pred_best,
+            "improvement_pct": improvement_pct,
+            "improvement_min_pct": min_improvement_pct,
+        })
 
     _assert_runtime_coeffs_path(coeffs_out)
 
+    required_gain_bps = gate_threshold if target_mode == "delta_bw_1s" else None
     log_fields = _worker_log_fields(
+        target_mode=target_mode,
         request_id=request_id,
-        min_improvement_pct=min_improvement_pct,
         cur_alpha=cur_alpha,
         cur_beta=cur_beta,
         cur_gamma=cur_gamma,
@@ -377,7 +670,12 @@ def _process_request(
         pred_current=pred_current,
         pred_best=pred_best,
         improvement_pct=improvement_pct,
+        score_gain_bps=score_gain_bps,
+        required_gain_bps=required_gain_bps,
+        gate_type=gate_type,
+        gate_threshold=gate_threshold,
         n_samples=len(samples),
+        min_improvement_pct=min_improvement_pct,
     )
 
     if improvement_ok:
@@ -387,19 +685,32 @@ def _process_request(
             "beta": applied_beta,
             "gamma": applied_gamma,
             "source": "qaccess_t_update_worker.py",
-            "metric": "predicted_next_bw_bps",
-            "predicted_next_bw_bps": pred_best,
+            "metric": metric_field,
+            metric_field: pred_best,
+            "target_mode": target_mode,
             "n_samples": int(len(samples)),
             "request_id": request_id,
             "request": req,
             "mode": mode,
-            "improvement_min_pct": min_improvement_pct,
-            "improvement_pct": improvement_pct,
             "previous_alpha": cur_alpha,
             "previous_beta": cur_beta,
             "previous_gamma": cur_gamma,
             "previous_coeffs_backup": str(backup_path) if backup_path else "",
         }
+        if target_mode == "next_bw_bps":
+            coeffs_payload.update({
+                "improvement_min_pct": min_improvement_pct,
+                "improvement_pct": improvement_pct,
+            })
+        else:
+            coeffs_payload.update({
+                "gate_type": gate_type,
+                "gate_threshold": gate_threshold,
+                "pred_current": pred_current,
+                "pred_best": pred_best,
+                "score_gain": score_gain,
+                "score_gain_bps": score_gain_bps,
+            })
         atomic_write_json(coeffs_out, coeffs_payload)
         response.update({
             "alpha": applied_alpha,
@@ -411,7 +722,6 @@ def _process_request(
             "coeffs_out": str(coeffs_out.resolve()),
             "previous_coeffs_backup": str(backup_path) if backup_path else "",
             "previous_coeffs_prev": str(prev_coeffs_out.resolve()) if backup_path else "",
-            "skip_reason": "",
         })
         print(
             f"[worker] status=UPDATED {log_fields} "
@@ -423,15 +733,16 @@ def _process_request(
             "alpha": cur_alpha,
             "beta": cur_beta,
             "gamma": cur_gamma,
-            "skip_reason": "improvement_gate",
         })
         print(
             f"[worker] status=SKIPPED {log_fields} "
-            f"skip_reason=improvement_gate need_pred>={need_pred:.0f}"
+            f"skip_reason={skip_reason} {gate_detail}"
         )
 
     atomic_write_json(response_out, response)
 
+    state = _load_state(state_path)
+    processed: list[str] = list(state.get("processed_request_ids") or [])
     processed.append(request_id)
     state["processed_request_ids"] = processed[-200:]
     state["last_processed_request_id"] = request_id
@@ -459,10 +770,28 @@ def main() -> None:
     ap.add_argument("--mode", choices=["rf"], default="rf")
     ap.add_argument("--poll-interval", type=float, default=5.0)
     ap.add_argument(
+        "--target-mode",
+        choices=TARGET_MODES,
+        default="next_bw_bps",
+        help="Prediction target and gate semantics (default: next_bw_bps)",
+    )
+    ap.add_argument(
         "--min-improvement-pct",
         type=float,
         default=DEFAULT_MIN_IMPROVEMENT_PCT,
-        help="Minimum predicted throughput improvement (%%) required to accept coefficient update (default: 3.0)",
+        help="Minimum predicted throughput improvement (%%) for next_bw_bps gate (default: 3.0)",
+    )
+    ap.add_argument(
+        "--min-delta-gain-bps",
+        type=float,
+        default=DEFAULT_MIN_DELTA_GAIN_BPS,
+        help="Minimum pred_best - pred_current (bps) for delta_bw_1s gate (default: 500000)",
+    )
+    ap.add_argument(
+        "--min-relative-delta-gain",
+        type=float,
+        default=DEFAULT_MIN_RELATIVE_DELTA_GAIN,
+        help="Minimum pred_best - pred_current for relative_delta_bw_1s gate (default: 0.01)",
     )
     ap.add_argument(
         "--prev-coeffs-out",
@@ -471,11 +800,37 @@ def main() -> None:
         help="Latest pre-update runtime coefficients copy for audit/rollback",
     )
     ap.add_argument("--once", action="store_true", help="Process one request if present, then exit")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Score grid candidates and write CSV; do not update coeffs or archive buffer",
+    )
     args = ap.parse_args()
 
+    if args.dry_run:
+        rc = _dry_run(
+            args.request.resolve(),
+            args.runtime_samples.resolve(),
+            args.model.resolve(),
+            target_mode=args.target_mode,
+            min_improvement_pct=args.min_improvement_pct,
+            min_delta_gain_bps=args.min_delta_gain_bps,
+            min_relative_delta_gain=args.min_relative_delta_gain,
+        )
+        raise SystemExit(rc)
+
+    gate_desc = (
+        f"min_improvement_pct={args.min_improvement_pct}"
+        if args.target_mode == "next_bw_bps"
+        else (
+            f"min_delta_gain_bps={args.min_delta_gain_bps}"
+            if args.target_mode == "delta_bw_1s"
+            else f"min_relative_delta_gain={args.min_relative_delta_gain}"
+        )
+    )
     print(
         f"[worker] buffer-full mode; polling {args.request.resolve()} every {args.poll_interval}s "
-        f"min_improvement_pct={args.min_improvement_pct}",
+        f"target_mode={args.target_mode} {gate_desc}",
         flush=True,
     )
 
@@ -490,7 +845,10 @@ def main() -> None:
             args.archive_dir.resolve(),
             args.prev_coeffs_out.resolve(),
             args.mode,
+            args.target_mode,
             args.min_improvement_pct,
+            args.min_delta_gain_bps,
+            args.min_relative_delta_gain,
         )
         if args.once:
             break
