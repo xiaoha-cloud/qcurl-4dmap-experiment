@@ -234,6 +234,9 @@ def _env_float(name, default):
         return float(v)
     except ValueError:
         return default
+
+
+def _open_log_file(path, save_logs):
     """Open a log destination; /dev/null keeps runs quiet when logs are disabled."""
     return open(path if save_logs else os.devnull, "w")
 
