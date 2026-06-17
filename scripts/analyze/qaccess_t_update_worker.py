@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Q-ACCeSS-T Phase 2 update worker (buffer-full trigger).
+Q-ACCeSS-T Phase 2 update worker (buffer-full trigger, per-subflow coefficients).
 
-Polls qaccess_update_request.json written by Go when the runtime MI buffer is full.
-Each request_id is processed at most once; on success the request is archived and
-runtime samples are rotated (archive + truncate) so the next cycle uses a clean buffer.
+Polls qaccess_update_request.json written by Go when a path-specific runtime buffer is full.
+Each request_id is processed at most once.
 
 Writes only derived/qaccess_t_runtime_coefficients.json (never qaccess_t_initial_coefficients.json).
 """
@@ -31,6 +30,11 @@ _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
+from qaccess_coefficients import (  # noqa: E402
+    load_coeffs_doc,
+    resolve_path_coeffs,
+    update_path_coeffs_locked,
+)
 from qaccess_io import atomic_write_json  # noqa: E402
 from qaccess_math import (  # noqa: E402
     normalize_d,
@@ -49,6 +53,7 @@ DEFAULT_COEFFS = _REPO / "derived" / "qaccess_t_runtime_coefficients.json"
 DEFAULT_RESPONSE = _REPO / "derived" / "qaccess_update_response.json"
 DEFAULT_STATE = _REPO / "derived" / "qaccess_worker_state.json"
 DEFAULT_ARCHIVE_DIR = _REPO / "derived" / "qaccess_processed_buffers"
+DEFAULT_AUDIT_CSV = _REPO / "derived" / "qaccess_per_path_update_audit.csv"
 
 FEATURES = [
     "bw_bps",
@@ -76,6 +81,37 @@ DEFAULT_MIN_RELATIVE_DELTA_GAIN = 0.01
 MAX_COEFF_STEP = 0.1
 MIN_BETA_GAMMA = 0.1
 DEFAULT_COEFFS_PREV = _REPO / "derived" / "qaccess_t_runtime_coefficients_prev.json"
+
+AUDIT_FIELDS = [
+    "timestamp_ms",
+    "request_id",
+    "run_id",
+    "path_id",
+    "reason",
+    "mode",
+    "shadow",
+    "row_count",
+    "current_alpha",
+    "current_beta",
+    "current_gamma",
+    "current_source",
+    "candidate_alpha",
+    "candidate_beta",
+    "candidate_gamma",
+    "applied_alpha",
+    "applied_beta",
+    "applied_gamma",
+    "pred_current_delta_bps",
+    "pred_best_delta_bps",
+    "score_gain_bps",
+    "mean_gain_before",
+    "mean_gain_after",
+    "mean_backoff_before",
+    "mean_backoff_after",
+    "gate_type",
+    "status",
+    "fixed_gamma",
+]
 
 
 def _load_state(path: Path) -> dict:
@@ -105,7 +141,7 @@ def _clean_runtime_samples(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     work = df.copy()
-    for col in FEATURES + ["next_bw_bps"]:
+    for col in FEATURES + ["next_bw_bps", "path_id"]:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
     if "next_bw_bps" in work.columns:
@@ -126,6 +162,20 @@ def _clean_runtime_samples(df: pd.DataFrame) -> pd.DataFrame:
         if col in work.columns:
             work[col] = work[col].clip(lower=0)
     return work
+
+
+def _filter_samples_by_path(samples: pd.DataFrame, path_id: int) -> pd.DataFrame:
+    if samples.empty or "path_id" not in samples.columns:
+        return pd.DataFrame()
+    work = samples[samples["path_id"] == path_id].copy()
+    return work.reset_index(drop=True)
+
+
+def _candidate_triples(fixed_gamma: float | None) -> list[tuple[float, float, float]]:
+    triples = phase2_candidate_triples()
+    if fixed_gamma is None:
+        return triples
+    return [(a, b, g) for a, b, g in triples if abs(g - fixed_gamma) < 1e-9]
 
 
 def _feature_matrix(samples: pd.DataFrame, alpha: float, beta: float, gamma: float) -> pd.DataFrame:
@@ -161,8 +211,11 @@ def _mean_prediction(samples: pd.DataFrame, model, alpha: float, beta: float, ga
     return float(np.mean(preds))
 
 
-def _mean_predicted_bw(samples: pd.DataFrame, model, alpha: float, beta: float, gamma: float) -> float:
-    return _mean_prediction(samples, model, alpha, beta, gamma)
+def _mean_gain_backoff(samples: pd.DataFrame, alpha: float, beta: float, gamma: float) -> tuple[float, float]:
+    X = _feature_matrix(samples, alpha, beta, gamma)
+    if X.empty:
+        return 1.0, 1.0
+    return float(X["gain"].mean()), float(X["backoff"].mean())
 
 
 def _score_all_candidates(
@@ -172,13 +225,14 @@ def _score_all_candidates(
     cur_alpha: float,
     cur_beta: float,
     cur_gamma: float,
+    fixed_gamma: float | None,
 ) -> tuple[list[dict[str, Any]], float, float, float, float, float]:
     pred_current = _mean_prediction(samples, model, cur_alpha, cur_beta, cur_gamma)
     candidates: list[dict[str, Any]] = []
     best_alpha, best_beta, best_gamma = cur_alpha, cur_beta, cur_gamma
     best_pred = pred_current
 
-    for alpha, beta, gamma in phase2_candidate_triples():
+    for alpha, beta, gamma in _candidate_triples(fixed_gamma):
         mean_pred = _mean_prediction(samples, model, alpha, beta, gamma)
         candidates.append({
             "alpha": alpha,
@@ -205,26 +259,12 @@ def _score_all_candidates(
     return candidates, pred_current, best_alpha, best_beta, best_gamma, best_pred
 
 
-def _pick_best_candidate(
-    samples: pd.DataFrame, model
-) -> tuple[float, float, float, float]:
-    best_alpha, best_beta, best_gamma = 0.70, MIN_BETA_GAMMA, MIN_BETA_GAMMA
-    best_pred = -1.0
-    for alpha, beta, gamma in phase2_candidate_triples():
-        mean_pred = _mean_prediction(samples, model, alpha, beta, gamma)
-        if mean_pred > best_pred:
-            best_pred = mean_pred
-            best_alpha, best_beta, best_gamma = alpha, beta, gamma
-    return best_alpha, best_beta, best_gamma, best_pred
-
-
 def _apply_max_step(current: float, target: float, max_step: float = MAX_COEFF_STEP) -> float:
     delta = max(-max_step, min(max_step, target - current))
     return current + delta
 
 
 def _ensure_path_writable(path: Path) -> None:
-    """Allow worker to rotate files created by root during sudo Mininet runs."""
     if not path.is_file():
         return
     if os.access(path, os.W_OK):
@@ -241,22 +281,45 @@ def _ensure_path_writable(path: Path) -> None:
         )
 
 
+def _remove_path_rows_from_csv(samples_path: Path, path_id: int) -> None:
+    if not samples_path.is_file():
+        return
+    _ensure_path_writable(samples_path)
+    df = pd.read_csv(samples_path)
+    if df.empty or "path_id" not in df.columns:
+        return
+    kept = df[df["path_id"] != path_id]
+    tmp = samples_path.with_suffix(".csv.tmp")
+    kept.to_csv(tmp, index=False)
+    os.chmod(tmp, 0o666)
+    os.replace(tmp, samples_path)
+    try:
+        os.chmod(samples_path, 0o666)
+    except OSError:
+        pass
+
+
 def _archive_and_truncate_buffer(
     samples_path: Path,
     archive_dir: Path,
     request_id: str,
     request_path: Path,
+    path_id: int,
+    *,
+    shadow: bool,
 ) -> None:
+    if shadow:
+        return
     archive_dir.mkdir(parents=True, exist_ok=True)
     safe = _safe_archive_name(request_id)
     if samples_path.is_file() and samples_path.stat().st_size > 0:
         _ensure_path_writable(samples_path)
-        dest = archive_dir / f"qaccess_runtime_samples_{safe}.csv"
-        shutil.copy2(samples_path, dest)
-        header = samples_path.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
-        with samples_path.open("w", encoding="utf-8", newline="") as f:
-            if header:
-                f.write(header[0] + "\n")
+        df = pd.read_csv(samples_path)
+        path_df = _filter_samples_by_path(_clean_runtime_samples(df), path_id)
+        if not path_df.empty:
+            dest = archive_dir / f"qaccess_runtime_samples_{safe}_path{path_id}.csv"
+            path_df.to_csv(dest, index=False)
+        _remove_path_rows_from_csv(samples_path, path_id)
     if request_path.is_file():
         _ensure_path_writable(request_path)
         req_dest = archive_dir / f"qaccess_update_request_{safe}.json"
@@ -281,7 +344,6 @@ def _save_coeffs_backup(
     request_id: str,
     prev_out: Path,
 ) -> Path | None:
-    """Copy runtime coefficients before an accepted update (audit / rollback)."""
     if not coeffs_out.is_file():
         return None
     archive_dir.mkdir(parents=True, exist_ok=True)
@@ -298,14 +360,6 @@ def _improvement_pct(pred_current: float, pred_best: float) -> float:
     if pred_current <= 0 and pred_best > 0:
         return float("inf")
     return float("nan")
-
-
-def _fmt_pct(v: float) -> str:
-    if math.isinf(v):
-        return "inf"
-    if math.isnan(v):
-        return "nan"
-    return f"{v:.2f}"
 
 
 def _metric_field(target_mode: str) -> str:
@@ -365,74 +419,21 @@ def _evaluate_gate(
     raise ValueError(f"unsupported target_mode: {target_mode}")
 
 
-def _worker_log_fields(
-    *,
-    target_mode: str,
-    request_id: str,
-    cur_alpha: float,
-    cur_beta: float,
-    cur_gamma: float,
-    best_alpha: float,
-    best_beta: float,
-    best_gamma: float,
-    pred_current: float,
-    pred_best: float,
-    improvement_pct: float,
-    score_gain_bps: float | None,
-    required_gain_bps: float | None,
-    gate_type: str,
-    gate_threshold: float,
-    n_samples: int,
-    min_improvement_pct: float,
-) -> str:
-    if target_mode == "next_bw_bps":
-        return (
-            f"target_mode={target_mode} request_id={request_id} "
-            f"gate_pct={min_improvement_pct:.1f} required_pct={min_improvement_pct:.1f} "
-            f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
-            f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
-            f"pred_current={pred_current:.0f} pred_best={pred_best:.0f} "
-            f"improvement_pct={_fmt_pct(improvement_pct)} n={n_samples}"
-        )
-
-    if target_mode == "delta_bw_1s":
-        gain = score_gain_bps if score_gain_bps is not None else (pred_best - pred_current)
-        req = required_gain_bps if required_gain_bps is not None else gate_threshold
-        return (
-            f"target_mode={target_mode} request_id={request_id} "
-            f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
-            f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
-            f"pred_current_delta_bps={pred_current:.0f} pred_best_delta_bps={pred_best:.0f} "
-            f"score_gain_bps={gain:.0f} required_gain_bps={req:.0f} "
-            f"gate_type={gate_type} n={n_samples} "
-            f"improvement_pct_diag={_fmt_pct(improvement_pct)}"
-        )
-
-    gain = pred_best - pred_current
-    return (
-        f"target_mode={target_mode} request_id={request_id} "
-        f"current_alpha={cur_alpha:.4f} current_beta={cur_beta:.4f} current_gamma={cur_gamma:.4f} "
-        f"candidate_alpha={best_alpha:.4f} candidate_beta={best_beta:.4f} candidate_gamma={best_gamma:.4f} "
-        f"pred_current={pred_current:.6f} pred_best={pred_best:.6f} "
-        f"score_gain={gain:.6f} required_gain={gate_threshold:.4f} "
-        f"gate_type={gate_type} n={n_samples} "
-        f"improvement_pct_diag={_fmt_pct(improvement_pct)}"
-    )
-
-
 def _write_candidate_scores_csv(
     out_path: Path,
     *,
     candidates: list[dict[str, Any]],
     target_mode: str,
+    path_id: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["alpha", "beta", "gamma", "mean_prediction", "is_current", "is_best", "target_mode"]
+    fieldnames = ["path_id", "alpha", "beta", "gamma", "mean_prediction", "is_current", "is_best", "target_mode"]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in candidates:
             writer.writerow({
+                "path_id": path_id,
                 "alpha": row["alpha"],
                 "beta": row["beta"],
                 "gamma": row["gamma"],
@@ -443,26 +444,59 @@ def _write_candidate_scores_csv(
             })
 
 
+def _append_audit_row(audit_csv: Path, row: dict[str, Any]) -> None:
+    audit_csv.parent.mkdir(parents=True, exist_ok=True)
+    write_header = not audit_csv.is_file() or audit_csv.stat().st_size == 0
+    with audit_csv.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=AUDIT_FIELDS, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    try:
+        os.chmod(audit_csv, 0o666)
+    except OSError:
+        pass
+
+
+def _parse_path_id(req: dict[str, Any]) -> int | None:
+    if "path_id" not in req:
+        return None
+    try:
+        return int(req["path_id"])
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_request_and_samples(
     request_path: Path,
     samples_path: Path,
     *,
     skip_processed: bool,
     state_path: Path,
-) -> tuple[dict | None, pd.DataFrame, str]:
+) -> tuple[dict | None, pd.DataFrame, str, int | None]:
     if not request_path.is_file():
-        return None, pd.DataFrame(), ""
+        return None, pd.DataFrame(), "", None
 
     try:
         req = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         print(f"[worker] skip: invalid request json: {exc}", file=sys.stderr)
-        return None, pd.DataFrame(), ""
+        return None, pd.DataFrame(), "", None
 
     request_id = str(req.get("request_id") or "").strip()
     if not request_id:
         print("[worker] skip: request missing request_id", file=sys.stderr)
-        return None, pd.DataFrame(), ""
+        return None, pd.DataFrame(), "", None
+
+    path_id = _parse_path_id(req)
+    if path_id is None:
+        print(f"[worker] skip: request missing path_id request_id={request_id}", file=sys.stderr)
+        return None, pd.DataFrame(), request_id, None
+
+    for field in ("reason",):
+        if not str(req.get(field) or "").strip():
+            print(f"[worker] skip: request missing {field} request_id={request_id}", file=sys.stderr)
+            return None, pd.DataFrame(), request_id, path_id
 
     if skip_processed:
         state = _load_state(state_path)
@@ -470,94 +504,26 @@ def _load_request_and_samples(
         if request_id in processed:
             if request_path.is_file():
                 request_path.unlink()
-            return None, pd.DataFrame(), request_id
+            return None, pd.DataFrame(), request_id, path_id
 
     df = _load_runtime_samples(samples_path)
-    samples = _clean_runtime_samples(df)
+    all_samples = _clean_runtime_samples(df)
+    samples = _filter_samples_by_path(all_samples, path_id)
     if samples.empty:
-        print("[worker] skip: no valid runtime samples", file=sys.stderr)
-        return None, pd.DataFrame(), request_id
+        print(f"[worker] skip: no valid runtime samples for path_id={path_id}", file=sys.stderr)
+        return None, pd.DataFrame(), request_id, path_id
 
-    return req, samples, request_id
+    return req, samples, request_id, path_id
 
 
-def _dry_run(
-    request_path: Path,
-    samples_path: Path,
-    model_path: Path,
-    *,
-    target_mode: str,
-    min_improvement_pct: float,
-    min_delta_gain_bps: float,
-    min_relative_delta_gain: float,
-) -> int:
-    req, samples, request_id = _load_request_and_samples(
-        request_path,
-        samples_path,
-        skip_processed=False,
-        state_path=DEFAULT_STATE,
-    )
-    if req is None or samples.empty or not request_id:
-        return 1
-    if not model_path.is_file():
-        print(f"[worker] missing model {model_path}", file=sys.stderr)
-        return 1
-
-    model = joblib.load(model_path)
-    cur_alpha = float(req.get("current_alpha", 0.6) or 0.6)
-    cur_beta = float(req.get("current_beta", 0.1) or 0.1)
-    cur_gamma = float(req.get("current_gamma", 0.1) or 0.1)
-
-    candidates, pred_current, best_alpha, best_beta, best_gamma, pred_best = _score_all_candidates(
-        samples,
-        model,
-        cur_alpha=cur_alpha,
-        cur_beta=cur_beta,
-        cur_gamma=cur_gamma,
-    )
-
-    improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
-        target_mode,
-        pred_current,
-        pred_best,
-        min_improvement_pct=min_improvement_pct,
-        min_delta_gain_bps=min_delta_gain_bps,
-        min_relative_delta_gain=min_relative_delta_gain,
-    )
-
-    improvement_pct = _improvement_pct(pred_current, pred_best)
-    required_gain_bps = gate_threshold if target_mode == "delta_bw_1s" else None
-
-    log_fields = _worker_log_fields(
-        target_mode=target_mode,
-        request_id=request_id,
-        cur_alpha=cur_alpha,
-        cur_beta=cur_beta,
-        cur_gamma=cur_gamma,
-        best_alpha=best_alpha,
-        best_beta=best_beta,
-        best_gamma=best_gamma,
-        pred_current=pred_current,
-        pred_best=pred_best,
-        improvement_pct=improvement_pct,
-        score_gain_bps=score_gain_bps,
-        required_gain_bps=required_gain_bps,
-        gate_type=gate_type,
-        gate_threshold=gate_threshold,
-        n_samples=len(samples),
-        min_improvement_pct=min_improvement_pct,
-    )
-
-    scores_path = _REPO / "derived" / f"qaccess_candidate_scores_{_safe_archive_name(request_id)}.csv"
-    _write_candidate_scores_csv(scores_path, candidates=candidates, target_mode=target_mode)
-
-    status = "would_update" if improvement_ok else "would_skip"
-    print(
-        f"[worker] dry_run status={status.upper()} {log_fields} "
-        f"skip_reason={'' if improvement_ok else skip_reason} {gate_detail} "
-        f"candidate_scores_csv={scores_path.resolve()}"
-    )
-    return 0
+def _worker_log_line(log_file: Path | None, payload: dict[str, Any]) -> None:
+    line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        with log_file.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    else:
+        print(line)
 
 
 def _process_request(
@@ -569,19 +535,24 @@ def _process_request(
     state_path: Path,
     archive_dir: Path,
     prev_coeffs_out: Path,
+    audit_csv: Path,
     mode: str,
     target_mode: str,
     min_improvement_pct: float,
     min_delta_gain_bps: float,
     min_relative_delta_gain: float,
+    *,
+    shadow: bool,
+    fixed_gamma: float | None,
+    log_file: Path | None = None,
 ) -> bool:
-    req, samples, request_id = _load_request_and_samples(
+    req, samples, request_id, path_id = _load_request_and_samples(
         request_path,
         samples_path,
-        skip_processed=True,
+        skip_processed=not shadow,
         state_path=state_path,
     )
-    if req is None or samples.empty or not request_id:
+    if req is None or samples.empty or not request_id or path_id is None:
         return False
 
     if mode != "rf":
@@ -592,9 +563,12 @@ def _process_request(
         return False
 
     model = joblib.load(model_path)
-    cur_alpha = float(req.get("current_alpha", 0.6) or 0.6)
-    cur_beta = float(req.get("current_beta", 0.1) or 0.1)
-    cur_gamma = float(req.get("current_gamma", 0.1) or 0.1)
+    coeffs_doc = load_coeffs_doc(coeffs_out)
+    cur_alpha, cur_beta, cur_gamma, cur_source = resolve_path_coeffs(coeffs_doc, path_id)
+    if "current_alpha" in req:
+        cur_alpha = float(req.get("current_alpha", cur_alpha) or cur_alpha)
+        cur_beta = float(req.get("current_beta", cur_beta) or cur_beta)
+        cur_gamma = float(req.get("current_gamma", cur_gamma) or cur_gamma)
 
     candidates, pred_current, best_alpha, best_beta, best_gamma, pred_best = _score_all_candidates(
         samples,
@@ -602,9 +576,9 @@ def _process_request(
         cur_alpha=cur_alpha,
         cur_beta=cur_beta,
         cur_gamma=cur_gamma,
+        fixed_gamma=fixed_gamma,
     )
 
-    improvement_pct = _improvement_pct(pred_current, pred_best)
     improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
         target_mode,
         pred_current,
@@ -617,18 +591,32 @@ def _process_request(
     applied_alpha = _apply_max_step(cur_alpha, best_alpha)
     applied_beta = max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, best_beta))
     applied_gamma = max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, best_gamma))
+    if fixed_gamma is not None:
+        applied_gamma = fixed_gamma
+
+    mean_gain_before, mean_backoff_before = _mean_gain_backoff(samples, cur_alpha, cur_beta, cur_gamma)
+    final_alpha = applied_alpha if improvement_ok else cur_alpha
+    final_beta = applied_beta if improvement_ok else cur_beta
+    final_gamma = applied_gamma if improvement_ok else cur_gamma
+    mean_gain_after, mean_backoff_after = _mean_gain_backoff(samples, final_alpha, final_beta, final_gamma)
 
     ts_ms = int(time.time() * 1000)
     metric_field = _metric_field(target_mode)
     score_gain = pred_best - pred_current
+    run_id = str(req.get("run_id") or "")
+    reason = str(req.get("reason") or "")
+    n_samples = int(len(samples))
 
     response: dict[str, Any] = {
         "request_id": request_id,
+        "path_id": path_id,
         "timestamp_ms": ts_ms,
         "status": "ok" if improvement_ok else "skipped",
-        "request_reason": req.get("reason"),
-        "n_samples": int(len(samples)),
+        "request_reason": reason,
+        "n_samples": n_samples,
+        "run_id": run_id,
         "target_mode": target_mode,
+        "shadow": shadow,
         "pred_current": pred_current,
         "pred_best": pred_best,
         "score_gain": score_gain,
@@ -638,80 +626,100 @@ def _process_request(
         "current_alpha": cur_alpha,
         "current_beta": cur_beta,
         "current_gamma": cur_gamma,
+        "current_source": cur_source,
         "candidate_alpha": best_alpha,
         "candidate_beta": best_beta,
         "candidate_gamma": best_gamma,
-        "final_alpha": applied_alpha if improvement_ok else cur_alpha,
-        "final_beta": applied_beta if improvement_ok else cur_beta,
-        "final_gamma": applied_gamma if improvement_ok else cur_gamma,
+        "final_alpha": final_alpha,
+        "final_beta": final_beta,
+        "final_gamma": final_gamma,
+        "mean_gain_before": mean_gain_before,
+        "mean_gain_after": mean_gain_after,
+        "mean_backoff_before": mean_backoff_before,
+        "mean_backoff_after": mean_backoff_after,
         "skip_reason": "" if improvement_ok else skip_reason,
+        "fixed_gamma": fixed_gamma,
     }
 
-    if target_mode == "next_bw_bps":
-        response.update({
-            "predicted_current_bw_bps": pred_current,
-            "predicted_best_bw_bps": pred_best,
-            "improvement_pct": improvement_pct,
-            "improvement_min_pct": min_improvement_pct,
-        })
+    if target_mode == "delta_bw_1s":
+        response["pred_current_delta_bps"] = pred_current
+        response["pred_best_delta_bps"] = pred_best
 
     _assert_runtime_coeffs_path(coeffs_out)
 
-    required_gain_bps = gate_threshold if target_mode == "delta_bw_1s" else None
-    log_fields = _worker_log_fields(
-        target_mode=target_mode,
-        request_id=request_id,
-        cur_alpha=cur_alpha,
-        cur_beta=cur_beta,
-        cur_gamma=cur_gamma,
-        best_alpha=best_alpha,
-        best_beta=best_beta,
-        best_gamma=best_gamma,
-        pred_current=pred_current,
-        pred_best=pred_best,
-        improvement_pct=improvement_pct,
-        score_gain_bps=score_gain_bps,
-        required_gain_bps=required_gain_bps,
-        gate_type=gate_type,
-        gate_threshold=gate_threshold,
-        n_samples=len(samples),
-        min_improvement_pct=min_improvement_pct,
-    )
+    scores_path = archive_dir / f"qaccess_candidate_scores_{_safe_archive_name(request_id)}_path{path_id}.csv"
+    _write_candidate_scores_csv(scores_path, candidates=candidates, target_mode=target_mode, path_id=path_id)
 
-    if improvement_ok:
+    audit_path = archive_dir / f"qaccess_per_path_audit_{_safe_archive_name(request_id)}_path{path_id}.json"
+    audit_payload = {
+        **response,
+        "candidates": candidates,
+        "candidate_scores_csv": str(scores_path.resolve()),
+    }
+    atomic_write_json(audit_path, audit_payload)
+
+    _append_audit_row(audit_csv, {
+        "timestamp_ms": ts_ms,
+        "request_id": request_id,
+        "run_id": run_id,
+        "path_id": path_id,
+        "reason": reason,
+        "mode": mode,
+        "shadow": int(shadow),
+        "row_count": n_samples,
+        "current_alpha": cur_alpha,
+        "current_beta": cur_beta,
+        "current_gamma": cur_gamma,
+        "current_source": cur_source,
+        "candidate_alpha": best_alpha,
+        "candidate_beta": best_beta,
+        "candidate_gamma": best_gamma,
+        "applied_alpha": final_alpha,
+        "applied_beta": final_beta,
+        "applied_gamma": final_gamma,
+        "pred_current_delta_bps": pred_current if target_mode == "delta_bw_1s" else "",
+        "pred_best_delta_bps": pred_best if target_mode == "delta_bw_1s" else "",
+        "score_gain_bps": score_gain_bps if score_gain_bps is not None else score_gain,
+        "mean_gain_before": mean_gain_before,
+        "mean_gain_after": mean_gain_after,
+        "mean_backoff_before": mean_backoff_before,
+        "mean_backoff_after": mean_backoff_after,
+        "gate_type": gate_type,
+        "status": response["status"],
+        "fixed_gamma": fixed_gamma if fixed_gamma is not None else "",
+    })
+
+    active_update = improvement_ok and not shadow
+    if active_update:
         backup_path = _save_coeffs_backup(coeffs_out, archive_dir, request_id, prev_coeffs_out)
-        coeffs_payload = {
-            "alpha": applied_alpha,
-            "beta": applied_beta,
-            "gamma": applied_gamma,
+        metadata = {
             "source": "qaccess_t_update_worker.py",
             "metric": metric_field,
             metric_field: pred_best,
             "target_mode": target_mode,
-            "n_samples": int(len(samples)),
+            "n_samples": n_samples,
             "request_id": request_id,
-            "request": req,
+            "path_id": path_id,
             "mode": mode,
             "previous_alpha": cur_alpha,
             "previous_beta": cur_beta,
             "previous_gamma": cur_gamma,
             "previous_coeffs_backup": str(backup_path) if backup_path else "",
+            "gate_type": gate_type,
+            "gate_threshold": gate_threshold,
+            "pred_current": pred_current,
+            "pred_best": pred_best,
+            "score_gain": score_gain,
+            "score_gain_bps": score_gain_bps,
         }
-        if target_mode == "next_bw_bps":
-            coeffs_payload.update({
-                "improvement_min_pct": min_improvement_pct,
-                "improvement_pct": improvement_pct,
-            })
-        else:
-            coeffs_payload.update({
-                "gate_type": gate_type,
-                "gate_threshold": gate_threshold,
-                "pred_current": pred_current,
-                "pred_best": pred_best,
-                "score_gain": score_gain,
-                "score_gain_bps": score_gain_bps,
-            })
-        atomic_write_json(coeffs_out, coeffs_payload)
+        update_path_coeffs_locked(
+            coeffs_out,
+            path_id,
+            alpha=applied_alpha,
+            beta=applied_beta,
+            gamma=applied_gamma,
+            metadata=metadata,
+        )
         response.update({
             "alpha": applied_alpha,
             "beta": applied_beta,
@@ -723,10 +731,22 @@ def _process_request(
             "previous_coeffs_backup": str(backup_path) if backup_path else "",
             "previous_coeffs_prev": str(prev_coeffs_out.resolve()) if backup_path else "",
         })
-        print(
-            f"[worker] status=UPDATED {log_fields} "
-            f"applied_alpha={applied_alpha:.4f} applied_beta={applied_beta:.4f} applied_gamma={applied_gamma:.4f} "
-            f"skip_reason=accepted backup={backup_path or 'none'}"
+        _worker_log_line(
+            log_file,
+            {
+                "request_id": request_id,
+                "target_mode": target_mode,
+                "path_id": path_id,
+                "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+                "candidate_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
+                "applied_coefficients": {"alpha": applied_alpha, "beta": applied_beta, "gamma": applied_gamma},
+                "pred_current": pred_current,
+                "pred_best": pred_best,
+                "score_gain": score_gain_bps if score_gain_bps is not None else score_gain,
+                "gate_threshold": gate_threshold,
+                "status": "UPDATED",
+                "skip_reason": "",
+            },
         )
     else:
         response.update({
@@ -734,32 +754,54 @@ def _process_request(
             "beta": cur_beta,
             "gamma": cur_gamma,
         })
-        print(
-            f"[worker] status=SKIPPED {log_fields} "
-            f"skip_reason={skip_reason} {gate_detail}"
+        status = "SHADOW" if shadow else "SKIPPED"
+        _worker_log_line(
+            log_file,
+            {
+                "request_id": request_id,
+                "target_mode": target_mode,
+                "path_id": path_id,
+                "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+                "candidate_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
+                "applied_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+                "pred_current": pred_current,
+                "pred_best": pred_best,
+                "score_gain": score_gain_bps if score_gain_bps is not None else score_gain,
+                "gate_threshold": gate_threshold,
+                "status": status,
+                "skip_reason": "" if improvement_ok else skip_reason,
+            },
         )
 
     atomic_write_json(response_out, response)
 
-    state = _load_state(state_path)
-    processed: list[str] = list(state.get("processed_request_ids") or [])
-    processed.append(request_id)
-    state["processed_request_ids"] = processed[-200:]
-    state["last_processed_request_id"] = request_id
-    _save_state(state_path, state)
+    if not shadow:
+        state = _load_state(state_path)
+        processed: list[str] = list(state.get("processed_request_ids") or [])
+        processed.append(request_id)
+        state["processed_request_ids"] = processed[-200:]
+        state["last_processed_request_id"] = request_id
+        _save_state(state_path, state)
 
-    try:
-        _archive_and_truncate_buffer(samples_path, archive_dir, request_id, request_path)
-    except (OSError, PermissionError) as exc:
-        print(
-            f"[worker] warning: archive/truncate failed for request_id={request_id}: {exc}",
-            file=sys.stderr,
-        )
+        try:
+            _archive_and_truncate_buffer(
+                samples_path,
+                archive_dir,
+                request_id,
+                request_path,
+                path_id,
+                shadow=shadow,
+            )
+        except (OSError, PermissionError) as exc:
+            print(
+                f"[worker] warning: archive/truncate failed for request_id={request_id} path_id={path_id}: {exc}",
+                file=sys.stderr,
+            )
     return True
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Q-ACCeSS-T Phase 2 buffer-full update worker")
+    ap = argparse.ArgumentParser(description="Q-ACCeSS-T Phase 2 buffer-full update worker (per-subflow)")
     ap.add_argument("--request", type=Path, default=DEFAULT_REQUEST)
     ap.add_argument("--runtime-samples", type=Path, default=DEFAULT_SAMPLES)
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
@@ -767,13 +809,14 @@ def main() -> None:
     ap.add_argument("--response-out", type=Path, default=DEFAULT_RESPONSE)
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
     ap.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR)
+    ap.add_argument("--audit-csv", type=Path, default=DEFAULT_AUDIT_CSV)
     ap.add_argument("--mode", choices=["rf"], default="rf")
     ap.add_argument("--poll-interval", type=float, default=5.0)
     ap.add_argument(
         "--target-mode",
         choices=TARGET_MODES,
-        default="next_bw_bps",
-        help="Prediction target and gate semantics (default: next_bw_bps)",
+        default="delta_bw_1s",
+        help="Prediction target and gate semantics (default: delta_bw_1s)",
     )
     ap.add_argument(
         "--min-improvement-pct",
@@ -799,25 +842,34 @@ def main() -> None:
         default=DEFAULT_COEFFS_PREV,
         help="Latest pre-update runtime coefficients copy for audit/rollback",
     )
+    ap.add_argument(
+        "--shadow-per-subflow",
+        action="store_true",
+        help="Evaluate per-path candidates and write audit artifacts only; no runtime coeff/buffer changes",
+    )
+    ap.add_argument(
+        "--fixed-gamma",
+        type=float,
+        default=None,
+        help="Filter candidate grid to this exact gamma before scoring (e.g. 0.1)",
+    )
     ap.add_argument("--once", action="store_true", help="Process one request if present, then exit")
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="Score grid candidates and write CSV; do not update coeffs or archive buffer",
+        help="Alias for --shadow-per-subflow --once",
+    )
+    ap.add_argument(
+        "--log-file",
+        type=Path,
+        default=None,
+        help="Append structured JSON update lines to this file (worker.log)",
     )
     args = ap.parse_args()
 
-    if args.dry_run:
-        rc = _dry_run(
-            args.request.resolve(),
-            args.runtime_samples.resolve(),
-            args.model.resolve(),
-            target_mode=args.target_mode,
-            min_improvement_pct=args.min_improvement_pct,
-            min_delta_gain_bps=args.min_delta_gain_bps,
-            min_relative_delta_gain=args.min_relative_delta_gain,
-        )
-        raise SystemExit(rc)
+    shadow = bool(args.shadow_per_subflow or args.dry_run)
+    fixed_gamma = args.fixed_gamma
+    log_file = args.log_file.resolve() if args.log_file else None
 
     gate_desc = (
         f"min_improvement_pct={args.min_improvement_pct}"
@@ -829,8 +881,10 @@ def main() -> None:
         )
     )
     print(
-        f"[worker] buffer-full mode; polling {args.request.resolve()} every {args.poll_interval}s "
+        f"[worker] per-subflow mode shadow={shadow} fixed_gamma={fixed_gamma} "
+        f"polling {args.request.resolve()} every {args.poll_interval}s "
         f"target_mode={args.target_mode} {gate_desc}",
+        file=sys.stderr,
         flush=True,
     )
 
@@ -844,13 +898,17 @@ def main() -> None:
             args.state.resolve(),
             args.archive_dir.resolve(),
             args.prev_coeffs_out.resolve(),
+            args.audit_csv.resolve(),
             args.mode,
             args.target_mode,
             args.min_improvement_pct,
             args.min_delta_gain_bps,
             args.min_relative_delta_gain,
+            shadow=shadow,
+            fixed_gamma=fixed_gamma,
+            log_file=log_file,
         )
-        if args.once:
+        if args.once or args.dry_run:
             break
         time.sleep(args.poll_interval)
 

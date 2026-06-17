@@ -1,26 +1,16 @@
 #!/usr/bin/env bash
 # Fig.8-style combined sudden link-quality deterioration evaluation.
 #
-# Primary objective: QUIC wire throughput robustness during simultaneous delay+loss spike.
-# Delay/loss signals are explanatory (runtime samples, tc log), not the optimization target.
-#
-# Topology (--scenario fig8):
-#   Path A: 20 Mbps, 40 ms, 0%
-#   Path B: 30 Mbps, 20 ms, 0% static; combined deterioration on h2-eth1:
-#     0–90s:   20 ms, 0%
-#     90–100s: 80 ms, 0.05%
-#     100s+:   20 ms, 0%
-#
-# Comparison (same profile, timeout, input, pcaps):
-#   combined_baseline         — utility-mode baseline, no worker
-#   combined_qaccess_t_dynamic — utility-mode qaccess_t + buffer-full worker
+# Minimal storage defaults (override with env):
+#   KEEP_PCAP=0  SAVE_OUTPUT_FLV=0  KEEP_RAW_RUNTIME=0  SAVE_LOGS=0
 #
 # Usage (VM, repo root):
-#   # Terminal 1 — start worker BEFORE dynamic leg:
+#   # Terminal 1 — worker BEFORE dynamic leg:
 #   python3 scripts/analyze/qaccess_t_update_worker.py --poll-interval 5 \
 #     --model derived/qaccess_t_model.pkl \
 #     --coeffs-out derived/qaccess_t_runtime_coefficients.json \
-#     --min-improvement-pct 1.0
+#     --min-improvement-pct 1.0 \
+#     --log-file logs_exp/session_.../worker.log
 #
 #   # Terminal 2:
 #   INPUT_FLV=~/Videos/push_input.flv \
@@ -31,6 +21,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
+FINALIZE="$ROOT/scripts/mininet/finalize_experiment_leg.sh"
 RUNTIME_COEFFS="${QACCESS_COEFFS_JSON:-derived/qaccess_t_runtime_coefficients.json}"
 SCENARIO="${SCENARIO:-fig8}"
 DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile.env}"
@@ -40,6 +31,12 @@ INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
 ARCHIVE_DIR="${QACCESS_ARCHIVE_DIR:-derived/qaccess_processed_buffers}"
+
+export KEEP_PCAP="${KEEP_PCAP:-0}"
+export SAVE_OUTPUT_FLV="${SAVE_OUTPUT_FLV:-0}"
+export KEEP_RAW_RUNTIME="${KEEP_RAW_RUNTIME:-0}"
+export KEEP_ALL_PROCESSED_BUFFERS="${KEEP_ALL_PROCESSED_BUFFERS:-0}"
+export THROUGHPUT_INTERVAL="${THROUGHPUT_INTERVAL:-1}"
 
 WORKER_CMD=(
   python3 scripts/analyze/qaccess_t_update_worker.py
@@ -56,11 +53,12 @@ fi
 
 cd "$ROOT"
 mkdir -p derived logs_exp
-chmod +x scripts/mininet/tc_deterioration_steps.sh 2>/dev/null || true
+chmod +x scripts/mininet/tc_deterioration_steps.sh scripts/mininet/finalize_experiment_leg.sh 2>/dev/null || true
 
 SESSION_DIR="logs_exp/session_combined_deterioration_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SESSION_DIR"
 echo "$SESSION_DIR" > "logs_exp/.last_session"
+SESSION_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 print_worker_instructions() {
   echo ""
@@ -69,6 +67,7 @@ print_worker_instructions() {
   echo ""
   echo "  cd $ROOT"
   printf '  %q ' "${WORKER_CMD[@]}"
+  echo "--log-file $SESSION_DIR/worker.log"
   echo ""
   echo "================================================================"
   echo ""
@@ -87,27 +86,27 @@ except Exception as e:
 " "$1"
 }
 
-archive_runtime_artifacts() {
+sync_leg_inputs() {
   local dest_dir="$1"
-  mkdir -p "$dest_dir/derived_snapshots"
-  local -a files=(
-    "derived/qaccess_runtime_samples.csv"
-    "derived/qaccess_update_request.json"
-    "derived/qaccess_update_response.json"
-    "$RUNTIME_COEFFS"
-    "derived/qaccess_t_runtime_coefficients_prev.json"
-    "derived/qaccess_worker_state.json"
-  )
-  for rel in "${files[@]}"; do
-    local src="$ROOT/$rel"
-    if [[ -f "$src" ]]; then
-      cp "$src" "$dest_dir/derived_snapshots/$(basename "$rel")"
-    fi
-  done
+  mkdir -p "$dest_dir/processed_buffers" "$dest_dir/derived_snapshots"
   if [[ -d "$ROOT/$ARCHIVE_DIR" ]]; then
-    mkdir -p "$dest_dir/processed_buffers"
     cp -a "$ROOT/$ARCHIVE_DIR/." "$dest_dir/processed_buffers/" 2>/dev/null || true
   fi
+  for rel in \
+    "derived/qaccess_runtime_samples.csv" \
+    "derived/qaccess_update_response.json" \
+    "$RUNTIME_COEFFS"; do
+    if [[ -f "$ROOT/$rel" ]]; then
+      cp "$ROOT/$rel" "$dest_dir/derived_snapshots/$(basename "$rel")"
+    fi
+  done
+}
+
+finalize_leg() {
+  local label="$1"
+  local leg_dir="$SESSION_DIR/$label"
+  sync_leg_inputs "$leg_dir"
+  bash "$FINALIZE" "$leg_dir" "$label"
 }
 
 run_one() {
@@ -123,8 +122,9 @@ run_one() {
   [[ -n "$INPUT_FLV" ]] && cmd+=(--input-flv "$INPUT_FLV")
   [[ "$LOG_CONTROL" == "1" ]] && cmd+=(--log-control)
   echo "[combined_deterioration] scenario=$SCENARIO utility-mode=$um label=$label profile=$DETERIORATION_PROFILE"
+  echo "[combined_deterioration] KEEP_PCAP=$KEEP_PCAP SAVE_OUTPUT_FLV=$SAVE_OUTPUT_FLV KEEP_RAW_RUNTIME=$KEEP_RAW_RUNTIME"
   env "$@" "${cmd[@]}"
-  archive_runtime_artifacts "$SESSION_DIR/$label"
+  finalize_leg "$label"
 }
 
 echo "[combined_deterioration] profile contents:"
@@ -173,11 +173,49 @@ print('yes' if any(abs(float(b.get(k,0))-float(a.get(k,0)))>1e-9 for k in keys) 
 ")
 echo "[combined_deterioration] coefficients changed during dynamic leg: $CHANGED"
 
+SESSION_END="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+python3 -c "
+import json
+from pathlib import Path
+import subprocess
+
+repo = Path('$ROOT')
+session = repo / '$SESSION_DIR'
+try:
+    commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
+    branch = subprocess.check_output(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd=repo, text=True).strip()
+except Exception:
+    commit, branch = '', ''
+
+def load(p):
+    p = Path(p)
+    return json.loads(p.read_text()) if p.is_file() else {}
+
+meta = {
+    'git_commit': commit,
+    'branch': branch,
+    'session_id': session.name,
+    'start_time': '$SESSION_START',
+    'end_time': '$SESSION_END',
+    'control_law': __import__('os').environ.get('QACCESS_CONTROL_LAW', 'legacy'),
+    'model_path': 'derived/qaccess_t_model.pkl',
+    'target_mode': 'delta_bw_1s',
+    'gate_threshold': 'min_improvement_pct=1.0',
+    'initial_coefficients': load('$COEFFS_BEFORE'),
+    'final_coefficients': load('$COEFFS_AFTER'),
+    'profile_path': '$DETERIORATION_PROFILE',
+    'timeout': int('$TIMEOUT'),
+    'KEEP_PCAP': int('$KEEP_PCAP'),
+    'KEEP_RAW_RUNTIME': int('$KEEP_RAW_RUNTIME'),
+    'SAVE_OUTPUT_FLV': int('$SAVE_OUTPUT_FLV'),
+}
+(session / 'experiment_metadata.json').write_text(json.dumps(meta, indent=2))
+print('[combined_deterioration] wrote', session / 'experiment_metadata.json')
+"
+
 echo ""
 echo "[combined_deterioration] session: $ROOT/$SESSION_DIR"
 echo "[combined_deterioration] baseline:  $SESSION_DIR/combined_baseline"
 echo "[combined_deterioration] dynamic:   $SESSION_DIR/combined_qaccess_t_dynamic"
-echo "[combined_deterioration] SAVE_LOGS=$SAVE_LOGS (pcaps always kept; role logs when SAVE_LOGS=1)"
-echo "[combined_deterioration] analysis:"
-echo "  jupyter notebook scripts/analyze/qaccess_combined_deterioration_analysis.ipynb"
-echo "  # or: python3 scripts/analyze/qaccess_impairment_eval_analyze.py --preset combined --session $SESSION_DIR"
+echo "[combined_deterioration] worker log: $SESSION_DIR/worker.log (start worker with --log-file)"
+echo "[combined_deterioration] retained per leg: control_law_diagnostics.csv throughput_*_down.csv tc_deterioration.log (+ dynamic coeffs JSON at session root)"

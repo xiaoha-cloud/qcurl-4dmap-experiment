@@ -77,6 +77,7 @@ type ControlSignal struct {
 	Gamma       float64
 	DelayTrend  float64
 	Active      bool
+	Diagnostics ControlLawDiagnostics
 }
 
 // UtilityController implements Q-ACCeSS-T utility → gain/backoff for OLIA secondary paths.
@@ -91,8 +92,10 @@ type UtilityController struct {
 	roundGTotal float64
 
 	// Q-ACCeSS-T runtime coefficients (protected by coeffsMu for Phase 2 reload).
-	coeffsMu sync.RWMutex
-	coeffs   QAccessCoefficients
+	coeffsMu      sync.RWMutex
+	coeffs        QAccessCoefficients
+	coeffsDoc     QAccessCoeffsDocument
+	perPathCoeffs map[protocol.PathID]QAccessCoefficients
 
 	// Phase 2 (qaccess_t only; disabled when env flags are 0).
 	phase2               qaccessPhase2Config
@@ -103,6 +106,7 @@ type UtilityController struct {
 	requestSerial        int64
 	updateInProgress     bool
 	inflightRequestID    string
+	inflightPathID       protocol.PathID
 	roundBwHistory       []float64
 	currentRoundTotalBwBps float64
 	currentRoundActivePaths int
@@ -114,31 +118,32 @@ type UtilityController struct {
 
 	// qaccess_t runtime sample export (separate CSV from collect).
 	runtimeExporter *qaccessSampleExporter
+
+	controlLawMode  ControlLawMode
+	prevAppliedGain map[protocol.PathID]float64
 }
 
 func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	uc := &UtilityController{
-		Mode:   mode,
-		RunID:  runID,
-		Prev:   make(map[protocol.PathID]*PathState),
-		MinGain:    0.80,
-		MaxGain:    1.20,
-		MinBackoff: 0.90,
-		MaxBackoff: 1.10,
-		coeffs: defaultQAccessTCoefficients(),
+		Mode:            mode,
+		RunID:           runID,
+		Prev:            make(map[protocol.PathID]*PathState),
+		MinGain:         legacyGainMin,
+		MaxGain:         legacyGainMax,
+		MinBackoff:      legacyRetMin,
+		MaxBackoff:      legacyRetMax,
+		coeffs:          defaultQAccessTCoefficients(),
+		controlLawMode:  resolveControlLawMode(),
+		prevAppliedGain: make(map[protocol.PathID]float64),
 	}
 	switch mode {
 	case ModeQAccessT:
 		uc.phase2 = loadQAccessPhase2Config()
 		jsonPath := uc.phase2.coeffJSONPath
-		if c, err := LoadQAccessTCoefficients(jsonPath); err == nil {
-			uc.coeffs = c
-			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s",
-				c.Alpha, c.Beta, c.Gamma, c.Source)
-		} else {
-			utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s (json=%s err=%v)",
-				uc.coeffs.Alpha, uc.coeffs.Beta, uc.coeffs.Gamma, uc.coeffs.Source, jsonPath, err)
-		}
+		uc.reloadCoefficientsFromDisk()
+		c := uc.getCoefficients()
+		utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s json=%s control_law=%s",
+			c.Alpha, c.Beta, c.Gamma, c.Source, jsonPath, uc.controlLawMode)
 		if uc.phase2.runtimeExport {
 			uc.runtimeExporter = newQAccessSampleExporter(
 				uc.phase2.runtimeSamples, runID, uc.phase2.runtimeBufferMax,
@@ -251,13 +256,19 @@ func qaccessUtility(gTotal, normD, normL, alpha, beta, gamma float64) float64 {
 }
 
 func (uc *UtilityController) qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma float64) (float64, float64) {
-	u := qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
-	gain := 1.0 + 0.20*math.Pow(gTotal, alpha) - 0.10*beta*5*normL - 0.05*gamma*5*normD
-	backoff := 1.0 - 0.08*math.Pow(gTotal, alpha) + 0.05*beta*5*normL + 0.03*gamma*5*normD
-	_ = u
-	gain = clamp(gain, uc.MinGain, uc.MaxGain)
-	backoff = clamp(backoff, uc.MinBackoff, uc.MaxBackoff)
-	return gain, backoff
+	in := controlLawTermsInput{GTotal: gTotal, NormD: normD, NormL: normL, Alpha: alpha, Beta: beta, Gamma: gamma}
+	gain, retention, _ := uc.computeLegacyGainBackoffWithDiagnostics(in)
+	return gain, retention
+}
+
+func (uc *UtilityController) qaccessGainBackoffForPath(pathID protocol.PathID, gTotal, normD, normL, alpha, beta, gamma float64) (float64, float64, ControlLawDiagnostics) {
+	in := controlLawTermsInput{GTotal: gTotal, NormD: normD, NormL: normL, Alpha: alpha, Beta: beta, Gamma: gamma}
+	switch uc.controlLawMode {
+	case ControlLawSafeTV1:
+		return uc.computeSafeTV1GainBackoff(pathID, in)
+	default:
+		return uc.computeLegacyGainBackoffWithDiagnostics(in)
+	}
 }
 
 func (uc *UtilityController) collectCoefficients() (alpha, beta, gamma float64) {
@@ -297,10 +308,11 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		gTotal = normG
 	}
 
-	coeffs := uc.getCoefficients()
+	coeffs := uc.getCoefficientsForPath(pm.PathID)
 	alpha, beta, gamma := coeffs.Alpha, coeffs.Beta, coeffs.Gamma
 	gain, backoff := 1.0, 1.0
 	var u float64
+	var diag ControlLawDiagnostics
 
 	switch uc.Mode {
 	case ModeQAccessT, ModeQAccessCollect:
@@ -309,7 +321,14 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		}
 		if active {
 			u = qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
-			gain, backoff = uc.qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma)
+			if uc.Mode == ModeQAccessT {
+				gain, backoff, diag = uc.qaccessGainBackoffForPath(pm.PathID, gTotal, normD, normL, alpha, beta, gamma)
+			} else {
+				gain, backoff = uc.qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma)
+				_, _, diag = uc.computeLegacyGainBackoffWithDiagnostics(controlLawTermsInput{
+					GTotal: gTotal, NormD: normD, NormL: normL, Alpha: alpha, Beta: beta, Gamma: gamma,
+				})
+			}
 		}
 	}
 
@@ -326,14 +345,15 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		Alpha:      alpha,
 		Beta:       beta,
 		Gamma:      gamma,
-		DelayTrend: math.Round(pm.DelayGradientMs*10000) / 10000,
+		DelayTrend:  math.Round(pm.DelayGradientMs*10000) / 10000,
 		Active:     active,
+		Diagnostics: diag,
 	}
 
 	if uc.Mode == ModeQAccessCollect && active && uc.trainCollector != nil {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
-		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
+		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma, diag)
 		if err := uc.trainCollector.recordPending(row, pm.PathID, pm.BWbps); err != nil {
 			utils.Infof("[qaccess_collect] csv write error path=%v: %v", pm.PathID, err)
 		}
@@ -342,7 +362,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 	if uc.Mode == ModeQAccessT && active && uc.runtimeExporter != nil {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
-		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma)
+		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma, diag)
 		if err := uc.runtimeExporter.recordPending(row, pm.PathID, pm.BWbps); err != nil {
 			utils.Infof("[qaccess_t] runtime sample export error path=%v: %v", pm.PathID, err)
 		}

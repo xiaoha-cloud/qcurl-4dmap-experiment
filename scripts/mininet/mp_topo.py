@@ -219,7 +219,21 @@ def _write_combined_log(output_path, inputs):
             out_f.write(f"\n===== END {label} =====\n\n")
 
 
-def _open_log_file(path, save_logs=True):
+def _env_flag(name, default=False):
+    v = os.environ.get(name, "")
+    if v == "":
+        return default
+    return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _env_float(name, default):
+    v = os.environ.get(name, "")
+    if not v:
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
     """Open a log destination; /dev/null keeps runs quiet when logs are disabled."""
     return open(path if save_logs else os.devnull, "w")
 
@@ -361,7 +375,14 @@ def run_experiment(net, args):
 
     videos_dir = os.path.join(effective_home(), "Videos")
     os.makedirs(videos_dir, exist_ok=True)
-    outfile = os.path.join(logdir, f"output_{run_id}.flv")
+    save_output_flv = _env_flag("SAVE_OUTPUT_FLV", False)
+    keep_pcap = _env_flag("KEEP_PCAP", False)
+    throughput_interval = _env_float("THROUGHPUT_INTERVAL", 1.0)
+    if save_output_flv:
+        outfile = os.path.join(logdir, f"output_{run_id}.flv")
+    else:
+        outfile = os.devnull
+        _log("exp", "SAVE_OUTPUT_FLV=0: pull output discarded to /dev/null")
     input_flv = (
         expand_user_path(args.input_flv)
         if args.input_flv
@@ -554,7 +575,8 @@ def run_experiment(net, args):
     # ---- Start pull on h1 --------------------------------------------------
     pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
     pull_log = _open_log_file(pull_log_path, save_logs)
-    open(outfile, "w").close()  # touch
+    if save_output_flv:
+        open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including
     # -log-control) must come before the URL, or the client prints "unsupport" and exits.
     lc = " -log-control" if getattr(args, "log_control", False) else ""
@@ -614,20 +636,24 @@ def run_experiment(net, args):
             _log("watchdog", f"push exited naturally at {elapsed:.0f}s")
             break
 
-        try:
-            size = os.path.getsize(outfile)
-        except OSError:
-            size = 0
+        if save_output_flv:
+            try:
+                size = os.path.getsize(outfile)
+            except OSError:
+                size = 0
 
-        if size > last_size:
-            _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
-            last_size = size
-            stable_rounds = 0
+            if size > last_size:
+                _log("watchdog", f"outfile growing: {size} B (+{size - last_size} B), elapsed {elapsed:.0f}s")
+                last_size = size
+                stable_rounds = 0
+            else:
+                stable_rounds += 1
+                if stable_rounds >= max_stable_rounds:
+                    _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
+                    break
         else:
-            stable_rounds += 1
-            if stable_rounds >= max_stable_rounds:
-                _log("watchdog", f"output stalled for {stable_rounds * poll_sec}s, stopping")
-                break
+            # SAVE_OUTPUT_FLV=0: rely on timeout / push process exit only.
+            pass
 
         time.sleep(poll_sec)
 
@@ -682,6 +708,7 @@ def run_experiment(net, args):
         except Exception:
             pass
 
+    throughput_ok = False
     analyzer = os.path.join(ROOT, "scripts", "analyze", "pcap_throughput.py")
     throughput_csv = os.path.join(throughput_dir, f"throughput_all_down_{run_id}.csv")
     throughput_a_csv = os.path.join(throughput_dir, f"throughput_pathA_down_{run_id}.csv")
@@ -690,7 +717,7 @@ def run_experiment(net, args):
     tshark_summary = os.path.join(logs_dir, f"tshark_summary_down_10s_{run_id}.log")
     tshark_err = os.path.join(logs_dir, f"tshark_summary_down_10s_{run_id}.err")
     if shutil.which("tshark") and os.path.isfile(analyzer):
-        _log("tshark", f"generating throughput csv -> {throughput_csv}")
+        _log("tshark", f"generating per-second throughput csvs in {logdir}")
         try:
             import subprocess
             with _open_log_file(tshark_summary, save_logs) as out_f, _open_log_file(tshark_err, save_logs) as err_f:
@@ -699,26 +726,64 @@ def run_experiment(net, args):
                         "python3", analyzer,
                         "--pcap-a", pcap_a,
                         "--pcap-b", pcap_b,
-                        "--out", throughput_csv,
-                        "--interval", "10",
+                        "--per-path-dir", logdir,
+                        "--interval", str(throughput_interval),
                         "--direction", "down",
                     ],
                     stdout=out_f,
                     stderr=err_f,
                     check=False,
                 )
-            if os.path.isfile(throughput_csv):
-                _split_throughput_csv(
-                    throughput_csv,
-                    throughput_a_csv,
-                    throughput_b_csv,
-                    throughput_total_csv,
-                )
-                _log("tshark", f"split csv -> {throughput_a_csv}, {throughput_b_csv}, {throughput_total_csv}")
+            required = (
+                "throughput_all_down.csv",
+                "throughput_pathA_down.csv",
+                "throughput_pathB_down.csv",
+            )
+            throughput_ok = all(
+                os.path.isfile(os.path.join(logdir, name)) and os.path.getsize(os.path.join(logdir, name)) > 0
+                for name in required
+            )
+            if throughput_ok:
+                _log("tshark", f"throughput csvs -> {logdir}/throughput_*_down.csv")
+            else:
+                with _open_log_file(tshark_summary, save_logs) as out_f, _open_log_file(tshark_err, save_logs) as err_f:
+                    subprocess.run(
+                        [
+                            "python3", analyzer,
+                            "--pcap-a", pcap_a,
+                            "--pcap-b", pcap_b,
+                            "--out", throughput_csv,
+                            "--interval", str(max(throughput_interval, 1.0)),
+                            "--direction", "down",
+                        ],
+                        stdout=out_f,
+                        stderr=err_f,
+                        check=False,
+                    )
+                if os.path.isfile(throughput_csv):
+                    _split_throughput_csv(
+                        throughput_csv,
+                        throughput_a_csv,
+                        throughput_b_csv,
+                        throughput_total_csv,
+                    )
+                    throughput_ok = True
+                    _log("tshark", f"legacy split csv -> {throughput_a_csv}, {throughput_b_csv}")
         except Exception as e:
             _log("tshark", f"failed to generate throughput csv: {e}")
     else:
         _log("tshark", "skip throughput csv: tshark or analyzer script not found")
+
+    if throughput_ok and not keep_pcap:
+        for pcap_path in (pcap_a, pcap_b):
+            try:
+                if os.path.isfile(pcap_path):
+                    os.remove(pcap_path)
+            except OSError as e:
+                _log("pcap", f"failed to delete {pcap_path}: {e}")
+        _log("pcap", "KEEP_PCAP=0: deleted pcaps after throughput CSV generation")
+    elif keep_pcap:
+        _log("pcap", "KEEP_PCAP=1: retaining pcaps")
 
     if save_logs:
         combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
