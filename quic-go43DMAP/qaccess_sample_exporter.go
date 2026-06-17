@@ -18,27 +18,33 @@ var qaccessSampleCSVHeader = []string{
 	"cwnd_bytes", "inflight_bytes", "cwnd_room",
 	"alpha", "beta", "gamma", "utility", "gain", "backoff",
 	"next_bw_bps", "next_goodput_bps",
+	"throughput_reward_term", "loss_penalty_term", "delay_penalty_term",
+	"gain_raw", "gain_clamped", "gain_hit_min", "gain_hit_max",
+	"retention_raw", "retention_clamped", "retention_hit_min", "retention_hit_max",
+	"control_law", "delay_penalty_bounded", "prev_gain", "step_limited_gain",
 }
 
 // qaccessSampleExporter writes labelled rows from existing PathMetrics (no separate monitor).
 type qaccessSampleExporter struct {
-	mu          sync.Mutex
-	path        string
-	runID       string
-	maxRows     int64
-	rowsWritten int64
-	opened      bool
-	writer      *csv.Writer
-	file        *os.File
-	pending     map[protocol.PathID]map[string]string
+	mu                sync.Mutex
+	path              string
+	runID             string
+	maxRows           int64
+	rowsWritten       int64
+	rowsWrittenPerPath map[protocol.PathID]int64
+	opened            bool
+	writer            *csv.Writer
+	file              *os.File
+	pending           map[protocol.PathID]map[string]string
 }
 
 func newQAccessSampleExporter(csvPath, runID string, maxRows int64) *qaccessSampleExporter {
 	return &qaccessSampleExporter{
-		path:    csvPath,
-		runID:   runID,
-		maxRows: maxRows,
-		pending: make(map[protocol.PathID]map[string]string),
+		path:               csvPath,
+		runID:              runID,
+		maxRows:            maxRows,
+		rowsWrittenPerPath: make(map[protocol.PathID]int64),
+		pending:            make(map[protocol.PathID]map[string]string),
 	}
 }
 
@@ -46,6 +52,41 @@ func (e *qaccessSampleExporter) bufferSize() int64 {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.rowsWritten + int64(len(e.pending))
+}
+
+func (e *qaccessSampleExporter) pathBufferSize(pathID protocol.PathID) int64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := e.rowsWrittenPerPath[pathID]
+	if _, ok := e.pending[pathID]; ok {
+		n++
+	}
+	return n
+}
+
+func (e *qaccessSampleExporter) pathsAtCapacity() []protocol.PathID {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.maxRows <= 0 {
+		return nil
+	}
+	var out []protocol.PathID
+	seen := make(map[protocol.PathID]struct{})
+	for pid, n := range e.rowsWrittenPerPath {
+		if n >= e.maxRows {
+			out = append(out, pid)
+			seen[pid] = struct{}{}
+		}
+	}
+	for pid := range e.pending {
+		if _, ok := seen[pid]; ok {
+			continue
+		}
+		if e.rowsWrittenPerPath[pid]+1 >= e.maxRows {
+			out = append(out, pid)
+		}
+	}
+	return out
 }
 
 func (e *qaccessSampleExporter) atCapacity() bool {
@@ -136,6 +177,7 @@ func (e *qaccessSampleExporter) flushPendingLabelLocked(pathID protocol.PathID, 
 		return err
 	}
 	e.rowsWritten++
+	e.rowsWrittenPerPath[pathID]++
 	return nil
 }
 
@@ -155,7 +197,98 @@ func (e *qaccessSampleExporter) resetBuffer() error {
 	e.writer = nil
 	e.opened = false
 	e.rowsWritten = 0
+	e.rowsWrittenPerPath = make(map[protocol.PathID]int64)
 	e.pending = make(map[protocol.PathID]map[string]string)
+	return nil
+}
+
+// removePathRows deletes rows for one path_id from the on-disk CSV and resets that path's counters.
+func (e *qaccessSampleExporter) removePathRows(pathID protocol.PathID) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	delete(e.pending, pathID)
+	e.rowsWrittenPerPath[pathID] = 0
+
+	if !e.opened && e.file == nil {
+		if _, err := os.Stat(e.path); os.IsNotExist(err) {
+			return nil
+		}
+	}
+	if e.writer != nil {
+		e.writer.Flush()
+	}
+	if e.file != nil {
+		if err := e.file.Close(); err != nil {
+			return err
+		}
+		e.file = nil
+		e.writer = nil
+		e.opened = false
+	}
+
+	f, err := os.Open(e.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	r := csv.NewReader(f)
+	records, err := r.ReadAll()
+	_ = f.Close()
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	header := records[0]
+	pathCol := -1
+	for i, col := range header {
+		if col == "path_id" {
+			pathCol = i
+			break
+		}
+	}
+	if pathCol < 0 {
+		return fmt.Errorf("path_id column missing in %s", e.path)
+	}
+	want := strconv.FormatUint(uint64(pathID), 10)
+	kept := [][]string{header}
+	removed := 0
+	for _, row := range records[1:] {
+		if pathCol < len(row) && row[pathCol] == want {
+			removed++
+			continue
+		}
+		kept = append(kept, row)
+	}
+	tmp := e.path + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0666)
+	if err != nil {
+		return err
+	}
+	w := csv.NewWriter(out)
+	if err := w.WriteAll(kept); err != nil {
+		_ = out.Close()
+		return err
+	}
+	w.Flush()
+	if err := w.Error(); err != nil {
+		_ = out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, e.path); err != nil {
+		return err
+	}
+	_ = os.Chmod(e.path, 0666)
+	e.rowsWritten -= int64(removed)
+	if e.rowsWritten < 0 {
+		e.rowsWritten = 0
+	}
 	return nil
 }
 
@@ -172,7 +305,7 @@ func (e *qaccessSampleExporter) recordPending(row map[string]string, pathID prot
 	return nil
 }
 
-func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta, gamma float64) map[string]string {
+func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta, gamma float64, diag ControlLawDiagnostics) map[string]string {
 	row := make(map[string]string, len(qaccessSampleCSVHeader))
 	row["timestamp_ms"] = strconv.FormatInt(pm.Timestamp.UnixNano()/1e6, 10)
 	row["run_id"] = runID
@@ -194,5 +327,22 @@ func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta,
 	row["backoff"] = fmt.Sprintf("%.4f", sig.Backoff)
 	row["next_bw_bps"] = ""
 	row["next_goodput_bps"] = ""
+	row["throughput_reward_term"] = fmt.Sprintf("%.6f", diag.ThroughputRewardTerm)
+	row["loss_penalty_term"] = fmt.Sprintf("%.6f", diag.LossPenaltyTerm)
+	row["delay_penalty_term"] = fmt.Sprintf("%.6f", diag.DelayPenaltyTerm)
+	row["gain_raw"] = fmt.Sprintf("%.6f", diag.GainRaw)
+	row["gain_clamped"] = fmt.Sprintf("%.6f", diag.GainClamped)
+	row["gain_hit_min"] = strconv.FormatBool(diag.GainHitMin)
+	row["gain_hit_max"] = strconv.FormatBool(diag.GainHitMax)
+	row["retention_raw"] = fmt.Sprintf("%.6f", diag.RetentionRaw)
+	row["retention_clamped"] = fmt.Sprintf("%.6f", diag.RetentionClamped)
+	row["retention_hit_min"] = strconv.FormatBool(diag.RetentionHitMin)
+	row["retention_hit_max"] = strconv.FormatBool(diag.RetentionHitMax)
+	row["control_law"] = diag.ControlLaw
+	row["delay_penalty_bounded"] = fmt.Sprintf("%.6f", diag.DelayPenaltyBounded)
+	if diag.PrevGain > 0 || diag.ControlLaw == string(ControlLawSafeTV1) {
+		row["prev_gain"] = fmt.Sprintf("%.6f", diag.PrevGain)
+	}
+	row["step_limited_gain"] = fmt.Sprintf("%.6f", diag.StepLimitedGain)
 	return row
 }

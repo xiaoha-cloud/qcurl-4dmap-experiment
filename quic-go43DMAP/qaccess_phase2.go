@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 )
 
@@ -212,17 +213,70 @@ func (uc *UtilityController) maybeReloadCoefficients(now time.Time) {
 	}
 	uc.lastCoeffMtime = info.ModTime()
 
-	newC, err := LoadQAccessTCoefficients(uc.phase2.coeffJSONPath)
-	if err != nil || !validQAccessCoefficients(newC) {
+	uc.coeffsMu.RLock()
+	oldPerPath := make(map[protocol.PathID]QAccessCoefficients, len(uc.perPathCoeffs))
+	for pid, c := range uc.perPathCoeffs {
+		oldPerPath[pid] = c
+	}
+	oldFallback := uc.coeffs
+	uc.coeffsMu.RUnlock()
+
+	doc, err := LoadQAccessCoeffsDocument(uc.phase2.coeffJSONPath)
+	if err != nil {
 		return
 	}
-	oldC, applied := uc.updateCoefficientsSmoothly(newC, uc.phase2.coeffSmoothing)
+	s := clamp(uc.phase2.coeffSmoothing, 0, 1)
+	newPerPath := make(map[protocol.PathID]QAccessCoefficients)
+	for key := range doc.Paths {
+		pid64, err := strconv.ParseUint(key, 10, 8)
+		if err != nil {
+			continue
+		}
+		pid := protocol.PathID(pid64)
+		loaded := ResolveCoefficientsForPath(doc, pid)
+		if doc.Metric != "" {
+			loaded.Metric = doc.Metric
+		}
+		prevC := loaded
+		if oldC, ok := oldPerPath[pid]; ok {
+			prevC = oldC
+		}
+		applied := QAccessCoefficients{
+			Alpha:  prevC.Alpha*(1-s) + loaded.Alpha*s,
+			Beta:   prevC.Beta*(1-s) + loaded.Beta*s,
+			Gamma:  prevC.Gamma*(1-s) + loaded.Gamma*s,
+			Source: loaded.Source,
+			Metric: loaded.Metric,
+		}
+		newPerPath[pid] = applied
+		utils.Infof(
+			"[qaccess_t] reloaded path_id=%d alpha=%.4f beta=%.4f gamma=%.4f source=%s",
+			pid, applied.Alpha, applied.Beta, applied.Gamma, applied.Source,
+		)
+	}
+	fallback := ResolveCoefficientsForPath(doc, protocol.InitialPathID)
+	if doc.Metric != "" {
+		fallback.Metric = doc.Metric
+	}
+	if len(newPerPath) > 0 {
+		uc.coeffsMu.Lock()
+		uc.coeffsDoc = doc
+		uc.perPathCoeffs = newPerPath
+		uc.coeffs = fallback
+		uc.coeffsMu.Unlock()
+		return
+	}
+	if !validQAccessCoefficients(fallback) {
+		return
+	}
+	oldC, applied := uc.updateCoefficientsSmoothly(fallback, s)
 	utils.Infof(
 		"[qaccess_t] reloaded coefficients alpha_old=%.4f beta_old=%.4f gamma_old=%.4f alpha_new=%.4f beta_new=%.4f gamma_new=%.4f alpha_applied=%.4f beta_applied=%.4f gamma_applied=%.4f",
 		oldC.Alpha, oldC.Beta, oldC.Gamma,
-		newC.Alpha, newC.Beta, newC.Gamma,
+		fallback.Alpha, fallback.Beta, fallback.Gamma,
 		applied.Alpha, applied.Beta, applied.Gamma,
 	)
+	_ = oldFallback
 }
 
 func (uc *UtilityController) finalizeMonitorRoundThroughput() {
@@ -279,7 +333,7 @@ func (uc *UtilityController) newRequestID(now time.Time) string {
 	return fmt.Sprintf("%s_%d_%d", uc.RunID, now.UnixNano()/1e6, uc.requestSerial)
 }
 
-func (uc *UtilityController) writeBufferFullTrigger(now time.Time, bufSize int64) bool {
+func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.PathID, reason string, extra map[string]interface{}) bool {
 	if uc.updateInProgress {
 		return false
 	}
@@ -287,17 +341,26 @@ func (uc *UtilityController) writeBufferFullTrigger(now time.Time, bufSize int64
 		return false
 	}
 
-	c := uc.getCoefficients()
+	c := uc.getCoefficientsForPath(pathID)
+	nSamples := int64(0)
+	bufSize := int64(0)
+	if uc.runtimeExporter != nil {
+		nSamples = uc.runtimeExporter.pathBufferSize(pathID)
+		bufSize = uc.runtimeExporter.bufferSize()
+	}
 	requestID := uc.newRequestID(now)
 	req := map[string]interface{}{
 		"request_id":          requestID,
+		"path_id":             uint64(pathID),
 		"timestamp_ms":        now.UnixNano() / 1e6,
-		"reason":              "buffer_full",
+		"reason":              reason,
+		"n_samples":           nSamples,
 		"runtime_buffer_size": bufSize,
 		"buffer_capacity":     uc.phase2.runtimeBufferMax,
 		"current_alpha":       c.Alpha,
 		"current_beta":        c.Beta,
 		"current_gamma":       c.Gamma,
+		"coeff_source":        c.Source,
 		"run_id":              uc.RunID,
 	}
 	if err := writeJSONAtomic(uc.phase2.updateRequestPath, req); err != nil {
@@ -307,10 +370,16 @@ func (uc *UtilityController) writeBufferFullTrigger(now time.Time, bufSize int64
 	uc.inflightRequestID = requestID
 	uc.lastTriggerTime = now
 	utils.Infof(
-		"[qaccess_t] buffer_full trigger request_id=%s runtime_buffer_size=%d capacity=%d alpha=%.4f beta=%.4f gamma=%.4f",
-		requestID, bufSize, uc.phase2.runtimeBufferMax, c.Alpha, c.Beta, c.Gamma,
+		"[qaccess_t] %s trigger request_id=%s path_id=%d n_samples=%d alpha=%.4f beta=%.4f gamma=%.4f source=%s",
+		reason, requestID, pathID, nSamples, c.Alpha, c.Beta, c.Gamma, c.Source,
 	)
 	return true
+}
+
+func (uc *UtilityController) writeBufferFullTrigger(now time.Time, pathID protocol.PathID, bufSize int64) bool {
+	return uc.writePerPathTrigger(now, pathID, "buffer_full", map[string]interface{}{
+		"path_buffer_size": uc.runtimeExporter.pathBufferSize(pathID),
+	})
 }
 
 func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
@@ -334,10 +403,16 @@ func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
 
 	uc.updateInProgress = false
 	uc.inflightRequestID = ""
+	pathID := uc.inflightPathID
+	uc.inflightPathID = 0
 	uc.lastTriggerTime = now
 
 	if uc.runtimeExporter != nil {
-		if err := uc.runtimeExporter.resetBuffer(); err != nil {
+		if pathID != 0 {
+			if err := uc.runtimeExporter.removePathRows(pathID); err != nil {
+				utils.Infof("[qaccess_t] runtime buffer remove path_id=%d failed: %v", pathID, err)
+			}
+		} else if err := uc.runtimeExporter.resetBuffer(); err != nil {
 			utils.Infof("[qaccess_t] runtime buffer reset after response failed: %v", err)
 		}
 	}
@@ -358,17 +433,17 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	}
 
 	bufSize := uc.runtimeBufferSize()
-	threshold := uc.phase2.runtimeBufferMax
-	if threshold <= 0 {
-		threshold = defaultRuntimeBufferSize
-	}
+	_ = bufSize
 
 	inCooldown := !uc.lastTriggerTime.IsZero() && now.Sub(uc.lastTriggerTime) < uc.phase2.triggerCooldown
 
-	// Primary trigger: full runtime training buffer (ACCeSS-like).
-	if uc.phase2.triggerOnBufferFull && bufSize >= threshold && !inCooldown {
-		uc.writeBufferFullTrigger(now, bufSize)
-		return
+	// Primary trigger: per-path runtime training buffer (ACCeSS-like).
+	if uc.phase2.triggerOnBufferFull && !inCooldown {
+		for _, pathID := range uc.runtimeExporter.pathsAtCapacity() {
+			if uc.writeBufferFullTrigger(now, pathID, bufSize) {
+				return
+			}
+		}
 	}
 
 	if inCooldown {
@@ -381,7 +456,8 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	if uc.phase2.triggerPeriodicMs > 0 {
 		interval := time.Duration(uc.phase2.triggerPeriodicMs) * time.Millisecond
 		if uc.lastPeriodicTrigger.IsZero() || now.Sub(uc.lastPeriodicTrigger) >= interval {
-			if uc.writeLegacyTriggerRequest(now, "periodic", prevAvg, recentAvg, dropPct, bufSize) {
+			pathID := uc.pickLegacyTriggerPath()
+			if uc.writeLegacyTriggerRequest(now, pathID, "periodic", prevAvg, recentAvg, dropPct, bufSize) {
 				uc.lastPeriodicTrigger = now
 				utils.Infof("[qaccess_t] periodic trigger (debug) runtime_buffer_size=%d", bufSize)
 			}
@@ -393,7 +469,8 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	if uc.phase2.triggerOnThroughputDrop {
 		n := len(uc.roundBwHistory)
 		if n >= 4 && prevAvg > 0 && dropPct >= uc.phase2.triggerDropPct {
-			if uc.writeLegacyTriggerRequest(now, "throughput_drop", prevAvg, recentAvg, dropPct, bufSize) {
+			pathID := uc.pickLegacyTriggerPath()
+			if uc.writeLegacyTriggerRequest(now, pathID, "throughput_drop", prevAvg, recentAvg, dropPct, bufSize) {
 				utils.Infof(
 					"[qaccess_t] throughput_drop trigger drop_pct=%.2f runtime_buffer_size=%d",
 					dropPct, bufSize,
@@ -403,33 +480,29 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	}
 }
 
-func (uc *UtilityController) writeLegacyTriggerRequest(now time.Time, reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) bool {
-	if uc.updateInProgress {
-		return false
+func (uc *UtilityController) pickLegacyTriggerPath() protocol.PathID {
+	if uc.runtimeExporter == nil {
+		return protocol.PathID(1)
 	}
-	if _, err := os.Stat(uc.phase2.updateRequestPath); err == nil {
-		return false
+	var best protocol.PathID = 1
+	var bestN int64
+	for _, pid := range uc.runtimeExporter.pathsAtCapacity() {
+		n := uc.runtimeExporter.pathBufferSize(pid)
+		if n > bestN {
+			bestN = n
+			best = pid
+		}
 	}
-	c := uc.getCoefficients()
-	requestID := uc.newRequestID(now)
-	req := map[string]interface{}{
-		"request_id":          requestID,
-		"timestamp_ms":        now.UnixNano() / 1e6,
-		"reason":              reason,
+	if bestN > 0 {
+		return best
+	}
+	return protocol.PathID(1)
+}
+
+func (uc *UtilityController) writeLegacyTriggerRequest(now time.Time, pathID protocol.PathID, reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) bool {
+	return uc.writePerPathTrigger(now, pathID, reason, map[string]interface{}{
 		"previous_avg_bw_bps": prevAvg,
 		"recent_avg_bw_bps":   recentAvg,
 		"drop_pct":            dropPct,
-		"current_alpha":       c.Alpha,
-		"current_beta":        c.Beta,
-		"current_gamma":       c.Gamma,
-		"runtime_buffer_size": bufSize,
-		"run_id":              uc.RunID,
-	}
-	if err := writeJSONAtomic(uc.phase2.updateRequestPath, req); err != nil {
-		return false
-	}
-	uc.updateInProgress = true
-	uc.inflightRequestID = requestID
-	uc.lastTriggerTime = now
-	return true
+	})
 }
