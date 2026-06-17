@@ -581,10 +581,15 @@ def finalize_leg(
     raw_retained = (repo / "derived" / "qaccess_runtime_samples.csv").is_file() or (
         leg_dir / "qaccess_runtime_samples_full.csv.gz"
     ).is_file()
+    experiment_completed = pcap_retained
+    postprocess_ok = throughput_ok
 
     summary = {
         "leg_dir": str(leg_dir),
+        "leg_label": leg_label,
         "throughput_ok": throughput_ok,
+        "postprocess_ok": postprocess_ok,
+        "experiment_completed": experiment_completed,
         "session_bytes": _dir_size(leg_dir.parent),
         "leg_bytes": _dir_size(leg_dir),
         "diagnostics_bytes": diag_path.stat().st_size if diag_path.is_file() else 0,
@@ -594,6 +599,7 @@ def finalize_leg(
         "kept_files": kept,
         "control_law_diagnostics_rows": int(len(diag)),
     }
+    (leg_dir / "leg_status.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return summary
 
 
@@ -624,6 +630,8 @@ def main() -> int:
     )
 
     print(f"[finalize] leg={summary['leg_dir']}")
+    print(f"[finalize] experiment_completed={summary['experiment_completed']}")
+    print(f"[finalize] postprocess_ok={summary['postprocess_ok']}")
     print(f"[finalize] throughput_ok={summary['throughput_ok']}")
     print(f"[finalize] session_size={summary['session_bytes'] / 1e6:.2f} MB")
     print(f"[finalize] leg_size={summary['leg_bytes'] / 1e6:.2f} MB")
@@ -634,7 +642,11 @@ def main() -> int:
     print("[finalize] kept files:")
     for f in summary["kept_files"]:
         print(f"  {f}")
-    return 0 if summary["throughput_ok"] else 1
+    if not summary["experiment_completed"]:
+        return 1
+    if not summary["postprocess_ok"]:
+        print("[finalize] warn: post-processing incomplete; experiment artifacts retained", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
