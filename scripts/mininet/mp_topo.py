@@ -53,6 +53,7 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
 import pwd
 import re
@@ -60,6 +61,7 @@ import shlex
 import shutil
 import signal
 import time
+from datetime import datetime, timezone
 
 # Mininet is imported lazily in main() so `python3 mp_topo.py --list-scenarios`
 # works on machines without Mininet installed.
@@ -241,6 +243,20 @@ def _open_log_file(path, save_logs):
     return open(path if save_logs else os.devnull, "w")
 
 
+def _append_timeline(timeline_path, event, **fields):
+    """Append one JSONL timeline row (mandatory experiment evidence)."""
+    if not timeline_path:
+        return
+    os.makedirs(os.path.dirname(timeline_path), exist_ok=True)
+    row = {
+        "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "event": event,
+        **fields,
+    }
+    with open(timeline_path, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(row) + "\n")
+
+
 def _split_throughput_csv(src_csv, out_a_csv, out_b_csv, out_total_csv):
     """Split merged throughput CSV into pathA/pathB/total single-column CSV files."""
     rows = []
@@ -373,6 +389,8 @@ def run_experiment(net, args):
     os.makedirs(pcap_dir, exist_ok=True)
     os.makedirs(throughput_dir, exist_ok=True)
 
+    timeline_path = os.path.join(logdir, f"experiment_timeline_{run_id}.jsonl")
+
     pcap_a = os.path.join(pcap_dir, f"pathA_h1_{run_id}.pcap")
     pcap_b = os.path.join(pcap_dir, f"pathB_h1_{run_id}.pcap")
 
@@ -429,6 +447,14 @@ def run_experiment(net, args):
         stdout=tcpdump_b_log,
         stderr=tcpdump_b_log,
         shell=True,
+    )
+    _append_timeline(
+        timeline_path,
+        "tcpdump_start",
+        run_id=run_id,
+        run_label=run_label or "",
+        pcap_a=pcap_a,
+        pcap_b=pcap_b,
     )
 
     time.sleep(1)
@@ -512,12 +538,26 @@ def run_experiment(net, args):
             _log("error", f"tc_deterioration_steps.sh not found: {TC_DETERIORATION_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_deterioration_{run_id}.log")
-        tc_log_f = _open_log_file(tc_log_path, save_logs)
-        cmd = f"bash {shlex.quote(TC_DETERIORATION_SCRIPT)} {shlex.quote(prof_path)}"
+        os.makedirs(logs_dir, exist_ok=True)
+        tc_log_f = open(tc_log_path, "w", encoding="utf-8")
+        timeline_q = shlex.quote(timeline_path)
+        cmd = (
+            f"TIMELINE_JSONL={timeline_q} bash {shlex.quote(TC_DETERIORATION_SCRIPT)} "
+            f"{shlex.quote(prof_path)}"
+        )
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)
         _log("tc", f"starting combined deterioration steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
+        _append_timeline(
+            timeline_path,
+            "tc_script_start",
+            run_id=run_id,
+            run_label=run_label or "",
+            tc_node=tc_node,
+            tc_log=tc_log_path,
+            profile=prof_path,
+        )
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
     iperf_procs = []
@@ -613,6 +653,13 @@ def run_experiment(net, args):
     push_proc = h1.popen(
         push_cmd,
         stdout=push_log, stderr=push_log, shell=True,
+    )
+    _append_timeline(
+        timeline_path,
+        "push_start",
+        run_id=run_id,
+        run_label=run_label or "",
+        input_flv=input_flv,
     )
 
     # ---- Watchdog loop -----------------------------------------------------
@@ -723,6 +770,11 @@ def run_experiment(net, args):
         _log("tshark", f"generating per-second throughput csvs in {logdir}")
         try:
             import subprocess
+            for pcap_path in (pcap_a, pcap_b):
+                try:
+                    os.chmod(pcap_path, 0o644)
+                except OSError:
+                    pass
             with _open_log_file(tshark_summary, save_logs) as out_f, _open_log_file(tshark_err, save_logs) as err_f:
                 subprocess.run(
                     [
@@ -790,18 +842,21 @@ def run_experiment(net, args):
 
     if save_logs:
         combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
-        _write_combined_log(
-            combined_log_path,
-            [
-                ("SERVER", server_log_path),
-                ("PULL", pull_log_path),
-                ("PUSH", push_log_path),
-                ("TCPDUMP_PATH_A", tcpdump_a_log_path),
-                ("TCPDUMP_PATH_B", tcpdump_b_log_path),
-                ("TC", tc_log_path or ""),
-            ],
-        )
+        combined_inputs = [
+            ("SERVER", server_log_path),
+            ("PULL", pull_log_path),
+            ("PUSH", push_log_path),
+            ("TCPDUMP_PATH_A", tcpdump_a_log_path),
+            ("TCPDUMP_PATH_B", tcpdump_b_log_path),
+        ]
+        if tc_log_path and os.path.isfile(tc_log_path):
+            combined_inputs.append(("TC", tc_log_path))
+        _write_combined_log(combined_log_path, combined_inputs)
         _log("exp", f"combined log -> {combined_log_path}")
+    elif tc_log_path and os.path.isfile(tc_log_path):
+        _log("exp", f"tc deterioration log -> {tc_log_path}")
+    if timeline_path and os.path.isfile(timeline_path):
+        _log("exp", f"experiment timeline -> {timeline_path}")
 
     _log("exp", f"done! outputs saved to {logdir}")
     if save_logs:

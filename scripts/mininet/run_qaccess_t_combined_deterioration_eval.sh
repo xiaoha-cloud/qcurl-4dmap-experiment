@@ -106,7 +106,19 @@ finalize_leg() {
   local label="$1"
   local leg_dir="$SESSION_DIR/$label"
   sync_leg_inputs "$leg_dir"
-  bash "$FINALIZE" "$leg_dir" "$label"
+  if bash "$FINALIZE" "$leg_dir" "$label"; then
+    echo "[finalize] leg=$label status=ok"
+  else
+    echo "[warn] post-processing failed for $label; continuing paired experiment" >&2
+  fi
+  if [[ -f "$leg_dir/leg_status.json" ]]; then
+    python3 -c "
+import json, sys
+s = json.load(open(sys.argv[1]))
+print('[finalize] leg={} experiment_completed={} postprocess_ok={} pcap_retained={}'.format(
+    sys.argv[2], s.get('experiment_completed'), s.get('postprocess_ok'), s.get('pcap_retained')))
+" "$leg_dir/leg_status.json" "$label"
+  fi
 }
 
 run_one() {
@@ -124,7 +136,7 @@ run_one() {
   echo "[combined_deterioration] scenario=$SCENARIO utility-mode=$um label=$label profile=$DETERIORATION_PROFILE"
   echo "[combined_deterioration] KEEP_PCAP=$KEEP_PCAP SAVE_OUTPUT_FLV=$SAVE_OUTPUT_FLV KEEP_RAW_RUNTIME=$KEEP_RAW_RUNTIME"
   env "$@" "${cmd[@]}"
-  finalize_leg "$label"
+  finalize_leg "$label" || true
 }
 
 echo "[combined_deterioration] profile contents:"
@@ -208,7 +220,12 @@ meta = {
     'KEEP_PCAP': int('$KEEP_PCAP'),
     'KEEP_RAW_RUNTIME': int('$KEEP_RAW_RUNTIME'),
     'SAVE_OUTPUT_FLV': int('$SAVE_OUTPUT_FLV'),
+    'legs': {},
 }
+for leg_name in ('combined_baseline', 'combined_qaccess_t_dynamic'):
+    status_path = session / leg_name / 'leg_status.json'
+    if status_path.is_file():
+        meta['legs'][leg_name] = json.loads(status_path.read_text())
 (session / 'experiment_metadata.json').write_text(json.dumps(meta, indent=2))
 print('[combined_deterioration] wrote', session / 'experiment_metadata.json')
 "
