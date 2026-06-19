@@ -5,12 +5,18 @@
 #   KEEP_PCAP=0  SAVE_OUTPUT_FLV=0  KEEP_RAW_RUNTIME=0  SAVE_LOGS=0
 #
 # Usage (VM, repo root):
-#   INPUT_FLV=~/Videos/push_input.flv \
-#     sudo -E ./scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh
+#   sudo env \
+#     KEEP_PCAP=1 \
+#     SAVE_LOGS=1 \
+#     KEEP_RAW_RUNTIME=1 \
+#     INPUT_FLV=/home/mininet/Videos/push_input.flv \
+#     WORKER_PYTHON=/home/mininet/Project/qcurl-4dmap-experiment/.venv/bin/python3 \
+#     ./scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+REPO_ROOT="$ROOT"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
 FINALIZE="$ROOT/scripts/mininet/finalize_experiment_leg.sh"
@@ -23,6 +29,7 @@ INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
 ARCHIVE_DIR="${QACCESS_ARCHIVE_DIR:-derived/qaccess_processed_buffers}"
+WORKER_PYTHON="${WORKER_PYTHON:-${REPO_ROOT}/.venv/bin/python3}"
 
 export KEEP_PCAP="${KEEP_PCAP:-0}"
 export SAVE_OUTPUT_FLV="${SAVE_OUTPUT_FLV:-0}"
@@ -31,7 +38,7 @@ export KEEP_ALL_PROCESSED_BUFFERS="${KEEP_ALL_PROCESSED_BUFFERS:-0}"
 export THROUGHPUT_INTERVAL="${THROUGHPUT_INTERVAL:-1}"
 
 WORKER_CMD=(
-  python3 scripts/analyze/qaccess_t_update_worker.py
+  "$WORKER_PYTHON" scripts/analyze/qaccess_t_update_worker.py
   --poll-interval 5
   --model derived/qaccess_t_model.pkl
   --coeffs-out derived/qaccess_t_runtime_coefficients.json
@@ -77,6 +84,46 @@ worker_process_log_file() {
   printf '%s/worker_process.log' "$SESSION_DIR"
 }
 
+preflight_worker_python() {
+  local process_log="$1"
+  echo "[combined_deterioration] worker python: $WORKER_PYTHON"
+  if [[ ! -x "$WORKER_PYTHON" ]]; then
+    echo "[error] WORKER_PYTHON is not executable: $WORKER_PYTHON" >&2
+    return 1
+  fi
+  "$WORKER_PYTHON" --version 2>&1 | sed 's/^/[combined_deterioration] worker python version: /'
+  "$WORKER_PYTHON" - "$ROOT" >"$process_log" 2>&1 <<'PY'
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+print(f"[worker-preflight] executable={sys.executable}", flush=True)
+for mod_name in ("numpy", "pandas", "sklearn", "joblib"):
+    mod = __import__(mod_name)
+    print(f"[worker-preflight] import {mod_name}=ok version={getattr(mod, '__version__', '')}", flush=True)
+
+import joblib
+
+model_path = repo / "derived" / "qaccess_t_model.pkl"
+if not model_path.is_file():
+    raise FileNotFoundError(f"missing model {model_path}")
+joblib.load(model_path)
+print(f"[worker-preflight] model_load=ok path={model_path}", flush=True)
+
+coeffs_path = repo / "derived" / "qaccess_t_runtime_coefficients.json"
+if not coeffs_path.is_file():
+    raise FileNotFoundError(f"missing runtime coefficients {coeffs_path}")
+with coeffs_path.open("a", encoding="utf-8"):
+    pass
+print(f"[worker-preflight] coeffs_writable=ok path={coeffs_path}", flush=True)
+PY
+  local rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    echo "[error] worker Python preflight failed; see $process_log" >&2
+    return "$rc"
+  fi
+}
+
 wait_for_worker_ready() {
   local ready_file="$1"
   local deadline=$((SECONDS + WORKER_READY_TIMEOUT))
@@ -120,11 +167,12 @@ start_worker() {
   log_file="$(worker_log_file)"
   process_log="$(worker_process_log_file)"
   rm -f "$ready_file"
+  preflight_worker_python "$process_log"
   echo "[combined_deterioration] starting worker for dynamic leg"
   printf '[combined_deterioration] worker command:'
   printf ' %q' "${WORKER_CMD[@]}"
   printf ' --log-file %q --ready-file %q\n' "$log_file" "$ready_file"
-  "${WORKER_CMD[@]}" --log-file "$log_file" --ready-file "$ready_file" >"$process_log" 2>&1 &
+  "${WORKER_CMD[@]}" --log-file "$log_file" --ready-file "$ready_file" >>"$process_log" 2>&1 &
   WORKER_PID="$!"
   wait_for_worker_ready "$ready_file"
 }
