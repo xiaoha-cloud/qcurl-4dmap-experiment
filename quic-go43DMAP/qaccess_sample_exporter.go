@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 
@@ -26,16 +27,30 @@ var qaccessSampleCSVHeader = []string{
 
 // qaccessSampleExporter writes labelled rows from existing PathMetrics (no separate monitor).
 type qaccessSampleExporter struct {
-	mu                sync.Mutex
-	path              string
-	runID             string
-	maxRows           int64
-	rowsWritten       int64
+	mu                 sync.Mutex
+	path               string
+	runID              string
+	maxRows            int64
+	rowsWritten        int64
 	rowsWrittenPerPath map[protocol.PathID]int64
-	opened            bool
-	writer            *csv.Writer
-	file              *os.File
-	pending           map[protocol.PathID]map[string]string
+	opened             bool
+	writer             *csv.Writer
+	file               *os.File
+	pending            map[protocol.PathID]map[string]string
+	windowStartMs      int64
+	windowEndMs        int64
+}
+
+type qaccessBufferSnapshot struct {
+	TotalRows       int64
+	RowsByPath      map[protocol.PathID]int64
+	ActivePaths     []protocol.PathID
+	EligiblePaths   []protocol.PathID
+	SelectedPath    protocol.PathID
+	HasSelectedPath bool
+	AtCapacity      bool
+	WindowStartMs   int64
+	WindowEndMs     int64
 }
 
 func newQAccessSampleExporter(csvPath, runID string, maxRows int64) *qaccessSampleExporter {
@@ -64,29 +79,49 @@ func (e *qaccessSampleExporter) pathBufferSize(pathID protocol.PathID) int64 {
 	return n
 }
 
-func (e *qaccessSampleExporter) pathsAtCapacity() []protocol.PathID {
+func (e *qaccessSampleExporter) triggerSnapshot(minSamplesPerPath int64) qaccessBufferSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.maxRows <= 0 {
-		return nil
+	if minSamplesPerPath < 1 {
+		minSamplesPerPath = 1
 	}
-	var out []protocol.PathID
-	seen := make(map[protocol.PathID]struct{})
+	rowsByPath := make(map[protocol.PathID]int64, len(e.rowsWrittenPerPath)+len(e.pending))
 	for pid, n := range e.rowsWrittenPerPath {
-		if n >= e.maxRows {
-			out = append(out, pid)
-			seen[pid] = struct{}{}
-		}
+		rowsByPath[pid] = n
 	}
 	for pid := range e.pending {
-		if _, ok := seen[pid]; ok {
+		rowsByPath[pid]++
+	}
+	active := make([]protocol.PathID, 0, len(rowsByPath))
+	eligible := make([]protocol.PathID, 0, len(rowsByPath))
+	for pid, n := range rowsByPath {
+		if n <= 0 {
 			continue
 		}
-		if e.rowsWrittenPerPath[pid]+1 >= e.maxRows {
-			out = append(out, pid)
+		active = append(active, pid)
+		if n >= minSamplesPerPath {
+			eligible = append(eligible, pid)
 		}
 	}
-	return out
+	sort.Slice(active, func(i, j int) bool { return active[i] < active[j] })
+	sort.Slice(eligible, func(i, j int) bool {
+		left, right := rowsByPath[eligible[i]], rowsByPath[eligible[j]]
+		if left == right {
+			return eligible[i] < eligible[j]
+		}
+		return left > right
+	})
+	total := e.rowsWritten + int64(len(e.pending))
+	snapshot := qaccessBufferSnapshot{
+		TotalRows: total, RowsByPath: rowsByPath, ActivePaths: active, EligiblePaths: eligible,
+		AtCapacity:    e.maxRows > 0 && total >= e.maxRows,
+		WindowStartMs: e.windowStartMs, WindowEndMs: e.windowEndMs,
+	}
+	if len(eligible) > 0 {
+		snapshot.SelectedPath = eligible[0]
+		snapshot.HasSelectedPath = true
+	}
+	return snapshot
 }
 
 func (e *qaccessSampleExporter) atCapacity() bool {
@@ -181,7 +216,7 @@ func (e *qaccessSampleExporter) flushPendingLabelLocked(pathID protocol.PathID, 
 	return nil
 }
 
-// resetBuffer closes the CSV and clears in-memory counters after the worker archives a full buffer.
+// resetBuffer closes and removes the completed global window before sampling resumes.
 func (e *qaccessSampleExporter) resetBuffer() error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -193,12 +228,17 @@ func (e *qaccessSampleExporter) resetBuffer() error {
 			return err
 		}
 	}
+	if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
 	e.file = nil
 	e.writer = nil
 	e.opened = false
 	e.rowsWritten = 0
 	e.rowsWrittenPerPath = make(map[protocol.PathID]int64)
 	e.pending = make(map[protocol.PathID]map[string]string)
+	e.windowStartMs = 0
+	e.windowEndMs = 0
 	return nil
 }
 
@@ -302,6 +342,14 @@ func (e *qaccessSampleExporter) recordPending(row map[string]string, pathID prot
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.pending[pathID] = row
+	if timestampMs, err := strconv.ParseInt(row["timestamp_ms"], 10, 64); err == nil {
+		if e.windowStartMs == 0 || timestampMs < e.windowStartMs {
+			e.windowStartMs = timestampMs
+		}
+		if timestampMs > e.windowEndMs {
+			e.windowEndMs = timestampMs
+		}
+	}
 	return nil
 }
 

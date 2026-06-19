@@ -107,6 +107,8 @@ type UtilityController struct {
 	updateInProgress     bool
 	inflightRequestID    string
 	inflightPathID       protocol.PathID
+	inflightGlobalBuffer bool
+	lastBufferDecision   string
 	roundBwHistory       []float64
 	currentRoundTotalBwBps float64
 	currentRoundActivePaths int
@@ -174,6 +176,14 @@ func (uc *UtilityController) BeginMonitorRound() {
 	if uc.Mode == ModeQAccessT {
 		uc.finalizeMonitorRoundThroughput()
 		uc.maybeReloadCoefficients(now)
+		if uc.runtimeExporter != nil {
+			_ = uc.runtimeExporter.flushAllPending(func(pid protocol.PathID) float64 {
+				if prev, ok := uc.Prev[pid]; ok {
+					return prev.LastBWbps
+				}
+				return 0
+			})
+		}
 		uc.maybeTriggerCoefficientUpdate(now)
 	}
 	if uc.Mode == ModeQAccessCollect && uc.trainCollector != nil {
@@ -184,14 +194,6 @@ func (uc *UtilityController) BeginMonitorRound() {
 			return 0
 		})
 		uc.collectIdx++
-	}
-	if uc.Mode == ModeQAccessT && uc.runtimeExporter != nil {
-		_ = uc.runtimeExporter.flushAllPending(func(pid protocol.PathID) float64 {
-			if prev, ok := uc.Prev[pid]; ok {
-				return prev.LastBWbps
-			}
-			return 0
-		})
 	}
 	uc.roundGTotal = 0
 }

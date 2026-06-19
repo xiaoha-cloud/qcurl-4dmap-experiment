@@ -27,6 +27,13 @@ SAVE_VERBOSE_LOGS="${SAVE_VERBOSE_LOGS:-0}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
+MIN_SAMPLES_PER_PATH="${QACCESS_MIN_SAMPLES_PER_PATH:-1}"
+TRIGGER_AUDIT="${QACCESS_TRIGGER_AUDIT_JSONL:-derived/qaccess_trigger_audit.jsonl}"
+if [[ "$TRIGGER_AUDIT" = /* ]]; then
+  TRIGGER_AUDIT_PATH="$TRIGGER_AUDIT"
+else
+  TRIGGER_AUDIT_PATH="$ROOT/$TRIGGER_AUDIT"
+fi
 ARCHIVE_DIR="${QACCESS_ARCHIVE_DIR:-derived/qaccess_processed_buffers}"
 WORKER_PYTHON="${WORKER_PYTHON:-${REPO_ROOT}/.venv/bin/python3}"
 
@@ -265,6 +272,7 @@ echo "[combined_deterioration] parsed: $(read_coeffs "$COEFFS_BEFORE")"
 start_worker
 
 echo "[combined_deterioration] dynamic leg: qaccess_t + buffer-full worker (1% gate)"
+echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
 run_one qaccess_t combined_qaccess_t_dynamic \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
   QACCESS_COEFF_RELOAD=1 \
@@ -274,8 +282,13 @@ run_one qaccess_t combined_qaccess_t_dynamic \
   QACCESS_TRIGGER_ON_THROUGHPUT_DROP=0 \
   QACCESS_TRIGGER_PERIODIC_MS=0 \
   QACCESS_TRIGGER_COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}" \
-  QACCESS_RUNTIME_BUFFER_SIZE="$BUFFER_SIZE"
+  QACCESS_RUNTIME_BUFFER_SIZE="$BUFFER_SIZE" \
+  QACCESS_MIN_SAMPLES_PER_PATH="$MIN_SAMPLES_PER_PATH" \
+  QACCESS_TRIGGER_AUDIT_JSONL="$TRIGGER_AUDIT_PATH"
 stop_worker
+if [[ -f "$TRIGGER_AUDIT_PATH" ]]; then
+  cp "$TRIGGER_AUDIT_PATH" "$SESSION_DIR/qaccess_trigger_audit.jsonl"
+fi
 
 COEFFS_AFTER="$SESSION_DIR/combined_qaccess_t_dynamic_coeffs_after.json"
 cp "$ROOT/$RUNTIME_COEFFS" "$COEFFS_AFTER"

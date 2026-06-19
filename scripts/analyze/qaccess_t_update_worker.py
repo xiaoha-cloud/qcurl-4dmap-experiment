@@ -785,8 +785,6 @@ def _process_request(
             },
         )
 
-    atomic_write_json(response_out, response)
-
     if not shadow:
         state = _load_state(state_path)
         processed: list[str] = list(state.get("processed_request_ids") or [])
@@ -809,6 +807,7 @@ def _process_request(
                 f"[worker] warning: archive/truncate failed for request_id={request_id} path_id={path_id}: {exc}",
                 file=sys.stderr,
             )
+    atomic_write_json(response_out, response)
     return True
 
 
