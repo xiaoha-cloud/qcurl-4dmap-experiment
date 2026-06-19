@@ -41,7 +41,8 @@ _phase2_rm() {
 _phase2_rm \
   "$DERIVED/qaccess_runtime_samples.csv" \
   "$DERIVED/qaccess_update_request.json" \
-  "$DERIVED/qaccess_update_response.json"
+  "$DERIVED/qaccess_update_response.json" \
+  "$DERIVED/qaccess_trigger_audit.jsonl"
 
 # Prior sudo Mininet runs may leave root-owned Phase 2 files the worker cannot truncate.
 for f in qaccess_runtime_samples.csv qaccess_update_request.json qaccess_update_response.json; do

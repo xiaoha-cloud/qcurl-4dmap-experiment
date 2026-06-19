@@ -20,6 +20,8 @@ const (
 	defaultTriggerDropPct        = 5.0
 	defaultTriggerCooldownMs     = 60000
 	defaultRuntimeBufferSize     = 5000
+	defaultMinSamplesPerPath     = 1
+	defaultTriggerAuditPath      = "derived/qaccess_trigger_audit.jsonl"
 	maxRoundBwHistory            = 32
 )
 
@@ -29,9 +31,10 @@ type qaccessPhase2Config struct {
 	coeffSmoothing      float64
 	coeffJSONPath       string
 
-	runtimeExport    bool
-	runtimeSamples   string
-	runtimeBufferMax int64
+	runtimeExport     bool
+	runtimeSamples    string
+	runtimeBufferMax  int64
+	minSamplesPerPath int64
 
 	triggerUpdate           bool
 	triggerOnBufferFull     bool
@@ -41,6 +44,7 @@ type qaccessPhase2Config struct {
 	triggerPeriodicMs       int
 	updateRequestPath       string
 	updateResponsePath      string
+	triggerAuditPath        string
 }
 
 func loadQAccessPhase2Config() qaccessPhase2Config {
@@ -50,9 +54,10 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		coeffSmoothing:      envFloat("QACCESS_COEFF_SMOOTHING", defaultCoeffSmoothing),
 		coeffJSONPath:       resolveCoeffsJSONPath(),
 
-		runtimeExport:    envBool("QACCESS_RUNTIME_SAMPLE_EXPORT", false),
-		runtimeSamples:   resolveRuntimeSamplesCSVPath(),
-		runtimeBufferMax: int64(envInt("QACCESS_RUNTIME_BUFFER_SIZE", defaultRuntimeBufferSize)),
+		runtimeExport:     envBool("QACCESS_RUNTIME_SAMPLE_EXPORT", false),
+		runtimeSamples:    resolveRuntimeSamplesCSVPath(),
+		runtimeBufferMax:  int64(envInt("QACCESS_RUNTIME_BUFFER_SIZE", defaultRuntimeBufferSize)),
+		minSamplesPerPath: int64(envInt("QACCESS_MIN_SAMPLES_PER_PATH", defaultMinSamplesPerPath)),
 
 		triggerUpdate:           envBool("QACCESS_TRIGGER_UPDATE", false),
 		triggerOnBufferFull:     envBool("QACCESS_TRIGGER_ON_BUFFER_FULL", true),
@@ -62,7 +67,35 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		triggerPeriodicMs:       envInt("QACCESS_TRIGGER_PERIODIC_MS", 0),
 		updateRequestPath:       resolveUpdateRequestJSONPath(),
 		updateResponsePath:      resolveUpdateResponseJSONPath(),
+		triggerAuditPath:        resolveTriggerAuditPath(),
 	}
+}
+
+func resolveTriggerAuditPath() string {
+	if p := os.Getenv("QACCESS_TRIGGER_AUDIT_JSONL"); p != "" {
+		return p
+	}
+	return defaultTriggerAuditPath
+}
+
+func appendTriggerAudit(path string, payload map[string]interface{}) {
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0666)
+	if err != nil {
+		return
+	}
+	_, _ = f.Write(append(data, '\n'))
+	_ = f.Chmod(0666)
+	_ = f.Close()
 }
 
 func resolveRuntimeSamplesCSVPath() string {
@@ -333,7 +366,7 @@ func (uc *UtilityController) newRequestID(now time.Time) string {
 	return fmt.Sprintf("%s_%d_%d", uc.RunID, now.UnixNano()/1e6, uc.requestSerial)
 }
 
-func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.PathID, reason string, extra map[string]interface{}) bool {
+func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.PathID, reason string, globalBuffer bool, extra map[string]interface{}) bool {
 	if uc.updateInProgress {
 		return false
 	}
@@ -363,11 +396,16 @@ func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.
 		"coeff_source":        c.Source,
 		"run_id":              uc.RunID,
 	}
+	for key, value := range extra {
+		req[key] = value
+	}
 	if err := writeJSONAtomic(uc.phase2.updateRequestPath, req); err != nil {
 		return false
 	}
 	uc.updateInProgress = true
 	uc.inflightRequestID = requestID
+	uc.inflightPathID = pathID
+	uc.inflightGlobalBuffer = globalBuffer
 	uc.lastTriggerTime = now
 	utils.Infof(
 		"[qaccess_t] %s trigger request_id=%s path_id=%d n_samples=%d alpha=%.4f beta=%.4f gamma=%.4f source=%s",
@@ -376,9 +414,57 @@ func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.
 	return true
 }
 
-func (uc *UtilityController) writeBufferFullTrigger(now time.Time, pathID protocol.PathID, bufSize int64) bool {
-	return uc.writePerPathTrigger(now, pathID, "buffer_full", map[string]interface{}{
-		"path_buffer_size": uc.runtimeExporter.pathBufferSize(pathID),
+func pathIDsAsUint64(paths []protocol.PathID) []uint64 {
+	out := make([]uint64, len(paths))
+	for i, pathID := range paths {
+		out[i] = uint64(pathID)
+	}
+	return out
+}
+
+func rowsByPathForJSON(rows map[protocol.PathID]int64) map[string]int64 {
+	out := make(map[string]int64, len(rows))
+	for pathID, count := range rows {
+		out[strconv.FormatUint(uint64(pathID), 10)] = count
+	}
+	return out
+}
+
+func (uc *UtilityController) logBufferDecision(now time.Time, decision string, snapshot qaccessBufferSnapshot, cooldownRemaining time.Duration) {
+	if uc.lastBufferDecision == decision {
+		return
+	}
+	uc.lastBufferDecision = decision
+	rowsJSON, _ := json.Marshal(rowsByPathForJSON(snapshot.RowsByPath))
+	appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+		"timestamp_ms": now.UnixNano() / 1e6, "event": "buffer_trigger_eval", "trigger_decision": decision,
+		"total_rows": snapshot.TotalRows, "valid_rows_total": snapshot.TotalRows,
+		"rows_by_path": rowsByPathForJSON(snapshot.RowsByPath), "active_paths": pathIDsAsUint64(snapshot.ActivePaths),
+		"eligible_paths": pathIDsAsUint64(snapshot.EligiblePaths), "selected_path": uint64(snapshot.SelectedPath),
+		"runtime_buffer_max": uc.phase2.runtimeBufferMax, "min_samples_per_path": uc.phase2.minSamplesPerPath,
+		"update_in_progress": uc.updateInProgress, "cooldown_remaining_ms": cooldownRemaining / time.Millisecond,
+		"request_id": uc.inflightRequestID, "measurement_window_start_ms": snapshot.WindowStartMs,
+		"measurement_window_end_ms": snapshot.WindowEndMs,
+	})
+	utils.Infof(
+		"[qaccess_t] buffer_trigger_eval timestamp_ms=%d decision=%s total_rows=%d rows_by_path=%s active_paths=%v eligible_paths=%v selected_path=%d runtime_buffer_max=%d min_samples_per_path=%d update_in_progress=%t cooldown_remaining_ms=%d measurement_window_start_ms=%d measurement_window_end_ms=%d",
+		now.UnixNano()/1e6, decision, snapshot.TotalRows, string(rowsJSON), pathIDsAsUint64(snapshot.ActivePaths),
+		pathIDsAsUint64(snapshot.EligiblePaths), uint64(snapshot.SelectedPath), uc.phase2.runtimeBufferMax,
+		uc.phase2.minSamplesPerPath, uc.updateInProgress, cooldownRemaining/time.Millisecond,
+		snapshot.WindowStartMs, snapshot.WindowEndMs,
+	)
+}
+
+func (uc *UtilityController) writeBufferFullTrigger(now time.Time, snapshot qaccessBufferSnapshot) bool {
+	return uc.writePerPathTrigger(now, snapshot.SelectedPath, "buffer_full", true, map[string]interface{}{
+		"valid_rows_total":            snapshot.TotalRows,
+		"rows_by_path":                rowsByPathForJSON(snapshot.RowsByPath),
+		"active_paths":                pathIDsAsUint64(snapshot.ActivePaths),
+		"eligible_paths":              pathIDsAsUint64(snapshot.EligiblePaths),
+		"selected_path":               uint64(snapshot.SelectedPath),
+		"min_samples_per_path":        uc.phase2.minSamplesPerPath,
+		"measurement_window_start_ms": snapshot.WindowStartMs,
+		"measurement_window_end_ms":   snapshot.WindowEndMs,
 	})
 }
 
@@ -400,20 +486,35 @@ func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
 	}
 	status, _ := resp["status"].(string)
 	utils.Infof("[qaccess_t] update response request_id=%s status=%s", rid, status)
+	appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+		"timestamp_ms": now.UnixNano() / 1e6, "event": "response_consumed", "request_id": rid,
+		"status": status, "path_id": uint64(uc.inflightPathID), "global_buffer": uc.inflightGlobalBuffer,
+	})
 
 	uc.updateInProgress = false
 	uc.inflightRequestID = ""
 	pathID := uc.inflightPathID
 	uc.inflightPathID = 0
+	globalBuffer := uc.inflightGlobalBuffer
+	uc.inflightGlobalBuffer = false
+	uc.lastBufferDecision = ""
 	uc.lastTriggerTime = now
 
 	if uc.runtimeExporter != nil {
-		if pathID != 0 {
+		if globalBuffer {
+			resetStatus := "ok"
+			if err := uc.runtimeExporter.resetBuffer(); err != nil {
+				resetStatus = "error"
+				utils.Infof("[qaccess_t] runtime global buffer reset after response failed: %v", err)
+			}
+			appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+				"timestamp_ms": now.UnixNano() / 1e6, "event": "buffer_reset", "request_id": rid,
+				"status": resetStatus, "sampling_resumed": resetStatus == "ok",
+			})
+		} else {
 			if err := uc.runtimeExporter.removePathRows(pathID); err != nil {
 				utils.Infof("[qaccess_t] runtime buffer remove path_id=%d failed: %v", pathID, err)
 			}
-		} else if err := uc.runtimeExporter.resetBuffer(); err != nil {
-			utils.Infof("[qaccess_t] runtime buffer reset after response failed: %v", err)
 		}
 	}
 }
@@ -424,29 +525,49 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	}
 
 	uc.maybeCheckUpdateResponse(now)
-	if uc.updateInProgress {
-		return
-	}
 
 	if !uc.phase2.runtimeExport || uc.runtimeExporter == nil {
 		return
 	}
 
-	bufSize := uc.runtimeBufferSize()
-	_ = bufSize
-
-	inCooldown := !uc.lastTriggerTime.IsZero() && now.Sub(uc.lastTriggerTime) < uc.phase2.triggerCooldown
-
-	// Primary trigger: per-path runtime training buffer (ACCeSS-like).
-	if uc.phase2.triggerOnBufferFull && !inCooldown {
-		for _, pathID := range uc.runtimeExporter.pathsAtCapacity() {
-			if uc.writeBufferFullTrigger(now, pathID, bufSize) {
-				return
-			}
+	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath)
+	bufSize := snapshot.TotalRows
+	if !snapshot.AtCapacity {
+		uc.logBufferDecision(now, "buffer_not_full", snapshot, 0)
+	}
+	if uc.updateInProgress {
+		if snapshot.AtCapacity {
+			uc.logBufferDecision(now, "blocked_update_in_progress", snapshot, 0)
 		}
+		return
 	}
 
+	cooldownRemaining := time.Duration(0)
+	if !uc.lastTriggerTime.IsZero() {
+		cooldownRemaining = uc.phase2.triggerCooldown - now.Sub(uc.lastTriggerTime)
+		if cooldownRemaining < 0 {
+			cooldownRemaining = 0
+		}
+	}
+	inCooldown := cooldownRemaining > 0
 	if inCooldown {
+		if snapshot.AtCapacity {
+			uc.logBufferDecision(now, "blocked_cooldown", snapshot, cooldownRemaining)
+		}
+		return
+	}
+
+	// Primary trigger: a bounded global window selects its best-sampled path.
+	if uc.phase2.triggerOnBufferFull && snapshot.AtCapacity {
+		if !snapshot.HasSelectedPath {
+			uc.logBufferDecision(now, "buffer_full_no_eligible_path", snapshot, 0)
+			return
+		}
+		if uc.writeBufferFullTrigger(now, snapshot) {
+			uc.logBufferDecision(now, "request_written", snapshot, 0)
+			return
+		}
+		uc.logBufferDecision(now, "request_write_failed", snapshot, 0)
 		return
 	}
 
@@ -486,7 +607,8 @@ func (uc *UtilityController) pickLegacyTriggerPath() protocol.PathID {
 	}
 	var best protocol.PathID = 1
 	var bestN int64
-	for _, pid := range uc.runtimeExporter.pathsAtCapacity() {
+	snapshot := uc.runtimeExporter.triggerSnapshot(1)
+	for _, pid := range snapshot.EligiblePaths {
 		n := uc.runtimeExporter.pathBufferSize(pid)
 		if n > bestN {
 			bestN = n
@@ -500,7 +622,7 @@ func (uc *UtilityController) pickLegacyTriggerPath() protocol.PathID {
 }
 
 func (uc *UtilityController) writeLegacyTriggerRequest(now time.Time, pathID protocol.PathID, reason string, prevAvg, recentAvg, dropPct float64, bufSize int64) bool {
-	return uc.writePerPathTrigger(now, pathID, reason, map[string]interface{}{
+	return uc.writePerPathTrigger(now, pathID, reason, false, map[string]interface{}{
 		"previous_avg_bw_bps": prevAvg,
 		"recent_avg_bw_bps":   recentAvg,
 		"drop_pct":            dropPct,
