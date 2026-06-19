@@ -712,6 +712,24 @@ def run_experiment(net, args):
 
     # ---- Teardown ----------------------------------------------------------
     _log("exp", "stopping all processes...")
+    tc_was_running_at_cleanup = False
+    if tc_proc is not None:
+        tc_status = tc_proc.poll()
+        if tc_status is None:
+            tc_was_running_at_cleanup = True
+            _log("tc", "deterioration process was still running; terminating during cleanup")
+        elif tc_status == 0:
+            _log("tc", "deterioration process completed normally; exit_status=0")
+        else:
+            _log("tc", f"deterioration process exited early; exit_status={tc_status}")
+        _append_timeline(
+            timeline_path,
+            "tc_process_status",
+            run_id=run_id,
+            run_label=run_label or "",
+            state=("running_at_cleanup" if tc_status is None else "exited"),
+            exit_status=("" if tc_status is None else str(tc_status)),
+        )
     _log("pcap", "stopping tcpdump...")
     for p in [tcpdump_a, tcpdump_b]:
         try:
@@ -731,15 +749,23 @@ def run_experiment(net, args):
         procs.append(tc_proc)
     for proc in procs:
         try:
-            proc.send_signal(signal.SIGTERM)
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGTERM)
         except Exception:
             pass
     time.sleep(2)
     for proc in procs:
         try:
-            proc.send_signal(signal.SIGKILL)
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGKILL)
         except Exception:
             pass
+    if tc_proc is not None and tc_was_running_at_cleanup:
+        try:
+            tc_status = tc_proc.wait(timeout=1)
+        except Exception:
+            tc_status = tc_proc.poll()
+        _log("tc", f"deterioration process terminated by cleanup; exit_status={tc_status}")
 
     for f in [server_log, pull_log, push_log]:
         f.flush()

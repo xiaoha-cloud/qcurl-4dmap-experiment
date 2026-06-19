@@ -58,6 +58,7 @@ EOF
         echo "class htb 1:1 root leaf 10: prio 0 rate 30Mbit ceil 30Mbit burst 15Kb cburst 1600b"
         ;;
     esac
+    echo
     ;;
   *"filter show dev"*)
     ;;
@@ -139,6 +140,16 @@ run_apply() {
   fi
   if ! grep -q "finished all steps" <<<"$out"; then
     echo "FAIL fixture=$fixture: missing finished all steps"
+    echo "$out"
+    return 1
+  fi
+  if ! grep -q "verified root=5:" <<<"$out"; then
+    echo "FAIL fixture=$fixture: missing hierarchy verification"
+    echo "$out"
+    return 1
+  fi
+  if ! grep -q "exiting status=0 current_step=1 completed=1" <<<"$out"; then
+    echo "FAIL fixture=$fixture: missing successful EXIT status"
     echo "$out"
     return 1
   fi
