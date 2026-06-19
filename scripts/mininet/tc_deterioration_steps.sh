@@ -56,6 +56,20 @@ done
 
 log() { echo "[$(date -Iseconds)] [tc_deterioration] $*" >&2; }
 
+log_tc_output() {
+  local prefix="$1"
+  shift
+  local timeout_sec="${TC_DIAGNOSTIC_TIMEOUT_SEC:-5}"
+  local -a cmd=("$@")
+
+  if command -v timeout >/dev/null 2>&1; then
+    cmd=(timeout --signal=KILL "${timeout_sec}s" "${cmd[@]}")
+  fi
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && log "${prefix}: ${line}"
+  done < <("${cmd[@]}" 2>&1 || true)
+}
+
 timeline_event() {
   local event="$1"
   shift
@@ -85,29 +99,19 @@ PY
 log_hierarchy() {
   local label="$1"
   log "=== hierarchy ${label}: qdisc dev=${IFACE} ==="
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && log "qdisc: ${line}"
-  done < <(tc -s qdisc show dev "$IFACE" 2>&1 || true)
+  log_tc_output qdisc tc -s qdisc show dev "$IFACE"
   log "=== hierarchy ${label}: class dev=${IFACE} ==="
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && log "class: ${line}"
-  done < <(tc -s class show dev "$IFACE" 2>&1 || true)
+  log_tc_output class tc -s class show dev "$IFACE"
   log "=== hierarchy ${label}: filter dev=${IFACE} ==="
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && log "filter: ${line}"
-  done < <(tc -s filter show dev "$IFACE" 2>&1 || true)
+  log_tc_output filter tc -s filter show dev "$IFACE"
 }
 
 log_hierarchy_after_step() {
   local label="$1"
   log "=== hierarchy ${label}: qdisc dev=${IFACE} ==="
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && log "qdisc: ${line}"
-  done < <(tc -s qdisc show dev "$IFACE" 2>&1 || true)
+  log_tc_output qdisc tc -s qdisc show dev "$IFACE"
   log "=== hierarchy ${label}: class dev=${IFACE} ==="
-  while IFS= read -r line; do
-    [[ -n "$line" ]] && log "class: ${line}"
-  done < <(tc -s class show dev "$IFACE" 2>&1 || true)
+  log_tc_output class tc -s class show dev "$IFACE"
 }
 
 detect_htb_netem_parent() {
@@ -291,18 +295,25 @@ done
 log_hierarchy "before_first_step"
 detect_htb_netem_parent
 
-prev=0
+steps_start_seconds=$SECONDS
 for i in "${!T_AT[@]}"; do
   at="${T_AT[$i]}"
   delay="${T_DELAY[$i]}"
   loss="${T_LOSS[$i]}"
-  sleep_sec=$((at - prev))
-  if ((sleep_sec > 0)); then sleep "$sleep_sec"; fi
+  elapsed=$((SECONDS - steps_start_seconds))
+  sleep_sec=$((at - elapsed))
+  if ((sleep_sec > 0)); then log "waiting ${sleep_sec}s for step $((i + 1))/${#T_AT[@]}"; fi
+  while ((sleep_sec > 0)); do
+    if ! sleep "$sleep_sec"; then
+      log "sleep interrupted before step $((i + 1))/${#T_AT[@]}; resuming wait"
+    fi
+    elapsed=$((SECONDS - steps_start_seconds))
+    sleep_sec=$((at - elapsed))
+  done
   log "step $((i + 1))/${#T_AT[@]} at=${at}s delay=${delay} loss=${loss} dev=${IFACE} parent=${NETEM_PARENT}"
   timeline_event tc_step "step=$((i + 1))" "at_s=${at}" "delay=${delay}" "loss=${loss}" "iface=${IFACE}"
   apply_deterioration "$delay" "$loss"
   log_hierarchy_after_step "after_step_$((i + 1))"
-  prev=$at
 done
 log "finished all steps"
 timeline_event tc_finished "step_count=${#T_AT[@]}" "iface=${IFACE}"
