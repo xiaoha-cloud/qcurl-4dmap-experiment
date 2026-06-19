@@ -627,13 +627,15 @@ def run_experiment(net, args):
     # -log-control) must come before the URL, or the client prints "unsupport" and exits.
     lc = " -log-control" if getattr(args, "log_control", False) else ""
     pull_cmd = (
-        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
+        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
+        f"QACCESS_PHASE2_OWNER=1 QACCESS_ENDPOINT_ROLE=client_pull_receiver {env_prefix} {client_bin}"
         f" -type=true -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(outfile)}"
         f"{lc}"
         f" -file={shlex.quote(outfile)} rtmp://10.0.1.2/live/test"
     )
+    _log("phase2", "endpoint_role=client_pull_receiver phase2_owner=1 mutation_allowed=1")
     _log("pull", f"starting on h1 → {pull_log_path}")
     pull_proc = h1.popen(
         pull_cmd,
@@ -645,13 +647,15 @@ def run_experiment(net, args):
     push_log_path = os.path.join(logs_dir, f"push_{run_id}.log")
     push_log = _open_log_file(push_log_path, save_logs)
     push_cmd = (
-        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && {env_prefix} {client_bin}"
+        f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
+        f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_push_publisher {env_prefix} {client_bin}"
         f" -type=false -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(input_flv)}"
         f"{lc}"
         f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test"
     )
+    _log("phase2", "endpoint_role=client_push_publisher phase2_owner=0 mutation_allowed=0")
     _log("push", f"starting on h1 → {push_log_path}")
     push_proc = h1.popen(
         push_cmd,

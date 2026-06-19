@@ -26,6 +26,9 @@ const (
 )
 
 type qaccessPhase2Config struct {
+	owner        bool
+	endpointRole string
+
 	coeffReload         bool
 	coeffReloadInterval time.Duration
 	coeffSmoothing      float64
@@ -49,6 +52,9 @@ type qaccessPhase2Config struct {
 
 func loadQAccessPhase2Config() qaccessPhase2Config {
 	return qaccessPhase2Config{
+		owner:        envBool("QACCESS_PHASE2_OWNER", false),
+		endpointRole: strings.TrimSpace(os.Getenv("QACCESS_ENDPOINT_ROLE")),
+
 		coeffReload:         envBool("QACCESS_COEFF_RELOAD", false),
 		coeffReloadInterval: time.Duration(envInt("QACCESS_COEFF_RELOAD_INTERVAL_MS", defaultCoeffReloadIntervalMs)) * time.Millisecond,
 		coeffSmoothing:      envFloat("QACCESS_COEFF_SMOOTHING", defaultCoeffSmoothing),
@@ -69,6 +75,10 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		updateResponsePath:      resolveUpdateResponseJSONPath(),
 		triggerAuditPath:        resolveTriggerAuditPath(),
 	}
+}
+
+func (uc *UtilityController) phase2MutationAllowed() bool {
+	return uc != nil && uc.Mode == ModeQAccessT && uc.phase2.owner
 }
 
 func resolveTriggerAuditPath() string {
@@ -362,11 +372,17 @@ func (uc *UtilityController) runtimeBufferSize() int64 {
 }
 
 func (uc *UtilityController) newRequestID(now time.Time) string {
+	if !uc.phase2MutationAllowed() {
+		return ""
+	}
 	uc.requestSerial++
 	return fmt.Sprintf("%s_%d_%d", uc.RunID, now.UnixNano()/1e6, uc.requestSerial)
 }
 
 func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.PathID, reason string, globalBuffer bool, extra map[string]interface{}) bool {
+	if !uc.phase2MutationAllowed() {
+		return false
+	}
 	if uc.updateInProgress {
 		return false
 	}
@@ -469,6 +485,9 @@ func (uc *UtilityController) writeBufferFullTrigger(now time.Time, snapshot qacc
 }
 
 func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
+	if !uc.phase2MutationAllowed() {
+		return
+	}
 	if !uc.updateInProgress || uc.inflightRequestID == "" {
 		return
 	}
@@ -520,7 +539,7 @@ func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
 }
 
 func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
-	if !uc.phase2.triggerUpdate || uc.Mode != ModeQAccessT {
+	if !uc.phase2MutationAllowed() || !uc.phase2.triggerUpdate {
 		return
 	}
 
