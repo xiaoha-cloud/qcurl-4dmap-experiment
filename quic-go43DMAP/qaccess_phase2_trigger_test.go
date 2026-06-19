@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,8 @@ func newTriggerTestController(t *testing.T, maxRows, minSamples int64) (*Utility
 		RunID:  "trigger-test",
 		coeffs: defaultQAccessTCoefficients(),
 		phase2: qaccessPhase2Config{
+			owner:               true,
+			endpointRole:        "test_owner",
 			runtimeExport:       true,
 			runtimeBufferMax:    maxRows,
 			minSamplesPerPath:   minSamples,
@@ -193,5 +196,85 @@ func TestQAccessBufferResponseResumesAndAllowsSecondCycle(t *testing.T) {
 	second := readTriggerTestRequest(t, requestPath)
 	if second["request_id"] == first["request_id"] || int(second["path_id"].(float64)) != 1 {
 		t.Fatalf("second trigger cycle failed: first=%+v second=%+v", first, second)
+	}
+}
+
+func TestQAccessNonOwnerCannotMutatePhase2State(t *testing.T) {
+	uc, requestPath, responsePath := newTriggerTestController(t, 3000, 1)
+	uc.phase2.owner = false
+	setTriggerTestRows(uc, map[protocol.PathID]int64{0: 1500, 1: 1500})
+	uc.maybeTriggerCoefficientUpdate(time.Unix(10, 0))
+	uc.maybeCheckUpdateResponse(time.Unix(11, 0))
+	if uc.requestSerial != 0 || uc.updateInProgress {
+		t.Fatalf("non-owner mutated trigger state: serial=%d in_progress=%t", uc.requestSerial, uc.updateInProgress)
+	}
+	for _, path := range []string{requestPath, responsePath} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("non-owner created Phase 2 file %s: %v", path, err)
+		}
+	}
+}
+
+func TestQAccessOwnerRequestSerialIsSingleContinuousSequence(t *testing.T) {
+	uc, _, _ := newTriggerTestController(t, 3000, 1)
+	for i, want := range []string{"_1", "_2", "_3"} {
+		got := uc.newRequestID(time.Unix(100+int64(i), 0))
+		if !strings.HasSuffix(got, want) {
+			t.Fatalf("request %d: got %q, want suffix %q", i+1, got, want)
+		}
+	}
+	if uc.requestSerial != 3 {
+		t.Fatalf("request serial=%d, want 3", uc.requestSerial)
+	}
+}
+
+func TestQAccessSingleOwnerThreeCycleRegression(t *testing.T) {
+	owner, requestPath, responsePath := newTriggerTestController(t, 3000, 1)
+	nonOwner := &UtilityController{
+		Mode: ModeQAccessT,
+		phase2: qaccessPhase2Config{
+			owner:               false,
+			endpointRole:        "client_push_publisher",
+			triggerUpdate:       true,
+			triggerOnBufferFull: true,
+			updateRequestPath:   requestPath,
+			updateResponsePath:  responsePath,
+		},
+	}
+
+	for cycle := 1; cycle <= 3; cycle++ {
+		setTriggerTestRows(owner, map[protocol.PathID]int64{0: 1000, 1: 1000, 3: 1000})
+		now := time.Unix(int64(cycle*61), 0)
+		owner.maybeTriggerCoefficientUpdate(now)
+		nonOwner.maybeTriggerCoefficientUpdate(now)
+		request := readTriggerTestRequest(t, requestPath)
+		requestID := request["request_id"].(string)
+		if !strings.HasSuffix(requestID, "_"+strconv.Itoa(cycle)) {
+			t.Fatalf("cycle %d request_id=%q", cycle, requestID)
+		}
+		if err := os.Remove(requestPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeJSONAtomic(responsePath, map[string]interface{}{
+			"request_id": requestID, "status": "skipped",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		owner.maybeCheckUpdateResponse(now.Add(time.Second))
+		_ = os.Remove(responsePath)
+	}
+
+	audit, err := ioutil.ReadFile(owner.phase2.triggerAuditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(audit), `"trigger_decision":"request_written"`); got != 3 {
+		t.Fatalf("request_written count=%d, want 3\n%s", got, audit)
+	}
+	if strings.Contains(string(audit), "request_write_failed") {
+		t.Fatalf("unexpected request_write_failed:\n%s", audit)
+	}
+	if nonOwner.requestSerial != 0 {
+		t.Fatalf("non-owner request serial=%d, want 0", nonOwner.requestSerial)
 	}
 }

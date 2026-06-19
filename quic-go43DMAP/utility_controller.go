@@ -2,6 +2,7 @@ package quic
 
 import (
 	"math"
+	"os"
 	"sync"
 	"time"
 
@@ -142,11 +143,16 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	case ModeQAccessT:
 		uc.phase2 = loadQAccessPhase2Config()
 		jsonPath := uc.phase2.coeffJSONPath
+		// Non-owners keep the same startup control coefficients, but never reload
+		// or mutate Phase 2 runtime state after initialization.
 		uc.reloadCoefficientsFromDisk()
 		c := uc.getCoefficients()
-		utils.Infof("[qaccess_t] loaded coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s json=%s control_law=%s",
+		utils.Infof("[qaccess_t_owner] pid=%d endpoint_role=%s phase2_owner=%t mutation_allowed=%t runtime_export=%t trigger_update=%t run_id=%s",
+			os.Getpid(), uc.phase2.endpointRole, uc.phase2.owner, uc.phase2MutationAllowed(),
+			uc.phase2.runtimeExport && uc.phase2.owner, uc.phase2.triggerUpdate && uc.phase2.owner, runID)
+		utils.Infof("[qaccess_t] coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s json=%s control_law=%s",
 			c.Alpha, c.Beta, c.Gamma, c.Source, jsonPath, uc.controlLawMode)
-		if uc.phase2.runtimeExport {
+		if uc.phase2.runtimeExport && uc.phase2MutationAllowed() {
 			uc.runtimeExporter = newQAccessSampleExporter(
 				uc.phase2.runtimeSamples, runID, uc.phase2.runtimeBufferMax,
 			)
@@ -174,17 +180,19 @@ func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.getC
 func (uc *UtilityController) BeginMonitorRound() {
 	now := time.Now()
 	if uc.Mode == ModeQAccessT {
-		uc.finalizeMonitorRoundThroughput()
-		uc.maybeReloadCoefficients(now)
-		if uc.runtimeExporter != nil {
-			_ = uc.runtimeExporter.flushAllPending(func(pid protocol.PathID) float64 {
-				if prev, ok := uc.Prev[pid]; ok {
-					return prev.LastBWbps
-				}
-				return 0
-			})
+		if uc.phase2MutationAllowed() {
+			uc.finalizeMonitorRoundThroughput()
+			uc.maybeReloadCoefficients(now)
+			if uc.runtimeExporter != nil {
+				_ = uc.runtimeExporter.flushAllPending(func(pid protocol.PathID) float64 {
+					if prev, ok := uc.Prev[pid]; ok {
+						return prev.LastBWbps
+					}
+					return 0
+				})
+			}
+			uc.maybeTriggerCoefficientUpdate(now)
 		}
-		uc.maybeTriggerCoefficientUpdate(now)
 	}
 	if uc.Mode == ModeQAccessCollect && uc.trainCollector != nil {
 		_ = uc.trainCollector.flushAllPending(func(pid protocol.PathID) float64 {
@@ -361,7 +369,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		}
 	}
 
-	if uc.Mode == ModeQAccessT && active && uc.runtimeExporter != nil {
+	if uc.phase2MutationAllowed() && active && uc.runtimeExporter != nil {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma, diag)
