@@ -97,7 +97,7 @@ log_hierarchy() {
 }
 
 detect_htb_netem_parent() {
-  local root_line class_line
+  local root_line htb_major netem_line class_line
 
   root_line="$(tc qdisc show dev "$IFACE" 2>/dev/null | head -n 1 || true)"
   if [[ -z "$root_line" ]]; then
@@ -114,20 +114,35 @@ detect_htb_netem_parent() {
     echo "tc_deterioration: ${root_line}" >&2
     return 1
   fi
-
-  class_line="$(tc class show dev "$IFACE" 2>/dev/null | grep -E 'class[[:space:]]+htb[[:space:]]+1:[0-9]+' | head -n 1 || true)"
-  if [[ -z "$class_line" ]]; then
-    echo "tc_deterioration: no HTB class 1:x found on ${IFACE}" >&2
+  if [[ "$root_line" =~ qdisc[[:space:]]+htb[[:space:]]+([0-9]+):[[:space:]]+root ]]; then
+    htb_major="${BASH_REMATCH[1]}"
+  else
+    echo "tc_deterioration: failed to parse HTB root handle on ${IFACE}" >&2
+    echo "tc_deterioration: ${root_line}" >&2
     return 1
   fi
-  if [[ "$class_line" =~ class[[:space:]]+htb[[:space:]]+(1:[0-9]+) ]]; then
+
+  # Mininet TCLink uses per-interface major handles (e.g. 5:1), not always 1:1.
+  netem_line="$(tc qdisc show dev "$IFACE" 2>/dev/null | grep -E "qdisc netem.*parent ${htb_major}:" | head -n 1 || true)"
+  if [[ -n "$netem_line" && "$netem_line" =~ parent[[:space:]]+([0-9]+:[0-9]+) ]]; then
+    NETEM_PARENT="${BASH_REMATCH[1]}"
+    log "detected existing netem child; netem parent class ${NETEM_PARENT} on dev=${IFACE} (htb root ${htb_major}:)"
+    return 0
+  fi
+
+  class_line="$(tc class show dev "$IFACE" 2>/dev/null | grep -E "class[[:space:]]+htb[[:space:]]+${htb_major}:[0-9]+" | head -n 1 || true)"
+  if [[ -z "$class_line" ]]; then
+    echo "tc_deterioration: no HTB class ${htb_major}:x found on ${IFACE}" >&2
+    return 1
+  fi
+  if [[ "$class_line" =~ class[[:space:]]+htb[[:space:]]+([0-9]+:[0-9]+) ]]; then
     NETEM_PARENT="${BASH_REMATCH[1]}"
   else
     echo "tc_deterioration: failed to parse HTB class handle on ${IFACE}" >&2
     return 1
   fi
 
-  log "detected root HTB with netem parent class ${NETEM_PARENT} on dev=${IFACE}"
+  log "detected root HTB ${htb_major}: with netem parent class ${NETEM_PARENT} on dev=${IFACE}"
   return 0
 }
 
