@@ -22,7 +22,7 @@ UP_FILTERS = {
 def read_packets(pcap_path, display_filter):
     cmd = [
         "tshark",
-        "-r", pcap_path,
+        "-r", "-",
         "-Y", display_filter,
         "-T", "fields",
         "-E", "separator=\t",
@@ -31,13 +31,17 @@ def read_packets(pcap_path, display_filter):
         "-e", "ip.len",
     ]
 
-    result = subprocess.run(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
+    # Let Python open the capture and stream it to tshark. Some VM AppArmor
+    # profiles allow tshark stdin but deny direct access to project paths.
+    with open(pcap_path, "rb") as pcap_file:
+        result = subprocess.run(
+            cmd,
+            stdin=pcap_file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
     if result.returncode != 0:
         raise RuntimeError(f"tshark failed for {pcap_path}: {result.stderr.strip()}")
 
