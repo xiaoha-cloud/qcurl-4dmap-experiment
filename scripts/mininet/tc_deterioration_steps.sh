@@ -19,6 +19,9 @@ IFACE=""
 ROOT_HTB_HANDLE=""
 NETEM_PARENT=""
 NETEM_HANDLE=""
+HTB_RATE=""
+CURRENT_STEP=0
+COMPLETED=0
 declare -a T_AT=()
 declare -a T_DELAY=()
 declare -a T_LOSS=()
@@ -56,18 +59,36 @@ done
 
 log() { echo "[$(date -Iseconds)] [tc_deterioration] $*" >&2; }
 
+on_exit() {
+  local status=$?
+  trap - EXIT
+  log "exiting status=${status} current_step=${CURRENT_STEP} completed=${COMPLETED}"
+  exit "$status"
+}
+trap on_exit EXIT
+
 log_tc_output() {
   local prefix="$1"
   shift
   local timeout_sec="${TC_DIAGNOSTIC_TIMEOUT_SEC:-5}"
   local -a cmd=("$@")
+  local output="" status=0
 
   if command -v timeout >/dev/null 2>&1; then
     cmd=(timeout --signal=KILL "${timeout_sec}s" "${cmd[@]}")
   fi
+  if output="$("${cmd[@]}" 2>&1)"; then
+    status=0
+  else
+    status=$?
+    log "warning: ${prefix} inspection failed status=${status}: ${output}"
+  fi
   while IFS= read -r line; do
-    [[ -n "$line" ]] && log "${prefix}: ${line}"
-  done < <("${cmd[@]}" 2>&1 || true)
+    if [[ -n "$line" ]]; then
+      log "${prefix}: ${line}"
+    fi
+  done <<< "$output"
+  return 0
 }
 
 timeline_event() {
@@ -116,8 +137,8 @@ log_hierarchy_after_step() {
 
 detect_htb_netem_parent() {
   local root_line htb_major
-  local -a netem_parents=() netem_handles=() class_ids=() class_leaf_ids=()
-  local netem_parent="" netem_handle="" class_parent="" leaf_handle=""
+  local -a netem_parents=() netem_handles=() class_ids=() class_leaf_ids=() class_rates=()
+  local netem_parent="" netem_handle="" class_parent="" leaf_handle="" class_rate=""
   local uniq_parent_count uniq_class_count
 
   root_line="$(tc qdisc show dev "$IFACE" 2>/dev/null | awk '/^qdisc htb/ && / root / {print; exit}')"
@@ -176,19 +197,26 @@ detect_htb_netem_parent() {
     else
       class_leaf_ids+=("")
     fi
+    if [[ "$line" =~ rate[[:space:]]+([^[:space:]]+) ]]; then
+      class_rates+=("${BASH_REMATCH[1]}")
+    else
+      class_rates+=("")
+    fi
   done < <(tc class show dev "$IFACE" 2>/dev/null | awk '/^class htb / {print}' || true)
 
   # Keep only classes under the detected HTB major.
-  local -a filtered_class_ids=() filtered_leaf_ids=()
+  local -a filtered_class_ids=() filtered_leaf_ids=() filtered_class_rates=()
   local idx
   for idx in "${!class_ids[@]}"; do
     if [[ "${class_ids[$idx]}" == "${htb_major}:"* ]]; then
       filtered_class_ids+=("${class_ids[$idx]}")
       filtered_leaf_ids+=("${class_leaf_ids[$idx]}")
+      filtered_class_rates+=("${class_rates[$idx]}")
     fi
   done
   class_ids=("${filtered_class_ids[@]}")
   class_leaf_ids=("${filtered_leaf_ids[@]}")
+  class_rates=("${filtered_class_rates[@]}")
 
   if ((${#class_ids[@]} == 0)); then
     echo "tc_deterioration: no HTB class ${htb_major}:x found on ${IFACE}" >&2
@@ -209,6 +237,7 @@ detect_htb_netem_parent() {
         found_class=true
         class_parent="${class_ids[$idx]}"
         leaf_handle="${class_leaf_ids[$idx]}"
+        class_rate="${class_rates[$idx]}"
         break
       fi
     done
@@ -228,6 +257,7 @@ detect_htb_netem_parent() {
     fi
     class_parent="${class_ids[0]}"
     leaf_handle="${class_leaf_ids[0]}"
+    class_rate="${class_rates[0]}"
     if [[ -n "$leaf_handle" ]]; then
       netem_handle="$leaf_handle"
     fi
@@ -240,9 +270,54 @@ detect_htb_netem_parent() {
 
   NETEM_PARENT="${netem_parent:-$class_parent}"
   NETEM_HANDLE="${netem_handle}"
+  HTB_RATE="${class_rate}"
 
-  log "detected_root_htb=${ROOT_HTB_HANDLE} detected_htb_parent=${NETEM_PARENT} detected_netem_handle=${NETEM_HANDLE:-none}"
+  log "detected_root_htb=${ROOT_HTB_HANDLE} detected_htb_parent=${NETEM_PARENT} detected_netem_handle=${NETEM_HANDLE:-none} detected_htb_rate=${HTB_RATE:-unknown}"
   return 0
+}
+
+verify_deterioration() {
+  local expected_delay="$1"
+  local expected_loss="$2"
+  local qdisc_output="" class_output="" root_line="" netem_line="" class_line="" line
+
+  if ! qdisc_output="$(tc qdisc show dev "$IFACE" 2>&1)"; then
+    log "verification failed: qdisc inspection failed: ${qdisc_output}"
+    return 1
+  fi
+  if ! class_output="$(tc class show dev "$IFACE" 2>&1)"; then
+    log "verification failed: class inspection failed: ${class_output}"
+    return 1
+  fi
+  while IFS= read -r line; do
+    if [[ "$line" == qdisc\ htb\ "$ROOT_HTB_HANDLE"* && "$line" == *" root "* ]]; then root_line="$line"; fi
+    if [[ "$line" == qdisc\ netem\ * && "$line" == *" parent ${NETEM_PARENT} "* ]]; then netem_line="$line"; fi
+  done <<< "$qdisc_output"
+  while IFS= read -r line; do
+    if [[ "$line" == class\ htb\ "$NETEM_PARENT"* ]]; then class_line="$line"; fi
+  done <<< "$class_output"
+
+  [[ -n "$root_line" ]] || { log "verification failed: root HTB ${ROOT_HTB_HANDLE} is absent"; return 1; }
+  [[ -n "$class_line" ]] || { log "verification failed: HTB class ${NETEM_PARENT} is absent"; return 1; }
+  if [[ -n "$HTB_RATE" && "$class_line" != *" rate ${HTB_RATE} "* ]]; then
+    log "verification failed: HTB class rate changed; expected ${HTB_RATE}: ${class_line}"
+    return 1
+  fi
+  [[ -n "$netem_line" ]] || { log "verification failed: netem is not under ${NETEM_PARENT}"; return 1; }
+  if [[ "$netem_line" != *" delay ${expected_delay}"* ]]; then
+    log "verification failed: expected delay ${expected_delay}: ${netem_line}"
+    return 1
+  fi
+  if [[ "$expected_loss" == "0%" ]]; then
+    if [[ "$netem_line" == *" loss "* && "$netem_line" != *" loss 0%"* ]]; then
+      log "verification failed: expected zero or omitted loss: ${netem_line}"
+      return 1
+    fi
+  elif [[ "$netem_line" != *" loss ${expected_loss}"* ]]; then
+    log "verification failed: expected loss ${expected_loss}: ${netem_line}"
+    return 1
+  fi
+  log "verified root=${ROOT_HTB_HANDLE} parent=${NETEM_PARENT} rate=${HTB_RATE:-unknown} delay=${expected_delay} loss=${expected_loss}"
 }
 
 apply_deterioration() {
@@ -255,13 +330,10 @@ apply_deterioration() {
   fi
   tc_cmd+=(netem delay "$delay" loss "$loss")
 
+  local tc_output=""
   log "${tc_cmd[*]}"
-  if "${tc_cmd[@]}" 2>/dev/null; then
-    :
-  elif tc qdisc add dev "$IFACE" parent "$NETEM_PARENT" netem delay "$delay" loss "$loss" 2>/dev/null; then
-    log "tc qdisc add dev ${IFACE} parent ${NETEM_PARENT} netem delay ${delay} loss ${loss}"
-  else
-    echo "tc_deterioration: failed to attach netem under parent ${NETEM_PARENT} on ${IFACE}" >&2
+  if ! tc_output="$("${tc_cmd[@]}" 2>&1)"; then
+    echo "tc_deterioration: netem update failed: ${tc_output}" >&2
     return 1
   fi
 
@@ -274,6 +346,7 @@ apply_deterioration() {
     echo "tc_deterioration: root became netem on ${IFACE}; HTB hierarchy was destroyed" >&2
     return 1
   fi
+  verify_deterioration "$delay" "$loss"
 
   log "applied delay=${delay} loss=${loss} dev=${IFACE} parent=${NETEM_PARENT} handle=${NETEM_HANDLE:-auto}"
   return 0
@@ -297,6 +370,7 @@ detect_htb_netem_parent
 
 steps_start_seconds=$SECONDS
 for i in "${!T_AT[@]}"; do
+  CURRENT_STEP=$((i + 1))
   at="${T_AT[$i]}"
   delay="${T_DELAY[$i]}"
   loss="${T_LOSS[$i]}"
@@ -317,3 +391,4 @@ for i in "${!T_AT[@]}"; do
 done
 log "finished all steps"
 timeline_event tc_finished "step_count=${#T_AT[@]}" "iface=${IFACE}"
+COMPLETED=1
