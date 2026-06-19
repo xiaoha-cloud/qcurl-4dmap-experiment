@@ -261,7 +261,7 @@ apply_deterioration() {
     return 1
   fi
 
-  if ! tc qdisc show dev "$IFACE" | grep -q "parent ${NETEM_PARENT}.*netem"; then
+  if ! tc qdisc show dev "$IFACE" | grep -Eq "^qdisc[[:space:]]+netem[[:space:]]+[^[:space:]]+[[:space:]]+parent[[:space:]]+${NETEM_PARENT}([[:space:]]|$)"; then
     echo "tc_deterioration: netem child not present under ${NETEM_PARENT} after apply on ${IFACE}" >&2
     log_hierarchy "after_failed_apply"
     return 1

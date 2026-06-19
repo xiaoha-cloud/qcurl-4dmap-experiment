@@ -61,6 +61,10 @@ EOF
     ;;
   *"filter show dev"*)
     ;;
+  *"qdisc replace dev eth0 parent "*)
+    ;;
+  *"qdisc add dev eth0 parent "*)
+    ;;
   *)
     echo "unsupported tc args: $*" >&2
     exit 1
@@ -112,9 +116,44 @@ run_detect() {
   echo "OK fixture=$fixture root=${want_root} parent=${want_parent} handle=${want_handle}"
 }
 
+run_apply() {
+  local fixture="$1"
+  local out rc
+
+  out="$(
+    PATH="$MOCK_DIR:$PATH" \
+      TC_FIXTURE="$fixture" \
+      bash "$TC_SCRIPT" "$PROFILE" 2>&1
+  )" || rc=$?
+  rc="${rc:-0}"
+
+  if [[ "$rc" -ne 0 ]]; then
+    echo "FAIL fixture=$fixture: apply exited $rc"
+    echo "$out"
+    return 1
+  fi
+  if ! grep -q "step 1/1 at=0s delay=20ms loss=0%" <<<"$out"; then
+    echo "FAIL fixture=$fixture: missing step 1/1 apply log"
+    echo "$out"
+    return 1
+  fi
+  if ! grep -q "finished all steps" <<<"$out"; then
+    echo "FAIL fixture=$fixture: missing finished all steps"
+    echo "$out"
+    return 1
+  fi
+  if grep -q "root became netem" <<<"$out"; then
+    echo "FAIL fixture=$fixture: root HTB preservation check failed"
+    echo "$out"
+    return 1
+  fi
+  echo "OK fixture=$fixture apply finished"
+}
+
 fail=0
 run_detect htb1 "1:" "1:1" "10:" || fail=1
 run_detect htb5 "5:" "5:1" "10:" || fail=1
+run_apply htb5 || fail=1
 
 if [[ "$fail" -ne 0 ]]; then
   exit 1
