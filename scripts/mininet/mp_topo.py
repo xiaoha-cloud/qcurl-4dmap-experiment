@@ -210,6 +210,7 @@ def _scenario_tag_for_dir(name):
 
 def _write_combined_log(output_path, inputs):
     """Concatenate multiple logs into one file with section headers."""
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8", errors="replace") as out_f:
         for label, in_path in inputs:
             out_f.write(f"===== BEGIN {label}: {in_path} =====\n")
@@ -240,6 +241,8 @@ def _env_float(name, default):
 
 def _open_log_file(path, save_logs):
     """Open a log destination; /dev/null keeps runs quiet when logs are disabled."""
+    if save_logs:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
     return open(path if save_logs else os.devnull, "w")
 
 
