@@ -54,6 +54,7 @@ DEFAULT_RESPONSE = _REPO / "derived" / "qaccess_update_response.json"
 DEFAULT_STATE = _REPO / "derived" / "qaccess_worker_state.json"
 DEFAULT_ARCHIVE_DIR = _REPO / "derived" / "qaccess_processed_buffers"
 DEFAULT_AUDIT_CSV = _REPO / "derived" / "qaccess_per_path_update_audit.csv"
+DEFAULT_READY = _REPO / "derived" / "qaccess_worker_ready.json"
 
 FEATURES = [
     "bw_bps",
@@ -526,6 +527,17 @@ def _worker_log_line(log_file: Path | None, payload: dict[str, Any]) -> None:
         print(line)
 
 
+def _write_ready_file(path: Path | None, payload: dict[str, Any]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, payload)
+    try:
+        path.chmod(0o666)
+    except OSError:
+        pass
+
+
 def _process_request(
     request_path: Path,
     samples_path: Path,
@@ -865,6 +877,12 @@ def main() -> None:
         default=None,
         help="Append structured JSON update lines to this file (worker.log)",
     )
+    ap.add_argument(
+        "--ready-file",
+        type=Path,
+        default=None,
+        help="Write a JSON readiness marker after startup validation succeeds",
+    )
     args = ap.parse_args()
 
     shadow = bool(args.shadow_per_subflow or args.dry_run)
@@ -880,12 +898,36 @@ def main() -> None:
             else f"min_relative_delta_gain={args.min_relative_delta_gain}"
         )
     )
+    if not args.model.is_file():
+        raise FileNotFoundError(f"missing model {args.model.resolve()}")
+    _assert_runtime_coeffs_path(args.coeffs_out.resolve())
+    load_coeffs_doc(args.coeffs_out.resolve())
+
     print(
         f"[worker] per-subflow mode shadow={shadow} fixed_gamma={fixed_gamma} "
         f"polling {args.request.resolve()} every {args.poll_interval}s "
         f"target_mode={args.target_mode} {gate_desc}",
         file=sys.stderr,
         flush=True,
+    )
+    _write_ready_file(
+        args.ready_file.resolve() if args.ready_file else None,
+        {
+            "status": "ready",
+            "timestamp_ms": int(time.time() * 1000),
+            "pid": os.getpid(),
+            "request": str(args.request.resolve()),
+            "runtime_samples": str(args.runtime_samples.resolve()),
+            "model": str(args.model.resolve()),
+            "coeffs_out": str(args.coeffs_out.resolve()),
+            "response_out": str(args.response_out.resolve()),
+            "state": str(args.state.resolve()),
+            "archive_dir": str(args.archive_dir.resolve()),
+            "target_mode": args.target_mode,
+            "gate": gate_desc,
+            "shadow": shadow,
+            "fixed_gamma": fixed_gamma,
+        },
     )
 
     while True:
