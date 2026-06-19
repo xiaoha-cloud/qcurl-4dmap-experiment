@@ -2,12 +2,11 @@
 # Fig.8-style combined sudden link-quality deterioration evaluation.
 #
 # Minimal storage defaults (override with env):
-#   KEEP_PCAP=0  SAVE_OUTPUT_FLV=0  KEEP_RAW_RUNTIME=0  SAVE_LOGS=0
+#   KEEP_PCAP=0  SAVE_OUTPUT_FLV=0  KEEP_RAW_RUNTIME=0  SAVE_VERBOSE_LOGS=0
 #
 # Usage (VM, repo root):
 #   sudo env \
 #     KEEP_PCAP=1 \
-#     SAVE_LOGS=1 \
 #     KEEP_RAW_RUNTIME=1 \
 #     INPUT_FLV=/home/mininet/Videos/push_input.flv \
 #     WORKER_PYTHON=/home/mininet/Project/qcurl-4dmap-experiment/.venv/bin/python3 \
@@ -24,7 +23,7 @@ RUNTIME_COEFFS="${QACCESS_COEFFS_JSON:-derived/qaccess_t_runtime_coefficients.js
 SCENARIO="${SCENARIO:-fig8}"
 DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile.env}"
 TIMEOUT="${TIMEOUT:-220}"
-SAVE_LOGS="${SAVE_LOGS:-0}"
+SAVE_VERBOSE_LOGS="${SAVE_VERBOSE_LOGS:-0}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
@@ -50,6 +49,10 @@ WORKER_READY_TIMEOUT="${QACCESS_WORKER_READY_TIMEOUT:-30}"
 if [[ "$(id -u)" -ne 0 ]]; then
   echo "[error] run with sudo (Mininet needs root)" >&2
   exit 1
+fi
+
+if [[ -n "${SAVE_LOGS:-}" ]]; then
+  echo "[combined_deterioration] note: legacy SAVE_LOGS is ignored; use SAVE_VERBOSE_LOGS=1 only when full role logs are required"
 fi
 
 cd "$ROOT"
@@ -234,11 +237,11 @@ run_one() {
     --timeout "$TIMEOUT" --log-parent "$SESSION_DIR" --run-label "$label"
     --dynamic-deterioration-profile "$DETERIORATION_PROFILE"
   )
-  [[ "$SAVE_LOGS" == "1" ]] || cmd+=(--disable-logs)
+  [[ "$SAVE_VERBOSE_LOGS" == "1" ]] || cmd+=(--disable-logs)
   [[ -n "$INPUT_FLV" ]] && cmd+=(--input-flv "$INPUT_FLV")
   [[ "$LOG_CONTROL" == "1" ]] && cmd+=(--log-control)
   echo "[combined_deterioration] scenario=$SCENARIO utility-mode=$um label=$label profile=$DETERIORATION_PROFILE"
-  echo "[combined_deterioration] KEEP_PCAP=$KEEP_PCAP SAVE_OUTPUT_FLV=$SAVE_OUTPUT_FLV KEEP_RAW_RUNTIME=$KEEP_RAW_RUNTIME"
+  echo "[combined_deterioration] KEEP_PCAP=$KEEP_PCAP SAVE_OUTPUT_FLV=$SAVE_OUTPUT_FLV KEEP_RAW_RUNTIME=$KEEP_RAW_RUNTIME SAVE_VERBOSE_LOGS=$SAVE_VERBOSE_LOGS"
   env "$@" "${cmd[@]}"
   finalize_leg "$label" || true
 }
