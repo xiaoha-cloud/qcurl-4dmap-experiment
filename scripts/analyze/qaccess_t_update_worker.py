@@ -48,6 +48,7 @@ from qaccess_math import (  # noqa: E402
 DEFAULT_REQUEST = _REPO / "derived" / "qaccess_update_request.json"
 DEFAULT_SAMPLES = _REPO / "derived" / "qaccess_runtime_samples.csv"
 DEFAULT_MODEL = _REPO / "derived" / "qaccess_t_model.pkl"
+DEFAULT_MODEL_METADATA = _REPO / "derived" / "qaccess_t_validation_metrics.json"
 DEFAULT_INITIAL_COEFFS = _REPO / "derived" / "qaccess_t_initial_coefficients.json"
 DEFAULT_COEFFS = _REPO / "derived" / "qaccess_t_runtime_coefficients.json"
 DEFAULT_RESPONSE = _REPO / "derived" / "qaccess_update_response.json"
@@ -113,6 +114,87 @@ AUDIT_FIELDS = [
     "status",
     "fixed_gamma",
 ]
+
+
+def _load_model_provenance(model_path: Path, metadata_path: Path, model) -> dict[str, Any]:
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"missing model metadata: {metadata_path.resolve()}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid model metadata {metadata_path.resolve()}: {exc}") from exc
+
+    target = ""
+    training_rows = 0
+    recorded_model = ""
+    if isinstance(metadata.get("models"), dict):
+        for candidate_target, entry in metadata["models"].items():
+            if not isinstance(entry, dict):
+                continue
+            entry_model = str(entry.get("model_path") or "")
+            if entry_model and Path(entry_model).name == model_path.name:
+                target = str(entry.get("target") or candidate_target)
+                training_rows = int(entry.get("rows_used") or 0)
+                recorded_model = entry_model
+                break
+    else:
+        target = str(metadata.get("target") or "")
+        training_rows = int(metadata.get("n_train") or metadata.get("n_samples") or 0)
+        recorded_model = str(metadata.get("model_out") or "")
+
+    if not target:
+        raise ValueError(
+            f"model target is missing from metadata {metadata_path.resolve()} for {model_path.resolve()}"
+        )
+    if recorded_model and Path(recorded_model).name != model_path.name:
+        raise ValueError(
+            f"model metadata mismatch: metadata records {recorded_model}, selected model is {model_path.resolve()}"
+        )
+
+    feature_names = list(getattr(model, "feature_names_in_", []))
+    if not feature_names:
+        n_features = int(getattr(model, "n_features_in_", 0) or 0)
+        if n_features == len(FEATURES):
+            feature_names = list(FEATURES)
+    if feature_names != FEATURES:
+        raise ValueError(
+            f"model feature mismatch: expected {FEATURES}, got {feature_names or '<unknown>'}"
+        )
+
+    return {
+        "model_target": target,
+        "model_training_rows": training_rows,
+        "model_features": feature_names,
+        "model_metadata": str(metadata_path.resolve()),
+    }
+
+
+def _validate_model_target(provenance: dict[str, Any], requested_target: str) -> str:
+    model_target = str(provenance.get("model_target") or "")
+    if model_target != requested_target:
+        raise ValueError(
+            f"incompatible model/target: model_target={model_target!r} "
+            f"requested_target={requested_target!r}"
+        )
+    return "compatible"
+
+
+def validate_model_configuration(model_path: Path, metadata_path: Path, requested_target: str) -> dict[str, Any]:
+    """Load model provenance and reject target/feature mismatches before polling."""
+    resolved_model = model_path.resolve()
+    resolved_metadata = metadata_path.resolve()
+    if not resolved_model.is_file():
+        raise FileNotFoundError(f"missing model {resolved_model}")
+    model = joblib.load(resolved_model)
+    provenance = _load_model_provenance(resolved_model, resolved_metadata, model)
+    _validate_model_target(provenance, requested_target)
+    return {
+        **provenance,
+        "resolved_model_path": str(resolved_model),
+        "verified_model_target": provenance["model_target"],
+        "requested_target_mode": requested_target,
+        "model_target_compatible": True,
+    }
 
 
 def _load_state(path: Path) -> dict:
@@ -309,8 +391,6 @@ def _archive_and_truncate_buffer(
     *,
     shadow: bool,
 ) -> None:
-    if shadow:
-        return
     archive_dir.mkdir(parents=True, exist_ok=True)
     safe = _safe_archive_name(request_id)
     if samples_path.is_file() and samples_path.stat().st_size > 0:
@@ -320,7 +400,8 @@ def _archive_and_truncate_buffer(
         if not path_df.empty:
             dest = archive_dir / f"qaccess_runtime_samples_{safe}_path{path_id}.csv"
             path_df.to_csv(dest, index=False)
-        _remove_path_rows_from_csv(samples_path, path_id)
+        if not shadow:
+            _remove_path_rows_from_csv(samples_path, path_id)
     if request_path.is_file():
         _ensure_path_writable(request_path)
         req_dest = archive_dir / f"qaccess_update_request_{safe}.json"
@@ -590,6 +671,10 @@ def _process_request(
         cur_gamma=cur_gamma,
         fixed_gamma=fixed_gamma,
     )
+    non_current_candidates = [row for row in candidates if not row["is_current"]]
+    best_non_current = max(non_current_candidates, key=lambda row: row["mean_prediction"])
+    unique_prediction_count = len({float(row["mean_prediction"]) for row in candidates})
+    best_non_current_gain = float(best_non_current["mean_prediction"] - pred_current)
 
     improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
         target_mode,
@@ -607,9 +692,10 @@ def _process_request(
         applied_gamma = fixed_gamma
 
     mean_gain_before, mean_backoff_before = _mean_gain_backoff(samples, cur_alpha, cur_beta, cur_gamma)
-    final_alpha = applied_alpha if improvement_ok else cur_alpha
-    final_beta = applied_beta if improvement_ok else cur_beta
-    final_gamma = applied_gamma if improvement_ok else cur_gamma
+    active_update = improvement_ok and not shadow
+    final_alpha = applied_alpha if active_update else cur_alpha
+    final_beta = applied_beta if active_update else cur_beta
+    final_gamma = applied_gamma if active_update else cur_gamma
     mean_gain_after, mean_backoff_after = _mean_gain_backoff(samples, final_alpha, final_beta, final_gamma)
 
     ts_ms = int(time.time() * 1000)
@@ -619,6 +705,7 @@ def _process_request(
     reason = str(req.get("reason") or "")
     n_samples = int(len(samples))
 
+    execution_mode = "shadow" if shadow else "active"
     response: dict[str, Any] = {
         "request_id": request_id,
         "path_id": path_id,
@@ -628,7 +715,19 @@ def _process_request(
         "n_samples": n_samples,
         "run_id": run_id,
         "target_mode": target_mode,
+        "execution_mode": execution_mode,
         "shadow": shadow,
+        "shadow_mode": shadow,
+        "would_apply": bool(improvement_ok),
+        "candidate_count": len(candidates),
+        "unique_prediction_count": unique_prediction_count,
+        "best_non_current_coefficients": {
+            "alpha": best_non_current["alpha"],
+            "beta": best_non_current["beta"],
+            "gamma": best_non_current["gamma"],
+        },
+        "best_non_current_prediction": best_non_current["mean_prediction"],
+        "best_non_current_gain": best_non_current_gain,
         "pred_current": pred_current,
         "pred_best": pred_best,
         "score_gain": score_gain,
@@ -645,6 +744,11 @@ def _process_request(
         "final_alpha": final_alpha,
         "final_beta": final_beta,
         "final_gamma": final_gamma,
+        "proposed_stepped_coefficients": {
+            "alpha": applied_alpha,
+            "beta": applied_beta,
+            "gamma": applied_gamma,
+        },
         "mean_gain_before": mean_gain_before,
         "mean_gain_after": mean_gain_after,
         "mean_backoff_before": mean_backoff_before,
@@ -701,7 +805,6 @@ def _process_request(
         "fixed_gamma": fixed_gamma if fixed_gamma is not None else "",
     })
 
-    active_update = improvement_ok and not shadow
     if active_update:
         backup_path = _save_coeffs_backup(coeffs_out, archive_dir, request_id, prev_coeffs_out)
         metadata = {
@@ -733,6 +836,7 @@ def _process_request(
             metadata=metadata,
         )
         response.update({
+            "status": "APPLIED",
             "alpha": applied_alpha,
             "beta": applied_beta,
             "gamma": applied_gamma,
@@ -746,17 +850,29 @@ def _process_request(
         _worker_log_line(
             log_file,
             {
+                "timestamp_ms": ts_ms,
                 "request_id": request_id,
                 "target_mode": target_mode,
                 "path_id": path_id,
+                "selected_path": path_id,
+                "execution_mode": execution_mode,
+                "shadow_mode": shadow,
                 "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
                 "candidate_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
+                "proposed_raw_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
+                "proposed_stepped_coefficients": {
+                    "alpha": applied_alpha, "beta": applied_beta, "gamma": applied_gamma,
+                },
                 "applied_coefficients": {"alpha": applied_alpha, "beta": applied_beta, "gamma": applied_gamma},
+                "would_apply": True,
+                "candidate_count": len(candidates),
+                "unique_score_count": unique_prediction_count,
+                "unique_prediction_count": unique_prediction_count,
                 "pred_current": pred_current,
                 "pred_best": pred_best,
                 "score_gain": score_gain_bps if score_gain_bps is not None else score_gain,
                 "gate_threshold": gate_threshold,
-                "status": "UPDATED",
+                "status": "APPLIED",
                 "skip_reason": "",
             },
         )
@@ -766,16 +882,36 @@ def _process_request(
             "beta": cur_beta,
             "gamma": cur_gamma,
         })
-        status = "SHADOW" if shadow else "SKIPPED"
+        status = "SHADOW_WOULD_APPLY" if shadow and improvement_ok else ("SHADOW_SKIPPED" if shadow else "SKIPPED")
+        response["status"] = status
         _worker_log_line(
             log_file,
             {
+                "timestamp_ms": ts_ms,
                 "request_id": request_id,
                 "target_mode": target_mode,
                 "path_id": path_id,
+                "selected_path": path_id,
+                "execution_mode": execution_mode,
+                "shadow_mode": shadow,
                 "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
                 "candidate_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
+                "proposed_raw_coefficients": {"alpha": best_alpha, "beta": best_beta, "gamma": best_gamma},
                 "applied_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+                "proposed_stepped_coefficients": {
+                    "alpha": applied_alpha, "beta": applied_beta, "gamma": applied_gamma,
+                },
+                "would_apply": bool(improvement_ok),
+                "candidate_count": len(candidates),
+                "unique_score_count": unique_prediction_count,
+                "unique_prediction_count": unique_prediction_count,
+                "best_non_current_coefficients": {
+                    "alpha": best_non_current["alpha"],
+                    "beta": best_non_current["beta"],
+                    "gamma": best_non_current["gamma"],
+                },
+                "best_non_current_prediction": best_non_current["mean_prediction"],
+                "best_non_current_gain": best_non_current_gain,
                 "pred_current": pred_current,
                 "pred_best": pred_best,
                 "score_gain": score_gain_bps if score_gain_bps is not None else score_gain,
@@ -793,20 +929,20 @@ def _process_request(
         state["last_processed_request_id"] = request_id
         _save_state(state_path, state)
 
-        try:
-            _archive_and_truncate_buffer(
-                samples_path,
-                archive_dir,
-                request_id,
-                request_path,
-                path_id,
-                shadow=shadow,
-            )
-        except (OSError, PermissionError) as exc:
-            print(
-                f"[worker] warning: archive/truncate failed for request_id={request_id} path_id={path_id}: {exc}",
-                file=sys.stderr,
-            )
+    try:
+        _archive_and_truncate_buffer(
+            samples_path,
+            archive_dir,
+            request_id,
+            request_path,
+            path_id,
+            shadow=shadow,
+        )
+    except (OSError, PermissionError) as exc:
+        print(
+            f"[worker] warning: archive/truncate failed for request_id={request_id} path_id={path_id}: {exc}",
+            file=sys.stderr,
+        )
     atomic_write_json(response_out, response)
     return True
 
@@ -816,6 +952,7 @@ def main() -> None:
     ap.add_argument("--request", type=Path, default=DEFAULT_REQUEST)
     ap.add_argument("--runtime-samples", type=Path, default=DEFAULT_SAMPLES)
     ap.add_argument("--model", type=Path, default=DEFAULT_MODEL)
+    ap.add_argument("--model-metadata", type=Path, default=DEFAULT_MODEL_METADATA)
     ap.add_argument("--coeffs-out", type=Path, default=DEFAULT_COEFFS)
     ap.add_argument("--response-out", type=Path, default=DEFAULT_RESPONSE)
     ap.add_argument("--state", type=Path, default=DEFAULT_STATE)
@@ -866,6 +1003,11 @@ def main() -> None:
     )
     ap.add_argument("--once", action="store_true", help="Process one request if present, then exit")
     ap.add_argument(
+        "--validate-model-only",
+        action="store_true",
+        help="Validate model metadata, target and feature compatibility, print JSON, then exit",
+    )
+    ap.add_argument(
         "--dry-run",
         action="store_true",
         help="Alias for --shadow-per-subflow --once",
@@ -897,8 +1039,12 @@ def main() -> None:
             else f"min_relative_delta_gain={args.min_relative_delta_gain}"
         )
     )
-    if not args.model.is_file():
-        raise FileNotFoundError(f"missing model {args.model.resolve()}")
+    model_path = args.model.resolve()
+    metadata_path = args.model_metadata.resolve()
+    provenance = validate_model_configuration(model_path, metadata_path, args.target_mode)
+    if args.validate_model_only:
+        print(json.dumps(provenance, sort_keys=True))
+        return
     _assert_runtime_coeffs_path(args.coeffs_out.resolve())
     load_coeffs_doc(args.coeffs_out.resolve())
 
@@ -917,14 +1063,25 @@ def main() -> None:
             "pid": os.getpid(),
             "request": str(args.request.resolve()),
             "runtime_samples": str(args.runtime_samples.resolve()),
-            "model": str(args.model.resolve()),
+            "model": str(model_path),
+            "resolved_model_path": str(model_path),
+            "model_target": provenance["model_target"],
+            "verified_model_target": provenance["verified_model_target"],
+            "requested_target_mode": args.target_mode,
+            "compatibility_status": "compatible",
+            "model_target_compatible": provenance["model_target_compatible"],
+            "model_training_rows": provenance["model_training_rows"],
+            "model_features": provenance["model_features"],
+            "model_metadata": provenance["model_metadata"],
             "coeffs_out": str(args.coeffs_out.resolve()),
             "response_out": str(args.response_out.resolve()),
             "state": str(args.state.resolve()),
             "archive_dir": str(args.archive_dir.resolve()),
             "target_mode": args.target_mode,
+            "execution_mode": "shadow" if shadow else "active",
             "gate": gate_desc,
             "shadow": shadow,
+            "shadow_mode": shadow,
             "fixed_gamma": fixed_gamma,
         },
     )
