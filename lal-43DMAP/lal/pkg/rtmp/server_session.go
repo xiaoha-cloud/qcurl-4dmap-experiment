@@ -10,6 +10,7 @@ package rtmp
 
 import (
 	"fmt"
+	quic "github.com/lucas-clemente/quic-go"
 	"net"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ import (
 )
 
 // TODO chef: 没有进化成Pub Sub时的超时释放
-func initLog(filename string ) {
+func initLog(filename string) {
 	_ = nazalog.Init(func(option *nazalog.Option) {
 		option.AssertBehavior = nazalog.AssertFatal
 		option.Filename = filename
@@ -77,20 +78,21 @@ type ServerSession struct {
 	avObserver PubSessionObserver
 
 	// only for SubSession
-	IsFresh bool
+	IsFresh          bool
+	phase2Controller quic.Phase2SessionController
 }
 
 func NewServerSession(observer ServerSessionObserver, conn net.Conn) *ServerSession {
-//func NewServerSession(observer ServerSessionObserver, conn quic.Stream) *ServerSession {
+	//func NewServerSession(observer ServerSessionObserver, conn quic.Stream) *ServerSession {
 	uk := base.GenUKRTMPServerSession()
 	s := &ServerSession{
 		conn: connection.New(conn, func(option *connection.Option) {
 			option.ReadBufSize = readBufSize
 		}),
 		stat: base.StatSession{
-			Protocol:   base.ProtocolRTMP,
-			SessionID:  uk,
-			StartTime:  time.Now().Format("2006-01-02 15:04:05.999"),
+			Protocol:  base.ProtocolRTMP,
+			SessionID: uk,
+			StartTime: time.Now().Format("2006-01-02 15:04:05.999"),
 			//RemoteAddr: conn.RemoteAddr().String(),
 		},
 		uniqueKey:     uk,
@@ -100,8 +102,32 @@ func NewServerSession(observer ServerSessionObserver, conn net.Conn) *ServerSess
 		packer:        NewMessagePacker(),
 		IsFresh:       true,
 	}
+	if controller, ok := conn.(quic.Phase2SessionController); ok {
+		s.phase2Controller = controller
+	}
 	//nazalog.Infof("[%s] lifecycle new rtmp ServerSession. session=%p, remote addr=%s", uk, s, conn.RemoteAddr().String())
 	return s
+}
+
+func (s *ServerSession) ConfigurePhase2(cfg quic.Phase2SessionConfig) error {
+	if s.phase2Controller == nil {
+		return fmt.Errorf("RTMP session %s transport does not support Phase 2", s.uniqueKey)
+	}
+	return s.phase2Controller.ConfigurePhase2(cfg)
+}
+
+func (s *ServerSession) DisablePhase2() error {
+	if s.phase2Controller == nil {
+		return nil
+	}
+	return s.phase2Controller.DisablePhase2()
+}
+
+func (s *ServerSession) Phase2ConnectionID() string {
+	if s.phase2Controller == nil {
+		return ""
+	}
+	return s.phase2Controller.Phase2ConnectionID()
 }
 
 func (s *ServerSession) RunLoop() (err error) {
@@ -111,39 +137,39 @@ func (s *ServerSession) RunLoop() (err error) {
 	}
 	//cx add:for measurement
 	go func() {
-		var(
+		var (
 			total_rd_bitrate float64
 			total_wr_bitrate float64
-			dur 	time.Duration
+			dur              time.Duration
 		)
 		iter := 0
-		total_rd_bitrate =float64(0.0)
-		total_wr_bitrate=float64(0.0)
-		
+		total_rd_bitrate = float64(0.0)
+		total_wr_bitrate = float64(0.0)
+
 		t := time.Now()
 		now := time.Now()
-		
+
 		dur = now.Sub(t)
-		t = now 
+		t = now
 		s.UpdateStatFloat(dur.Seconds())
-		for{
+		for {
 			now = time.Now()
 			dur = now.Sub(t)
-			t = now 
+			t = now
 			s.UpdateStatFloat(dur.Seconds())
 			stat := s.GetStat()
-			
-			nazalog.Debugf("rd bitrate:%f Mbps",stat.ReadBitrateF)
-			nazalog.Debugf("wr bitrate:%f Mbps",stat.WriteBitrateF)
+
+			nazalog.Debugf("rd bitrate:%f Mbps", stat.ReadBitrateF)
+			nazalog.Debugf("wr bitrate:%f Mbps", stat.WriteBitrateF)
 			time.Sleep(time.Second)
 			iter += 1
 			total_rd_bitrate += stat.ReadBitrateF
 			total_wr_bitrate += stat.WriteBitrateF
-			if(iter%10==0){
-					nazalog.Infof("mean read bitrate:%f Mbps",total_rd_bitrate/float64(iter))
-					nazalog.Infof("mean write bitrate:%f Mbps",total_wr_bitrate/float64(iter))
+			if iter%10 == 0 {
+				nazalog.Infof("mean read bitrate:%f Mbps", total_rd_bitrate/float64(iter))
+				nazalog.Infof("mean write bitrate:%f Mbps", total_wr_bitrate/float64(iter))
 			}
-			}
+		}
 	}()
 	return s.runReadLoop()
 }
@@ -197,12 +223,12 @@ func (s *ServerSession) UpdateStat(intervalSec uint32) {
 	s.prevConnStat = currStat
 }
 
-//cx add
+// cx add
 func (s *ServerSession) UpdateStatFloat(intervalSec float64) {
-	
+
 	currStat := s.conn.GetStat()
 	rDiff := currStat.ReadBytesSum - s.prevConnStat.ReadBytesSum
-	s.stat.ReadBitrateF = float64(rDiff) * 8 / 1024 / 1024/ intervalSec
+	s.stat.ReadBitrateF = float64(rDiff) * 8 / 1024 / 1024 / intervalSec
 	wDiff := currStat.WroteBytesSum - s.prevConnStat.WroteBytesSum
 	s.stat.WriteBitrateF = float64(wDiff) * 8 / 1024 / 1024 / intervalSec
 	switch s.t {

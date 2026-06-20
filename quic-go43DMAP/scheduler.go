@@ -1,81 +1,84 @@
 package quic
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	//"fmt"
-	"sync"
 	"github.com/lucas-clemente/quic-go/ackhandler"
 	"github.com/lucas-clemente/quic-go/internal/protocol"
 	"github.com/lucas-clemente/quic-go/internal/utils"
 	"github.com/lucas-clemente/quic-go/internal/wire"
+	"sync"
 )
 
 type scheduler struct {
 	// XXX Currently round-robin based, inspired from MPTCP scheduler
-	quotas map[protocol.PathID]uint
-	SchedulerName string
-	OriginScheduler string
-	waiting    uint64
-	redundancy protocol.ByteCount
-	redundancy_data []byte
+	quotas                      map[protocol.PathID]uint
+	SchedulerName               string
+	OriginScheduler             string
+	waiting                     uint64
+	redundancy                  protocol.ByteCount
+	redundancy_data             []byte
 	redundancy_stream_off_start protocol.ByteCount
-	redundancy_stream_off_end protocol.ByteCount
-	monitor           *monitor
-	utilityController *UtilityController
+	redundancy_stream_off_end   protocol.ByteCount
+	monitor                     *monitor
+	utilityController           *UtilityController
+	phase2Mu                    sync.Mutex
+	phase2Identity              *Phase2SessionConfig
 	// Flag of current network status
-	Flag_beginining bool
-	Flag_bw_unenough bool
+	Flag_beginining    bool
+	Flag_bw_unenough   bool
 	Flag_high_lossrate bool
 
 	lastpath protocol.PathID
 
-
-	delta_gap map[protocol.PathID]int
-	totalruntime int64
+	delta_gap      map[protocol.PathID]int
+	totalruntime   int64
 	totalpacketnum int64
-	CWNDFlag bool				// cx designed for always no cwnd control, but now abandon it.
+	CWNDFlag       bool // cx designed for always no cwnd control, but now abandon it.
 
-	config *Config // session config; used for utility mode + [meta] once
+	config     *Config // session config; used for utility mode + [meta] once
 	metaLogged bool
 }
-type monitor struct{
+type monitor struct {
 	// separate path statis
 
 	mutex sync.Mutex
 
-	state_owd map[protocol.PathID] time.Duration
-	state_bw map[protocol.PathID] int64
-	state_cwnd map[protocol.PathID] int64
-	state_loss  map[protocol.PathID] float64
-	state_inflight map[protocol.PathID] int64
-	state_serverinx map[protocol.PathID] int64
+	state_owd       map[protocol.PathID]time.Duration
+	state_bw        map[protocol.PathID]int64
+	state_cwnd      map[protocol.PathID]int64
+	state_loss      map[protocol.PathID]float64
+	state_inflight  map[protocol.PathID]int64
+	state_serverinx map[protocol.PathID]int64
 	// whole network statis
-	totalbw float64
-	lackbw bool
-	totalcwnd int64
+	totalbw      float64
+	lackbw       bool
+	totalcwnd    int64
 	retransBytes protocol.ByteCount
 
 	//content analyzer
 	bitrate float64
-	fps float64
+	fps     float64
 
 	// utility controller (reference from scheduler)
 	utilityController *UtilityController
 }
 
 func (m *monitor) setup() {
-	m.state_owd = make(map[protocol.PathID] time.Duration)
-	m.state_bw = make(map[protocol.PathID] int64)
-	m.state_cwnd = make(map[protocol.PathID] int64)
-	m.state_loss = make(map[protocol.PathID] float64)
-	m.state_inflight = make(map[protocol.PathID] int64)
-	m.state_serverinx = make(map[protocol.PathID] int64)
+	m.state_owd = make(map[protocol.PathID]time.Duration)
+	m.state_bw = make(map[protocol.PathID]int64)
+	m.state_cwnd = make(map[protocol.PathID]int64)
+	m.state_loss = make(map[protocol.PathID]float64)
+	m.state_inflight = make(map[protocol.PathID]int64)
+	m.state_serverinx = make(map[protocol.PathID]int64)
 	m.totalbw = 0
 	m.fps = 25
-	m.bitrate = ( 18504 * 1000 ) / 8 
+	m.bitrate = (18504 * 1000) / 8
 	m.lackbw = false
-
 
 }
 
@@ -83,7 +86,7 @@ func (m *monitor) setup() {
 // Supported final modes: baseline/off, qaccess_collect, qaccess_t.
 func utilityModeFromConfig(cfg *Config) UtilityMode {
 	if cfg == nil || cfg.UtilityMode == "" {
-		return ModeQAccessT
+		return ModeBaseline
 	}
 	switch strings.ToLower(strings.TrimSpace(cfg.UtilityMode)) {
 	case "baseline", "off", "none", "disable":
@@ -96,14 +99,14 @@ func utilityModeFromConfig(cfg *Config) UtilityMode {
 		utils.Infof("[qaccess_collect] qaccess_t_collect is deprecated; use qaccess_collect")
 		return ModeQAccessCollect
 	default:
-		utils.Infof("[qaccess_t] utility-mode=%q is deprecated and not part of final Q-ACCeSS modes; supported modes are baseline, qaccess_collect, qaccess_t; defaulting to qaccess_t", cfg.UtilityMode)
-		return ModeQAccessT
+		utils.Infof("[qaccess_t] unsupported utility-mode=%q; Phase 2 disabled", cfg.UtilityMode)
+		return ModeBaseline
 	}
 }
 
 func isUtilityBaseline(cfg *Config) bool {
 	if cfg == nil || cfg.UtilityMode == "" {
-		return false
+		return true
 	}
 	switch strings.ToUpper(strings.TrimSpace(cfg.UtilityMode)) {
 	case "BASELINE", "OFF", "NONE", "DISABLE":
@@ -119,15 +122,15 @@ func (sch *scheduler) setup() {
 	sch.quotas = make(map[protocol.PathID]uint)
 	sch.waiting = 0
 	sch.redundancy = 0
-	if isUtilityBaseline(sch.config) {
-		sch.utilityController = nil
+	mode := utilityModeFromConfig(sch.config)
+	if mode == ModeQAccessCollect {
+		sch.utilityController = NewUtilityController(mode, sch.config.ExperimentRunID)
+	} else if mode == ModeQAccessT && sch.config != nil && sch.config.Phase2Enabled && sch.config.Phase2Owner && sch.config.EndpointRole == Phase2OwnerRole && filepath.IsAbs(sch.config.Phase2StateDir) {
+		identity := Phase2SessionConfig{Enabled: true, Owner: true, EndpointRole: sch.config.EndpointRole, StateDir: sch.config.Phase2StateDir, RunID: sch.config.ExperimentRunID}
+		phase2 := loadQAccessPhase2ConfigForSession(identity, "")
+		sch.utilityController = newUtilityController(mode, identity.RunID, phase2)
 	} else {
-		mode := utilityModeFromConfig(sch.config)
-		runID := ""
-		if sch.config != nil {
-			runID = sch.config.ExperimentRunID
-		}
-		sch.utilityController = NewUtilityController(mode, runID)
+		sch.utilityController = nil
 	}
 	sch.monitor = &monitor{}
 	sch.monitor.utilityController = sch.utilityController
@@ -155,6 +158,52 @@ func (sch *scheduler) setup() {
 	}
 }
 
+func (sch *scheduler) configurePhase2(identity Phase2SessionConfig, connectionID string) error {
+	sch.phase2Mu.Lock()
+	defer sch.phase2Mu.Unlock()
+	if !identity.Enabled || !identity.Owner || identity.EndpointRole != Phase2OwnerRole {
+		return fmt.Errorf("phase2 owner identity rejected: enabled=%t owner=%t role=%q", identity.Enabled, identity.Owner, identity.EndpointRole)
+	}
+	if !filepath.IsAbs(identity.StateDir) {
+		return fmt.Errorf("phase2 state dir must be absolute: %q", identity.StateDir)
+	}
+	if sch.phase2Identity != nil {
+		if *sch.phase2Identity == identity {
+			return nil
+		}
+		return fmt.Errorf("phase2 controller already configured for rtmp_session_id=%s", sch.phase2Identity.RTMPSessionID)
+	}
+	phase2 := loadQAccessPhase2ConfigForSession(identity, connectionID)
+	controller := newUtilityController(ModeQAccessT, identity.RunID, phase2)
+	if !controller.phase2MutationAllowed() {
+		return fmt.Errorf("phase2 mutation guard rejected owner identity")
+	}
+	sch.utilityController = controller
+	if sch.monitor != nil {
+		sch.monitor.mutex.Lock()
+		sch.monitor.utilityController = controller
+		sch.monitor.mutex.Unlock()
+	}
+	copyIdentity := identity
+	sch.phase2Identity = &copyIdentity
+	utils.Infof("[phase2_session] pid=%d endpoint_role=%s phase2_enabled=true phase2_owner=true phase2_state_dir=%s controller_created=true run_id=%s connection_id=%s rtmp_session_id=%s stream_key=%s", os.Getpid(), identity.EndpointRole, identity.StateDir, identity.RunID, connectionID, identity.RTMPSessionID, identity.StreamKey)
+	return nil
+}
+
+func (sch *scheduler) disablePhase2() error {
+	sch.phase2Mu.Lock()
+	defer sch.phase2Mu.Unlock()
+	if sch.phase2Identity != nil {
+		return fmt.Errorf("cannot disable active phase2 owner rtmp_session_id=%s", sch.phase2Identity.RTMPSessionID)
+	}
+	sch.utilityController = nil
+	if sch.monitor != nil {
+		sch.monitor.mutex.Lock()
+		sch.monitor.utilityController = nil
+		sch.monitor.mutex.Unlock()
+	}
+	return nil
+}
 
 func (sch *scheduler) getRetransmission(s *session) (hasRetransmission bool, retransmitPacket *ackhandler.Packet, pth *path) {
 	// check for retransmissions first
@@ -233,7 +282,7 @@ pathLoop:
 	for pathID, pth := range s.paths {
 		// Don't block path usage if we retransmit, even on another path
 		if !hasRetransmission && !pth.SendingAllowed(sch.CWNDFlag) {
-		//if !hasRetransmission && !sch.CWNDFlag {
+			//if !hasRetransmission && !sch.CWNDFlag {
 			continue pathLoop
 		}
 
@@ -263,8 +312,6 @@ pathLoop:
 
 }
 
-
-
 func (sch *scheduler) selectPathDispatch(s *session, hasRetransmission bool, hasStreamRetransmission bool, fromPth *path) *path {
 	var sndPath *path
 	if sch.quotas == nil {
@@ -281,12 +328,11 @@ func (sch *scheduler) selectPathDispatch(s *session, hasRetransmission bool, has
 
 	var selectedPath *path
 
-
 pathLoop:
 	for pathID, pth := range s.paths {
 		// Don't block path usage if we retransmit, even on another path
 		if !hasRetransmission && !pth.SendingAllowed(sch.CWNDFlag) {
-		//if !hasRetransmission && !sch.CWNDFlag {
+			//if !hasRetransmission && !sch.CWNDFlag {
 			continue pathLoop
 		}
 
@@ -300,20 +346,20 @@ pathLoop:
 			continue pathLoop
 		}
 
-		if pathID ==  sch.lastpath {
+		if pathID == sch.lastpath {
 			sndPath = pth
-	
-		}else{
+
+		} else {
 			selectedPath = pth
 		}
 	}
 	if selectedPath != nil {
 		sch.lastpath = selectedPath.pathID
-	}else if selectedPath == nil && sndPath != nil{
-		sch.lastpath = sndPath.pathID 
+	} else if selectedPath == nil && sndPath != nil {
+		sch.lastpath = sndPath.pathID
 		selectedPath = sndPath
 	}
-	utils.Infof("select path %v,",selectedPath)
+	utils.Infof("select path %v,", selectedPath)
 	return selectedPath
 
 }
@@ -456,9 +502,9 @@ pathLoop:
 		// if lowerLOSS != 0 && currentLOSS == 0 {
 		// 	continue pathLoop
 		// }
-		utils.Infof("[sch-loss] currtt :%v, curloss:%v, lowerLOss:%v", currentRTT,currentLOSS, lowerLOSS)
+		utils.Infof("[sch-loss] currtt :%v, curloss:%v, lowerLOss:%v", currentRTT, currentLOSS, lowerLOSS)
 		if (currentRTT != 0 && currentLOSS == 0) || (currentRTT != 0 && currentLOSS <= lowerLOSS) {
-			if(currentLOSS == lowerLOSS && currentRTT > lowerRTT){
+			if currentLOSS == lowerLOSS && currentRTT > lowerRTT {
 				continue pathLoop
 			}
 			lowerLOSS = currentLOSS
@@ -468,7 +514,7 @@ pathLoop:
 			//utils.Infof("[sch-loss] hi")
 		}
 		// Case if we have multiple paths unprobed
-		
+
 		if currentRTT == 0 {
 			currentQuota, ok := sch.quotas[pathID]
 			if !ok {
@@ -490,7 +536,7 @@ pathLoop:
 		// selectedPath = pth
 		// selectedPathID = pathID
 	}
-	utils.Infof("[sch-loss] %v",selectedPathID)
+	utils.Infof("[sch-loss] %v", selectedPathID)
 	return selectedPath
 }
 
@@ -597,10 +643,10 @@ pathLoop:
 	cwndBest := uint64(bestPath.sentPacketHandler.GetCWND())
 	FirstCo := uint64(protocol.DefaultTCPMSS) * uint64(secondLowerRTT) * (cwndBest*2*uint64(lowerRTT) + uint64(secondLowerRTT) - uint64(lowerRTT))
 	BSend, _ := s.flowControlManager.SendWindowSize(protocol.StreamID(5))
-	SecondCo := 2 * 1 * uint64(lowerRTT) * uint64(lowerRTT) * (uint64(BSend) - (uint64(secondBestPath.sentPacketHandler.GetBytesInflight())+uint64(protocol.DefaultTCPMSS)))
+	SecondCo := 2 * 1 * uint64(lowerRTT) * uint64(lowerRTT) * (uint64(BSend) - (uint64(secondBestPath.sentPacketHandler.GetBytesInflight()) + uint64(protocol.DefaultTCPMSS)))
 
-	if (FirstCo > SecondCo) {
-		return nil		
+	if FirstCo > SecondCo {
+		return nil
 	} else {
 		return secondBestPath
 	}
@@ -732,17 +778,17 @@ pathLoop:
 
 	lhs := uint64(lowerRTT) * (xBest + cwndBest)
 	rhs := cwndBest * (uint64(secondLowerRTT) + delta)
-	if (lhs * 4) < ((rhs * 4) + sch.waiting*rhs){
+	if (lhs * 4) < ((rhs * 4) + sch.waiting*rhs) {
 		xSecond := queueSize
 		if queueSize < cwndSecond {
 			xSecond = cwndSecond
 		}
 		lhsSecond := uint64(secondLowerRTT) * xSecond
 		rhsSecond := cwndSecond * (2*uint64(lowerRTT) + delta)
-		if (lhsSecond > rhsSecond) {
-				sch.waiting = 1
-			    return nil
-		} 
+		if lhsSecond > rhsSecond {
+			sch.waiting = 1
+			return nil
+		}
 	} else {
 		sch.waiting = 0
 	}
@@ -750,8 +796,7 @@ pathLoop:
 	return secondBestPath
 }
 
-
-func (sch *scheduler) computeHeterDegree(s *session) float64{
+func (sch *scheduler) computeHeterDegree(s *session) float64 {
 	// todo: compute the hetergenouse degree of multiple paths
 	maxOWD := float64(0)
 	minOWD := float64(99999)
@@ -762,56 +807,57 @@ func (sch *scheduler) computeHeterDegree(s *session) float64{
 	for _, pth := range s.paths {
 		OWD := float64(pth.rttStats.SmoothedRTT().Seconds() / 2)
 		BW := float64(pth.sentPacketHandler.GetBandwidthEstimate() / 1000000)
-		if OWD > maxOWD{
+		if OWD > maxOWD {
 			maxOWD = OWD
 		}
-		if OWD < minOWD{
+		if OWD < minOWD {
 			minOWD = OWD
 		}
-		if BW > maxBW{
+		if BW > maxBW {
 			maxBW = BW
 		}
-		if BW < minBW{
+		if BW < minBW {
 			minBW = BW
 		}
 	}
-	hete := float64(alpha * (maxOWD - minOWD) + beta * (maxBW - minBW))
-	utils.Infof("[sch-ss] heter:%v",hete)
+	hete := float64(alpha*(maxOWD-minOWD) + beta*(maxBW-minBW))
+	utils.Infof("[sch-ss] heter:%v", hete)
 	return hete
 }
 
-//cx add
+// cx add
 func (sch *scheduler) selectPathMoooKO(s *session, hasRetransmission bool, hasStreamRetransmission bool, fromPth *path) *path {
 	return nil
 }
+
 // Lock of s.paths must be held
 func (sch *scheduler) selectPath(s *session, hasRetransmission bool, hasStreamRetransmission bool, fromPth *path) *path {
 	// XXX Currently round-robin
 	// TODO select the right scheduler dynamically
 	//fmt.Println(sch.SchedulerName)
 	if sch.SchedulerName == "rtt" {
-		
+
 		return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	}else if sch.SchedulerName == "rr"{	
+	} else if sch.SchedulerName == "rr" {
 		return sch.selectPathRoundRobin(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	}else if sch.SchedulerName ==  "blest"{                                   //keep ordering algorithm
+	} else if sch.SchedulerName == "blest" { //keep ordering algorithm
 		return sch.selectBLEST(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	}else if sch.SchedulerName ==  "ecf"{                                   //keep ordering algorithm
+	} else if sch.SchedulerName == "ecf" { //keep ordering algorithm
 		return sch.selectECF(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	}else if sch.SchedulerName ==  "moooko"{                                   //keep ordering algorithm
+	} else if sch.SchedulerName == "moooko" { //keep ordering algorithm
 		return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
-	}else if sch.SchedulerName == "moooss"{                                    //select scheduler algorithm
+	} else if sch.SchedulerName == "moooss" { //select scheduler algorithm
 		heter_threshold := float64(50)
 		diff := sch.computeHeterDegree(s)
-        if diff < heter_threshold {                                              
+		if diff < heter_threshold {
 			return sch.selectPathRoundRobin(s, hasRetransmission, hasStreamRetransmission, fromPth)
-		}else{
+		} else {
 			return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
 		}
-	}else{
+	} else {
 		//fmt.Println("select else rtt")
 		return sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
-		
+
 		//return nil
 	}
 }
@@ -822,7 +868,7 @@ func (sch *scheduler) performPacketSendingSTMS(s *session, windowUpdateFrames []
 	if pth.sentPacketHandler.ShouldSendRetransmittablePacket() {
 		s.packer.QueueControlFrame(&wire.PingFrame{}, pth)
 	}
-	
+
 	packet, err := s.packer.PackPacketSTMS(pth, gap)
 	if err != nil || packet == nil {
 		return nil, false, err
@@ -867,19 +913,18 @@ func (sch *scheduler) performPacketSendingSTMS(s *session, windowUpdateFrames []
 
 	return pkt, true, nil
 }
-func  (sch *scheduler)performPacketSendingMOOO(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, gap map[uint8] int) (*ackhandler.Packet, bool, error) {
+func (sch *scheduler) performPacketSendingMOOO(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, gap map[uint8]int) (*ackhandler.Packet, bool, error) {
 	// add a retransmittable frame
 	if pth.sentPacketHandler.ShouldSendRetransmittablePacket() {
 		s.packer.QueueControlFrame(&wire.PingFrame{}, pth)
 	}
 
-	packet, err := s.packer.PackPacketMOOO(pth,gap)
+	packet, err := s.packer.PackPacketMOOO(pth, gap)
 	if err != nil || packet == nil {
-		utils.Infof("[sc]pack err %v",err)
+		utils.Infof("[sc]pack err %v", err)
 		return nil, false, err
 	}
 
-	
 	if err = s.sendPackedPacket(packet, pth, true); err != nil {
 		utils.Infof("[sc]sent err %v", err)
 		return nil, false, err
@@ -922,16 +967,16 @@ func  (sch *scheduler)performPacketSendingMOOO(s *session, windowUpdateFrames []
 	return pkt, true, nil
 }
 
-func (sch *scheduler)performPacketSendingRedundancy(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, isfirst bool) (*ackhandler.Packet, bool, error) {
+func (sch *scheduler) performPacketSendingRedundancy(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, isfirst bool) (*ackhandler.Packet, bool, error) {
 	// add a retransmittable frame
 	if pth.sentPacketHandler.ShouldSendRetransmittablePacket() {
 		s.packer.QueueControlFrame(&wire.PingFrame{}, pth)
 	}
-	packet, err := s.packer.PackPacketRedundancy(pth,isfirst)
+	packet, err := s.packer.PackPacketRedundancy(pth, isfirst)
 	if err != nil || packet == nil {
 		return nil, false, err
 	}
-	
+
 	if err = s.sendPackedPacket(packet, pth, isfirst); err != nil {
 		return nil, false, err
 	}
@@ -973,14 +1018,13 @@ func (sch *scheduler)performPacketSendingRedundancy(s *session, windowUpdateFram
 	return pkt, true, nil
 }
 
-
 // Complete Redundancy(RDDT) for comparision
-func (sch *scheduler)performPacketSendingRDDT(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, isfirst bool) (*ackhandler.Packet, bool, error) {
+func (sch *scheduler) performPacketSendingRDDT(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path, isfirst bool) (*ackhandler.Packet, bool, error) {
 	// add a retransmittable frame
 	if pth.sentPacketHandler.ShouldSendRetransmittablePacket() {
 		s.packer.QueueControlFrame(&wire.PingFrame{}, pth)
 	}
-	packet, err := s.packer.PackPacketRedundancy(pth,isfirst)
+	packet, err := s.packer.PackPacketRedundancy(pth, isfirst)
 	if err != nil || packet == nil {
 		return nil, false, err
 	}
@@ -1025,6 +1069,7 @@ func (sch *scheduler)performPacketSendingRDDT(s *session, windowUpdateFrames []*
 
 	return pkt, true, nil
 }
+
 // Lock of s.paths must be free (in case of log print)
 func (sch *scheduler) performPacketSending(s *session, windowUpdateFrames []*wire.WindowUpdateFrame, pth *path) (*ackhandler.Packet, bool, error) {
 	// add a retransmittable frame
@@ -1116,7 +1161,7 @@ func (sch *scheduler) ackRemainingPaths(s *session, totalWindowUpdateFrames []*w
 			if err != nil {
 				return err
 			}
-			err = s.sendPackedPacket(packet, pthTmp,true)
+			err = s.sendPackedPacket(packet, pthTmp, true)
 			if err != nil {
 				return err
 			}
@@ -1125,21 +1170,22 @@ func (sch *scheduler) ackRemainingPaths(s *session, totalWindowUpdateFrames []*w
 	s.peerBlocked = false
 	return nil
 }
-//cx add 1221 for redundancy generation
-func (sch *scheduler) generateRedundancy(s *session, state map[protocol.PathID] int64) {
+
+// cx add 1221 for redundancy generation
+func (sch *scheduler) generateRedundancy(s *session, state map[protocol.PathID]int64) {
 	// 1. get dataforwriting now
 	streams := s.streamsMap.streams
 	var datasize int
 	//var redundancy int
 	//var space int64
-	for i := uint32(0) ; i < uint32(len(streams)) ;i++{
+	for i := uint32(0); i < uint32(len(streams)); i++ {
 		streamID := s.streamsMap.openStreams[i]
-		str, _:= streams[streamID]
+		str, _ := streams[streamID]
 		datasize += len(str.dataForWriting)
 	}
-	utils.Infof("[str]unsentDataSize:%v",datasize)
+	utils.Infof("[str]unsentDataSize:%v", datasize)
 	// 2. get cwnd - inflight now
-	
+
 	// for pathID, _ := range s.paths {
 	// 	space += state[pathID]
 	// }
@@ -1149,17 +1195,16 @@ func (sch *scheduler) generateRedundancy(s *session, state map[protocol.PathID] 
 	// 4. send sub_buffer data into lower RTT paths.(how ? I? )
 }
 
+// cx add 1213
+func (sch *scheduler) sendPacketMooo(s *session) error {
 
-//cx add 1213
-func (sch *scheduler) sendPacketMooo(s *session) error{
-	
 	sch.monitor.isAtbegining(sch, s)
 	//utils.Infof("Here mooo \n\n")
 
 	var pth *path
 	alpha := 0.0
 	beta := 0.0
-	
+
 	// Update leastUnacked value of paths
 	s.pathsLock.RLock()
 	for _, pthTmp := range s.paths {
@@ -1173,23 +1218,23 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 	for _, wuf := range windowUpdateFrames {
 		s.packer.QueueControlFrame(wuf, pth)
 	}
-	
+
 	// Repeatedly try sending until we don't have any more data, or run out of the congestion window
 	for {
 		//coderuntimestart := time.Now().UnixNano() / 1000
 		//utils.Infof("\n\n\n")
 		// 1. origin: We first check for retransmissions
-		issent:=false
+		issent := false
 		var paths_init []*path
 		var firstpath *path
-		
+
 		sch.monitor.monitorCurrentSessionState(s)
 		hasRetransmission, retransmitHandshakePacket, fromPth := sch.getRetransmission(s)
 		// XXX There might still be some stream frames to be retransmitted
 		hasStreamRetransmission := s.streamFramer.HasFramesForRetransmission()
 		sch.monitor.monitorClear()
-		for i, pth := range s.paths{
-			if(i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag)){
+		for i, pth := range s.paths {
+			if i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) {
 				paths_init = append(paths_init, pth)
 			}
 			// 2. monitor return current state
@@ -1200,22 +1245,22 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			sch.monitor.monitorApplyUtility(pth)
 		}
 
-		if len(s.paths) <= 1{
+		if len(s.paths) <= 1 {
 			firstpath = s.paths[protocol.InitialPathID]
-			if !hasRetransmission && !firstpath.SendingAllowed(sch.CWNDFlag){
+			if !hasRetransmission && !firstpath.SendingAllowed(sch.CWNDFlag) {
 				windowUpdateFrames := s.getWindowUpdateFrames(false)
 				return sch.ackRemainingPaths(s, windowUpdateFrames)
 			}
-		}else{
-			if len(paths_init) == 0{
+		} else {
+			if len(paths_init) == 0 {
 				windowUpdateFrames := s.getWindowUpdateFrames(false)
 				return sch.ackRemainingPaths(s, windowUpdateFrames)
-			}else{
+			} else {
 				firstpath = paths_init[0]
 			}
 		}
-		
-		// 3. ordering 
+
+		// 3. ordering
 		path_order, _ := sch.orderPaths(s)
 		// Select the path here
 		//s.pathsLock.RLock()
@@ -1227,11 +1272,10 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 		// 	return sch.ackRemainingPaths(s, windowUpdateFrames)
 		// }
 
-
 		// If we have an handshake packet retransmission, do it directly
 		// 3. handle retransmission
 		if hasRetransmission && retransmitHandshakePacket != nil {
-			
+
 			s.packer.QueueControlFrame(s.paths[path_order[0]].sentPacketHandler.GetStopWaitingFrame(true), s.paths[path_order[0]])
 			packet, err := s.packer.PackHandshakeRetransmission(retransmitHandshakePacket, s.paths[path_order[0]])
 			if err != nil {
@@ -1243,14 +1287,11 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			continue
 		}
 
-
-		
-				
-		//4. stream-level statis: how much data will be  sched this turn																	
-		numStreams := uint32(len(s.streamsMap.streams))					
-		leftoverdataforwriting := 0  																 //total dataforwriting size have not been dispatched
-		dataineachstream := make(map[protocol.StreamID] int)	 //dataforwriting size in each stream
-		offineachstream := make(map[protocol.StreamID] protocol.ByteCount)	//writeoffset in each stream
+		//4. stream-level statis: how much data will be  sched this turn
+		numStreams := uint32(len(s.streamsMap.streams))
+		leftoverdataforwriting := 0                                       //total dataforwriting size have not been dispatched
+		dataineachstream := make(map[protocol.StreamID]int)               //dataforwriting size in each stream
+		offineachstream := make(map[protocol.StreamID]protocol.ByteCount) //writeoffset in each stream
 		retransBytes := 0
 		for j := uint32(0); j < numStreams; j++ {
 			// if(j == 1){
@@ -1261,101 +1302,99 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			leftoverdataforwriting += dataineachstream[streamID]
 			offineachstream[streamID] = s.streamsMap.streams[streamID].writeOffset
 		}
-		for r := 0 ; r < len(s.streamFramer.retransmissionQueue) ; r ++ {
+		for r := 0; r < len(s.streamFramer.retransmissionQueue); r++ {
 			retransBytes += len(s.streamFramer.retransmissionQueue[r].Data)
 		}
 		leftoverdataforwriting += retransBytes
 		utils.Infof("[sc]Dataforwriting size :%vB, retransBytes: %v avaliable:%vB", leftoverdataforwriting, retransBytes, sch.monitor.totalcwnd)
-	
 
-		// 6. *pro-discard for application layer 
-		gap := make(map[uint8] int)					//gap size between paths
+		// 6. *pro-discard for application layer
+		gap := make(map[uint8]int) //gap size between paths
 		sch.monitor.isBandwidthEnough(sch, leftoverdataforwriting, s)
 		sch.monitor.isHighlossrate(sch, s)
-		
+
 		// 7.compute needed gap between paths
 
 		//utils.Infof("[sch]------------------COMPUTE&POP--------------------")
 
 		var i int
 
-		for i = 0 ; ( i+1 ) < (len(path_order) - 1) ; i++ {			// -1 minus path 0 
+		for i = 0; (i + 1) < (len(path_order) - 1); i++ { // -1 minus path 0
 			inx := path_order[i]
 			inx1 := path_order[i+1]
 			rtt0 := sch.monitor.state_owd[protocol.PathID(inx)]
 			rtt1 := sch.monitor.state_owd[protocol.PathID(inx1)]
 			//bw0 := sch.monitor.state_bw[protocol.PathID(inx)]
-			cw0 := sch.monitor.state_cwnd[protocol.PathID(inx)]			
-			
+			cw0 := sch.monitor.state_cwnd[protocol.PathID(inx)]
+
 			var computed_needed int
 
 			// // solution 1. bw/alpha
-			// computed_needed = int(cw0) + int(((rtt1 - rtt0).Seconds() * float64(bw0)) / alpha) 
-			
+			// computed_needed = int(cw0) + int(((rtt1 - rtt0).Seconds() * float64(bw0)) / alpha)
+
 			// solution 2.
 
 			//sch.Adjustment(s.paths[path_order[i]], s.paths[path_order[i+1]])
-			
-			if(i == 0 && rtt1 == 0 ){					// if i == 0 gap rtt1 == 0, first path need to send
+
+			if i == 0 && rtt1 == 0 { // if i == 0 gap rtt1 == 0, first path need to send
 				computed_needed = leftoverdataforwriting
-			//	utils.Infof("[sch]Path %v	gap_needed all leftoverdataforwriting, because RTT is 0", inx)
+				//	utils.Infof("[sch]Path %v	gap_needed all leftoverdataforwriting, because RTT is 0", inx)
 				//sch.redundancy = protocol.ByteCount(0)
-			
-			}else{
-				
-				if(sch.monitor.state_serverinx[protocol.PathID(inx)] < -1000){
+
+			} else {
+
+				if sch.monitor.state_serverinx[protocol.PathID(inx)] < -1000 {
 					//alpha = float64( -sch.monitor.state_serverinx[protocol.PathID(inx)] / 10.0)
 					beta = 0.0
 					//alpha = 0.0
 					//sch.redundancy = 1312
-				}else if(sch.monitor.state_serverinx[protocol.PathID(inx)] > 10000){
+				} else if sch.monitor.state_serverinx[protocol.PathID(inx)] > 10000 {
 					//alpha = float64( -sch.monitor.state_serverinx[protocol.PathID(inx)] / 10.0)
-					
-					alpha =0.0
+
+					alpha = 0.0
 					//beta = float64( sch.monitor.state_serverinx[protocol.PathID(inx)] / 10.0)
 					sch.redundancy = 0
-					
-				}else{
+
+				} else {
 					sch.redundancy = 0
 					beta = 0.0
 					alpha = 0.0
 				}
 				//utils.Infof("alpha:%v beta:%v",alpha,beta)
-				
-				n := int( rtt1 / rtt0 )
-			
+
+				n := int(rtt1 / rtt0)
+
 				//inflight :=  int(s.paths[inx].data_insubbuffer) + int(s.paths[inx].sentPacketHandler.GetBytesInflight())
-				inflight :=  int(s.paths[inx].data_insubbuffer) 
-				for ; (leftoverdataforwriting + inflight) -  computed_needed > 0 && n > 0 ; {
-	
-					maxLen :=  protocol.ByteCount(cw0)
+				inflight := int(s.paths[inx].data_insubbuffer)
+				for (leftoverdataforwriting+inflight)-computed_needed > 0 && n > 0 {
+
+					maxLen := protocol.ByteCount(cw0)
 					computed_needed += int(maxLen)
 					n -= 1
 					//utils.Infof("[sch]Path %v	computed_needed %v, n %v", inx, computed_needed, n)
 				}
-	
+
 				computed_needed -= int(alpha)
 
-				if( computed_needed > inflight ){
+				if computed_needed > inflight {
 					computed_needed -= inflight
-					if ( computed_needed >= leftoverdataforwriting ){
+					if computed_needed >= leftoverdataforwriting {
 						computed_needed = leftoverdataforwriting
 					}
-				}else{
+				} else {
 					computed_needed = 0
 				}
 			}
-			
-			
+
 			//utils.Infof("[sch]Path %v	computed_needed %v, left_dataforwriting %v", inx, computed_needed, leftoverdataforwriting)
 
-			gap[uint8(inx)] = int(float64(computed_needed) )
-			if(gap[uint8(inx)] < 0){
+			gap[uint8(inx)] = int(float64(computed_needed))
+			if gap[uint8(inx)] < 0 {
 				gap[uint8(inx)] = 0
 			}
 			//utils.Infof("[sch]produce red:%v",sch.redundancy)
 			leftoverdataforwriting -= gap[uint8(inx)]
-			
+
 			// // solution 1
 			// gap_needed := int(0)
 			// utils.Infof("[sch]Path %v	computed_gap: %v, datainsubbuffer: %v, inflight: %v" ,inx, computed_needed,  s.paths[inx].data_insubbuffer, s.paths[inx].sentPacketHandler.GetBytesInflight())
@@ -1368,7 +1407,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// if gap_needed + int(s.paths[inx].data_insubbuffer) + int(s.paths[inx].sentPacketHandler.GetBytesInflight()) > computed_needed{
 			// 	utils.Infof("[sch]gap_needed should be reduced, because inflight and datainsubbuffer")
 			// 	gap_needed = computed_needed -  int(s.paths[inx].data_insubbuffer) - int(s.paths[inx].sentPacketHandler.GetBytesInflight())
-			// } 
+			// }
 			// if(i == 0 && rtt1 == 0){					// if i == 0 gap rtt1 == 0, first path need to send
 			// 	gap_needed = leftoverdataforwriting
 			// 	utils.Infof("[sch]Path %v	gap_needed all leftoverdataforwriting, because RTT is 0")
@@ -1383,24 +1422,24 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// utils.Infof("[sch]Path %v	gap_needed: %v, leftoverdataforwrting: %v", inx, gap_needed, leftoverdataforwriting)
 			// gap[uint8(inx)] = gap_needed
 			// needed_sum += gap_needed
-			
+
 			sch.assign_streamoff(s.paths[inx], s, dataineachstream, offineachstream, gap)
 			s.streamFramer.maybePopData(protocol.ByteCount(gap[uint8(inx)]), s.paths[inx], sch.redundancy, sch)
-			if(i == 0 && rtt1 == 0 ){					// if i == 0 gap rtt1 == 0, first path need to send
+			if i == 0 && rtt1 == 0 { // if i == 0 gap rtt1 == 0, first path need to send
 				break
 			}
 		}
 
 		//snd, _ := s.flowControlManager.SendWindowSize(protocol.StreamID(3))
-		//utils.Infof("[sch]send window:%v",snd)	
-		if(len(path_order) >= 2){
+		//utils.Infof("[sch]send window:%v",snd)
+		if len(path_order) >= 2 {
 			i = (len(path_order) - 2)
-		}else{
+		} else {
 			i = 0
 		}
 
-		if(path_order[i] != 0){
-			
+		if path_order[i] != 0 {
+
 			//utils.Infof("[sch]----------lastorder path:%v -----------", path_order[i])
 			/////////////////////////////////////////////////////////////////////
 			// if(s.paths[path_order[i]].rttStats.SmoothedRTT() == 0){
@@ -1409,7 +1448,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// }else{
 			// 	sch.redundancy = protocol.ByteCount(0)
 			// }
-		
+
 			// lenredundancy := len(sch.redundancy_data)
 			// utils.Infof("[sch]		redundancy: %v, red len: %v, start: %v, end: %v", sch.redundancy, lenredundancy, sch.redundancy_stream_off_start, sch.redundancy_stream_off_end)
 			// if(len(sch.redundancy_data) > 0){
@@ -1419,7 +1458,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// 		utils.Infof("[sch]		red from nil stream_off updated %v ", s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Front().Value)
 			// 		s.paths[path_order[i]].data_insubbuffer += protocol.ByteCount(lenredundancy)
 			// 		s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)] = append(s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)], sch.redundancy_data...)
-					
+
 			// 	}else{
 			// 		//utils.Infof("[sch]		red last %v", s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Back().Value)
 			// 		last_off := s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Back()
@@ -1427,59 +1466,57 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// 			s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Back().Value.End += protocol.ByteCount(lenredundancy)
 			// 			utils.Infof("[sch]		red stream_off updated, cnt:%v, front:%v, back:%v", s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Len(), s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Front(), s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Back())
 			// 			s.paths[path_order[i]].data_insubbuffer += protocol.ByteCount(lenredundancy)
-			// 			s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)] = append(s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)], sch.redundancy_data...)			
+			// 			s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)] = append(s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)], sch.redundancy_data...)
 			// 		}else if last_off.Value.End < sch.redundancy_stream_off_start{
 			// 			newoff := utils.ByteInterval{Start:  sch.redundancy_stream_off_start , End:  sch.redundancy_stream_off_end}
-			// 			s.paths[path_order[i]].stream_off[protocol.StreamID(3)].PushBack(newoff)	
+			// 			s.paths[path_order[i]].stream_off[protocol.StreamID(3)].PushBack(newoff)
 			// 			//pth.stream_off[s.streamID] = append(pth.stream_off[s.streamID], newoff)
 			// 			utils.Infof("[sch]		 red stream_off updated, cnt:%v, front:%v ",s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Len(), s.paths[path_order[i]].stream_off[protocol.StreamID(3)].Front())
 			// 			s.paths[path_order[i]].data_insubbuffer += protocol.ByteCount(lenredundancy)
 			// 			s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)] = append(s.paths[path_order[i]].sub_buffer[protocol.StreamID(3)], sch.redundancy_data...)
-				
+
 			// 		}else{
 			// 			utils.Infof("[sch]		red error!")
 			// 		}
 			// 	}
 			// }
 			/////////////////////////////////////////////////////////////////////
-			
-			
-			bw_last := int((sch.monitor.state_cwnd[protocol.PathID(path_order[i])]) )
-			
+
+			bw_last := int((sch.monitor.state_cwnd[protocol.PathID(path_order[i])]))
+
 			//utils.Infof("[sch]lastorder path computed_gap : %v datainsubbuffer : %v", bw_last, int( s.paths[protocol.PathID(path_order[i])].data_insubbuffer ))
-			inflight :=  int(s.paths[protocol.PathID(path_order[i])].data_insubbuffer) 
+			inflight := int(s.paths[protocol.PathID(path_order[i])].data_insubbuffer)
 			//inflight := int(s.paths[protocol.PathID(path_order[i])].data_insubbuffer) + int(s.paths[protocol.PathID(path_order[i])].sentPacketHandler.GetBytesInflight())
 
-			if( bw_last > inflight ){
+			if bw_last > inflight {
 				gap[uint8(path_order[i])] = bw_last - inflight - int(beta)
-				if ( gap[uint8(path_order[i])] >= leftoverdataforwriting ){
+				if gap[uint8(path_order[i])] >= leftoverdataforwriting {
 					gap[uint8(path_order[i])] = leftoverdataforwriting
 				}
-			}else{
+			} else {
 				gap[uint8(path_order[i])] = 0
 			}
-			if( gap[uint8(path_order[i])] < 0 ){
+			if gap[uint8(path_order[i])] < 0 {
 				gap[uint8(path_order[i])] = 0
 			}
 
 			leftoverdataforwriting -= gap[uint8(path_order[i])]
 			//utils.Infof("[sch]lastorder path : %v, need_gap: %v, reside: %v, datainsubbufer: %v",  path_order[i], gap[uint8(path_order[i])], leftoverdataforwriting,  s.paths[path_order[i]].data_insubbuffer)
-			
-			sch.assign_streamoff(s.paths[path_order[i]], s , dataineachstream, offineachstream, gap)
+
+			sch.assign_streamoff(s.paths[path_order[i]], s, dataineachstream, offineachstream, gap)
 			s.streamFramer.maybePopData(protocol.ByteCount(gap[uint8(path_order[i])]), s.paths[path_order[i]], sch.redundancy, sch)
-		
-		}else{
+
+		} else {
 			gap[uint8(path_order[i])] = 0
 			//utils.Infof("[sch]lastorder path : %v, need_gap:%v, reside: %v, datainsubbufer: %v",  path_order[i], gap[uint8(path_order[i])], leftoverdataforwriting,  s.paths[path_order[i]].data_insubbuffer)
-			sch.assign_streamoff(s.paths[path_order[i]], s , dataineachstream, offineachstream, gap)
+			sch.assign_streamoff(s.paths[path_order[i]], s, dataineachstream, offineachstream, gap)
 			s.streamFramer.maybePopData(protocol.ByteCount(gap[uint8(path_order[i])]), s.paths[path_order[i]], sch.redundancy, sch)
 
 		}
 
-
 		// 4.  enQueue other controll frames
 		// Also add CLOSE_PATH frames, if any
-			
+
 		for cpf := s.streamFramer.PopClosePathFrame(); cpf != nil; cpf = s.streamFramer.PopClosePathFrame() {
 			s.packer.QueueControlFrame(cpf, pth)
 		}
@@ -1494,20 +1531,18 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 		for pf := s.streamFramer.PopPathsFrame(); pf != nil; pf = s.streamFramer.PopPathsFrame() {
 			s.packer.QueueControlFrame(pf, pth)
 		}
-		
-		//utils.Infof("[sch]end leftoverdataforwriting : %v", leftoverdataforwriting)  
 
+		//utils.Infof("[sch]end leftoverdataforwriting : %v", leftoverdataforwriting)
 
-		
 		//utils.Infof("----------------------PACK--------------------------------")
-		for _, pathID := range path_order{
-			if(pathID == protocol.InitialPathID && len(path_order) > 1) {			// only path 0 just take path 0
+		for _, pathID := range path_order {
+			if pathID == protocol.InitialPathID && len(path_order) > 1 { // only path 0 just take path 0
 				continue
 			}
-			
+
 			pth := s.paths[protocol.PathID(pathID)]
-			if !pth.SendingAllowed(sch.CWNDFlag){
-				continue					
+			if !pth.SendingAllowed(sch.CWNDFlag) {
+				continue
 			}
 			//pth := s.paths[protocol.PathID(0)]
 			//utils.Infof("\n")
@@ -1545,11 +1580,11 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 			// 		}
 			// 	}
 			// }
-			
+
 			// 5.2 performpacketsending
 			pkt, sent, err := sch.performPacketSendingMOOO(s, windowUpdateFrames, pth, gap)
 			//pkt, sent, err := sch.performPacketSending(s, windowUpdateFrames, pth)
-			if sent{
+			if sent {
 				issent = true
 				//coderuntimeend := time.Now().UnixNano() /1000
 				//sch.totalruntime += coderuntimeend - coderuntimestart
@@ -1577,7 +1612,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 				// Was the packet duplicated on all potential paths?
 			duplicateLoop:
 				for pathID, tmpPth := range s.paths {
-					
+
 					if pathID == protocol.InitialPathID || pathID == pth.pathID {
 						continue
 					}
@@ -1588,9 +1623,8 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 					}
 				}
 
-
 			}
-			
+
 		}
 		s.packer.lastdataforwritinglen = 0
 		// if sentFlag == true{
@@ -1624,7 +1658,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 		// Duplicate traffic when it was sent on an unknown performing path
 		// FIXME adapt for new paths coming during the connection
 		if pth.rttStats.SmoothedRTT() == 0 {
-			
+
 			currentQuota := sch.quotas[pth.pathID]
 			// Was the packet duplicated on all potential paths?
 		duplicateLoop:
@@ -1640,26 +1674,26 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 				}
 			}
 		}
-*/
-			// And try pinging on potentially failed paths
-			if fromPth != nil && fromPth.potentiallyFailed.Get() {
-				utils.Infof("potential failed!")
-				err := s.sendPing(fromPth)
-				if err != nil {
-					return err
-				}
+		*/
+		// And try pinging on potentially failed paths
+		if fromPth != nil && fromPth.potentiallyFailed.Get() {
+			utils.Infof("potential failed!")
+			err := s.sendPing(fromPth)
+			if err != nil {
+				return err
 			}
-			windowUpdateFrames = nil
-			if !issent{
-				return sch.ackRemainingPaths(s, windowUpdateFrames)
-			}//*/
-	}	
+		}
+		windowUpdateFrames = nil
+		if !issent {
+			return sch.ackRemainingPaths(s, windowUpdateFrames)
+		} //*/
+	}
 }
 
 // func(sch *scheduler) make_redundancy(thispth *path, lastpth *path, start protocol.ByteCount, end protocol.ByteCount, data []byte){
 // 	//start, end has known
 // 	//get corresponding subbuffer from last path, and adding stream_off to this path
-// 	lendata := end - start 
+// 	lendata := end - start
 // 	// if(lendata > protocol.ByteCount(len(lastpth.sub_buffer[protocol.StreamID(3)]))){
 // 	// 	lendata = protocol.ByteCount(len(lastpth.sub_buffer[protocol.StreamID(3)]))
 // 	// 	start = end - lendata
@@ -1667,7 +1701,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 // 	utils.Infof("[sch]	thispth:%v, lastpth:%v, from: %v, to: %v", thispth.pathID, lastpth.pathID, len(lastpth.sub_buffer[protocol.StreamID(3)]) - int(lendata), len(lastpth.sub_buffer[protocol.StreamID(3)]))
 // 	if(start == end){
 // 		utils.Infof("[sch]	redun lendata zero, will return!")
-// 		return 
+// 		return
 // 	}
 
 // 	//data := lastpth.sub_buffer[protocol.StreamID(3)][len(lastpth.sub_buffer[protocol.StreamID(3)]) - int(lendata) : len(lastpth.sub_buffer[protocol.StreamID(3)])]
@@ -1698,7 +1732,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 // 					thispth.stream_off[protocol.StreamID(3)].InsertBefore(utils.ByteInterval{Start: start, End: now.Value.End}, now)
 // 					utils.Infof("[sch]		 make redundancy stream_off updated, cnt:%v, from %v to %v ",thispth.stream_off[protocol.StreamID(3)].Len(),start, now.Value.End)
 // 					thispth.stream_off[protocol.StreamID(3)].Remove(now)
-					
+
 // 					//data := lastpth.sub_buffer[protocol.StreamID(3)][len(lastpth.sub_buffer[protocol.StreamID(3)]) - int(lendata) : len(lastpth.sub_buffer[protocol.StreamID(3)])]
 // 					before_part := thispth.sub_buffer[protocol.StreamID(3)][:sub_buffer_inx]
 // 					behind_part := thispth.sub_buffer[protocol.StreamID(3)][sub_buffer_inx:]
@@ -1742,8 +1776,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 // 			utils.Infof("[sch]		 make new redundancy stream_off , cnt:%v, from %v to %v ",thispth.stream_off[protocol.StreamID(3)].Len(), start, end)
 // 			thispth.stream_off[protocol.StreamID(3)].PushBack(newoff)
 // 		}
-		
-		
+
 // 		// last_off := thispth.stream_off[protocol.StreamID(3)].Back()
 // 		// utils.Infof("[sch]	last_off end %v, start  %v", last_off.Value.End, start)
 // 		// if last_off.Value.End == start{				// same, just expand last_off
@@ -1751,7 +1784,7 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 // 		// 	utils.Infof("[sch]		make redundancy stream_off updated, cnt:%v, back:%v", thispth.stream_off[protocol.StreamID(3)].Len(), thispth.stream_off[protocol.StreamID(3)].Back().Value)
 // 		// }else if last_off.Value.End < start {
 // 		// 	newoff := utils.ByteInterval{Start: start, End:  end}
-// 		// 	thispth.stream_off[protocol.StreamID(3)].PushBack(newoff)	
+// 		// 	thispth.stream_off[protocol.StreamID(3)].PushBack(newoff)
 // 		// 	//pth.stream_off[s.streamID] = append(pth.stream_off[s.streamID], newoff)
 // 		// 	utils.Infof("[sch]		 make redundancy stream_off updated, cnt:%v, back:%v ",thispth.stream_off[protocol.StreamID(3)].Len(), thispth.stream_off[protocol.StreamID(3)].Back().Value)
 // 		// }else{
@@ -1760,14 +1793,13 @@ func (sch *scheduler) sendPacketMooo(s *session) error{
 // 		// }
 // 	}
 
-
 // 	// thispth.sub_buffer[protocol.StreamID(3)] = append(thispth.sub_buffer[protocol.StreamID(3)],data ...)
 // 	// thispth.data_insubbuffer += protocol.ByteCount(len(data))
 // 	utils.Infof("[sch]		have made redundancy")
 
 // }
 
-func(sch *scheduler) assign_streamoff(pth *path, s *session, dataineachstream map[protocol.StreamID] int, offineachstream map[protocol.StreamID] protocol.ByteCount, gap map[uint8] int){
+func (sch *scheduler) assign_streamoff(pth *path, s *session, dataineachstream map[protocol.StreamID]int, offineachstream map[protocol.StreamID]protocol.ByteCount, gap map[uint8]int) {
 	numStreams := uint32(len(s.streamsMap.streams))
 	utils.Infof("[sch]	Writeoffset of each stream: 0x%x", offineachstream)
 	utils.Infof("[sch]	Path %v gap size %v", pth.pathID, gap[uint8(pth.pathID)])
@@ -1778,25 +1810,25 @@ func(sch *scheduler) assign_streamoff(pth *path, s *session, dataineachstream ma
 		streamID := s.streamsMap.openStreams[j]
 		utils.Infof("[sch]		Stream %v dataforwriting size : %v", streamID, dataineachstream[streamID])
 		//str := s.streamsMap.streams[streamID]
-		if(dataineachstream[streamID] == 0){
+		if dataineachstream[streamID] == 0 {
 			continue
 		}
-		if(gap[uint8(pth.pathID)] <= 0){
+		if gap[uint8(pth.pathID)] <= 0 {
 			break
 		}
-		if(dataineachstream[streamID] < gap[uint8(pth.pathID)]){
-			if(pth.assigned_stream_off[streamID] == nil){
-				pth.assigned_stream_off[streamID] = utils.NewByteIntervalList()	
-				pth.assigned_stream_off[streamID].PushFront(utils.ByteInterval{Start:  offineachstream[streamID], End: offineachstream[streamID] + protocol.ByteCount(dataineachstream[streamID])})
+		if dataineachstream[streamID] < gap[uint8(pth.pathID)] {
+			if pth.assigned_stream_off[streamID] == nil {
+				pth.assigned_stream_off[streamID] = utils.NewByteIntervalList()
+				pth.assigned_stream_off[streamID].PushFront(utils.ByteInterval{Start: offineachstream[streamID], End: offineachstream[streamID] + protocol.ByteCount(dataineachstream[streamID])})
 				utils.Infof("[sch]		Path %v stream %v new assigned_stream_off", pth.pathID, streamID)
-			}else{
+			} else {
 				last_off := pth.assigned_stream_off[streamID].Back()
 				if last_off.Value.End == offineachstream[streamID] {
 					utils.Infof("[sch]		assigned merge %v", pth.assigned_stream_off[streamID].Back())
 					pth.assigned_stream_off[streamID].Back().Value.End += protocol.ByteCount(dataineachstream[streamID])
-				}else{
-					newoff := utils.ByteInterval{Start: offineachstream[streamID] , End:  offineachstream[streamID] + protocol.ByteCount(dataineachstream[streamID])}
-					
+				} else {
+					newoff := utils.ByteInterval{Start: offineachstream[streamID], End: offineachstream[streamID] + protocol.ByteCount(dataineachstream[streamID])}
+
 					pth.assigned_stream_off[streamID].PushBack(newoff)
 					utils.Infof("[sch]		assigned new %v", pth.assigned_stream_off[streamID].Back())
 				}
@@ -1805,21 +1837,21 @@ func(sch *scheduler) assign_streamoff(pth *path, s *session, dataineachstream ma
 			utils.Infof("[sch]		path %v stream %v append to assigned_stream_off, size: %v, from 0x%x, to :0x%x", pth.pathID, streamID, dataineachstream[streamID], offineachstream[streamID], pth.assigned_stream_off[streamID].Back().Value.End)
 
 			offineachstream[streamID] += protocol.ByteCount(dataineachstream[streamID])
-			dataineachstream[streamID] = 0 
-		}else{
-			if(pth.assigned_stream_off[streamID] == nil){
-				pth.assigned_stream_off[streamID] = utils.NewByteIntervalList()	
-				pth.assigned_stream_off[streamID].PushFront(utils.ByteInterval{Start:  offineachstream[streamID] , End: offineachstream[streamID] + protocol.ByteCount(gap[uint8(pth.pathID)])})
+			dataineachstream[streamID] = 0
+		} else {
+			if pth.assigned_stream_off[streamID] == nil {
+				pth.assigned_stream_off[streamID] = utils.NewByteIntervalList()
+				pth.assigned_stream_off[streamID].PushFront(utils.ByteInterval{Start: offineachstream[streamID], End: offineachstream[streamID] + protocol.ByteCount(gap[uint8(pth.pathID)])})
 				utils.Infof("[sch]		path %v stream %v new assigned_stream_off", pth.pathID, streamID)
-			}else{
+			} else {
 				last_off := pth.assigned_stream_off[streamID].Back()
-				if last_off.Value.End == offineachstream[streamID]{
+				if last_off.Value.End == offineachstream[streamID] {
 					pth.assigned_stream_off[streamID].Back().Value.End += protocol.ByteCount(gap[uint8(pth.pathID)])
 					utils.Infof("[sch]		assigned merge %v", pth.assigned_stream_off[streamID].Back())
-				}else{
-					newoff := utils.ByteInterval{Start:  offineachstream[streamID] , End: offineachstream[streamID] + protocol.ByteCount(gap[uint8(pth.pathID)])}
-					
-					pth.assigned_stream_off[streamID].PushBack(newoff)	
+				} else {
+					newoff := utils.ByteInterval{Start: offineachstream[streamID], End: offineachstream[streamID] + protocol.ByteCount(gap[uint8(pth.pathID)])}
+
+					pth.assigned_stream_off[streamID].PushBack(newoff)
 					utils.Infof("[sch]		assigned new %v", pth.assigned_stream_off[streamID].Back())
 				}
 			}
@@ -1827,7 +1859,7 @@ func(sch *scheduler) assign_streamoff(pth *path, s *session, dataineachstream ma
 			offineachstream[streamID] += protocol.ByteCount(gap[uint8(pth.pathID)])
 			dataineachstream[streamID] -= gap[uint8(pth.pathID)]
 		}
-		
+
 		utils.Infof("[sch]		path %v stream %v assigned_stream_off  cnt:%v, back: %v", pth.pathID, streamID, pth.assigned_stream_off[streamID].Len(), pth.assigned_stream_off[streamID].Back())
 	}
 }
@@ -1851,8 +1883,8 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 
 	// Repeatedly try sending until we don't have any more data, or run out of the congestion window
 	for {
-		
-		issent:=false
+
+		issent := false
 		var firstpath *path
 		var paths []*path
 		// We first check for retransmissions
@@ -1864,13 +1896,13 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 		//s.pathsLock.RLock()
 		// cx add:get all availiable paths
 		sch.monitor.monitorCurrentSessionState(s)
-		firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)			// cx tent to select path with minrtt as first path
-		//firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)	
-		if(firstpath != nil){
+		firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth) // cx tent to select path with minrtt as first path
+		//firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
+		if firstpath != nil {
 			paths = append(paths, firstpath)
 		}
-		for i,pth := range s.paths{
-			if( i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID ) || firstpath == nil ) ){
+		for i, pth := range s.paths {
+			if i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID) || firstpath == nil) {
 				paths = append(paths, pth)
 			}
 			sch.monitor.monitorUpdatePathState(pth)
@@ -1879,18 +1911,17 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 		for _, pth := range s.paths {
 			sch.monitor.monitorApplyUtility(pth)
 		}
-		
-		//sch.monitor.isHighlossrate(sch, s)
-		
 
-		if len(s.paths) == 1{
+		//sch.monitor.isHighlossrate(sch, s)
+
+		if len(s.paths) == 1 {
 			firstpath = s.paths[protocol.InitialPathID]
 			paths = append(paths, firstpath)
-		}else{
-			if len(paths) == 0{
+		} else {
+			if len(paths) == 0 {
 				windowUpdateFrames := s.getWindowUpdateFrames(false)
 				return sch.ackRemainingPaths(s, windowUpdateFrames)
-			}else{
+			} else {
 				firstpath = paths[0]
 			}
 		}
@@ -1911,7 +1942,6 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 			continue
 		}
 
-		
 		// Also add CLOSE_PATH frames, if any
 		for cpf := s.streamFramer.PopClosePathFrame(); cpf != nil; cpf = s.streamFramer.PopClosePathFrame() {
 			s.packer.QueueControlFrame(cpf, pth)
@@ -1927,15 +1957,15 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 			s.packer.QueueControlFrame(pf, pth)
 		}
 		/////////////////
-		
-		for i , pth := range paths{
+
+		for i, pth := range paths {
 			// XXX Some automatic ACK generation should be done someway
 			//utils.Infof("[scheduler]now path:%v",pth.pathID)
 			var ack *wire.AckFrame
 
 			ack = pth.GetAckFrame()
 			if ack != nil {
-			s.packer.QueueControlFrame(ack, pth)
+				s.packer.QueueControlFrame(ack, pth)
 			}
 			if ack != nil || hasStreamRetransmission {
 				swf := pth.sentPacketHandler.GetStopWaitingFrame(hasStreamRetransmission)
@@ -1943,33 +1973,30 @@ func (sch *scheduler) sendPacketRedundancy(s *session) error {
 					s.packer.QueueControlFrame(swf, pth)
 				}
 			}
-			if i == 0{
+			if i == 0 {
 				_, sent, err := sch.performPacketSendingRedundancy(s, windowUpdateFrames, pth, true)
 				if err != nil {
 					return err
 				}
 				//utils.Infof("[sch]path:%v sent:%v",pth.pathID,sent)
-				if sent{
+				if sent {
 					issent = true
 				}
-			}else{
+			} else {
 				_, sent, err := sch.performPacketSendingRedundancy(s, windowUpdateFrames, pth, false)
 				//utils.Infof("[sch]path:%v sent:%v",pth.pathID,sent)
 				if err != nil {
 					return err
 				}
-				if sent{
+				if sent {
 					issent = true
 				}
 			}
-				
-			
-
 
 			// Duplicate traffic when it was sent on an unknown performing path
 			// FIXME adapt for new paths coming during the connection
 			// if pth.rttStats.SmoothedRTT() == 0 {
-				
+
 			// 	currentQuota := sch.quotas[pth.pathID]
 			// 	// Was the packet duplicated on all potential paths?
 			// duplicateLoop:
@@ -2012,7 +2039,7 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 		pthTmp.SetLeastUnacked(pthTmp.sentPacketHandler.GetLeastUnacked())
 	}
 	s.pathsLock.RUnlock()
-	
+
 	// get WindowUpdate frames
 	// this call triggers the flow controller to increase the flow control windows, if necessary
 	windowUpdateFrames := s.getWindowUpdateFrames(false)
@@ -2022,8 +2049,8 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 
 	// Repeatedly try sending until we don't have any more data, or run out of the congestion window
 	for {
-		
-		issent:=false
+
+		issent := false
 		var firstpath *path
 		var paths []*path
 		// We first check for retransmissions
@@ -2037,13 +2064,13 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 		//s.pathsLock.RLock()
 		// cx add:get all availiable paths
 
-		firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)			// cx tent to select path with minrtt as first path
-		//firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)	
-		if(firstpath != nil){
+		firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth) // cx tent to select path with minrtt as first path
+		//firstpath = sch.selectPathLowLatency(s, hasRetransmission, hasStreamRetransmission, fromPth)
+		if firstpath != nil {
 			paths = append(paths, firstpath)
 		}
-		for i,pth := range s.paths{
-			if( i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID ) || firstpath == nil ) ){
+		for i, pth := range s.paths {
+			if i != protocol.InitialPathID && pth.SendingAllowed(sch.CWNDFlag) && ((firstpath != nil && i != firstpath.pathID) || firstpath == nil) {
 				paths = append(paths, pth)
 			}
 			sch.monitor.monitorUpdatePathState(pth)
@@ -2052,18 +2079,17 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 		for _, pth := range s.paths {
 			sch.monitor.monitorApplyUtility(pth)
 		}
-		
-		//sch.monitor.isHighlossrate(sch, s)
-		
 
-		if len(s.paths) == 1{
+		//sch.monitor.isHighlossrate(sch, s)
+
+		if len(s.paths) == 1 {
 			firstpath = s.paths[protocol.InitialPathID]
 			paths = append(paths, firstpath)
-		}else{
-			if len(paths) == 0{
+		} else {
+			if len(paths) == 0 {
 				windowUpdateFrames := s.getWindowUpdateFrames(false)
 				return sch.ackRemainingPaths(s, windowUpdateFrames)
-			}else{
+			} else {
 				firstpath = paths[0]
 			}
 		}
@@ -2084,7 +2110,6 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 			continue
 		}
 
-		
 		// Also add CLOSE_PATH frames, if any
 		for cpf := s.streamFramer.PopClosePathFrame(); cpf != nil; cpf = s.streamFramer.PopClosePathFrame() {
 			s.packer.QueueControlFrame(cpf, pth)
@@ -2100,15 +2125,15 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 			s.packer.QueueControlFrame(pf, pth)
 		}
 		/////////////////
-		
-		for i , pth := range paths{
+
+		for i, pth := range paths {
 			// XXX Some automatic ACK generation should be done someway
 			//utils.Infof("[scheduler]now path:%v",pth.pathID)
 			var ack *wire.AckFrame
 
 			ack = pth.GetAckFrame()
 			if ack != nil {
-			s.packer.QueueControlFrame(ack, pth)
+				s.packer.QueueControlFrame(ack, pth)
 			}
 			if ack != nil || hasStreamRetransmission {
 				swf := pth.sentPacketHandler.GetStopWaitingFrame(hasStreamRetransmission)
@@ -2116,27 +2141,25 @@ func (sch *scheduler) sendPacketRDDT(s *session) error {
 					s.packer.QueueControlFrame(swf, pth)
 				}
 			}
-			if i == 0{
+			if i == 0 {
 				_, sent, err := sch.performPacketSendingRDDT(s, windowUpdateFrames, pth, true)
 				if err != nil {
 					return err
 				}
 				//utils.Infof("[sch]path:%v sent:%v",pth.pathID,sent)
-				if sent{
+				if sent {
 					issent = true
 				}
-			}else{
+			} else {
 				_, sent, err := sch.performPacketSendingRDDT(s, windowUpdateFrames, pth, false)
 				//utils.Infof("[sch]path:%v sent:%v",pth.pathID,sent)
 				if err != nil {
 					return err
 				}
-				if sent{
+				if sent {
 					issent = true
 				}
 			}
-				
-			
 
 			// And try pinging on potentially failed paths
 			if fromPth != nil && fromPth.potentiallyFailed.Get() {
@@ -2163,10 +2186,10 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 	s.pathsLock.RLock()
 	for _, pthTmp := range s.paths {
 		pthTmp.SetLeastUnacked(pthTmp.sentPacketHandler.GetLeastUnacked())
-		
+
 		//cx add :for zhudongdiubao
 		//utils.Infof("[m]inflight: %v, room: %v",pthTmp.sentPacketHandler.GetBytesInflight(), pthTmp.sentPacketHandler.GetCWND() - pthTmp.sentPacketHandler.GetBytesInflight())
-		
+
 	}
 	s.pathsLock.RUnlock()
 	//sch.monitor.isAtbegining(sch, s)
@@ -2185,7 +2208,7 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 		sch.monitor.monitorClear()
 		for pathID, pth := range s.paths {
 			//utils.Infof("[sendpacketmooo]: path_id: %v", pathID)
-			if !pth.SendingAllowed(sch.CWNDFlag){                                 // if path is not sendingallowed, skip this scheduling round, remember to del an item in path_order
+			if !pth.SendingAllowed(sch.CWNDFlag) { // if path is not sendingallowed, skip this scheduling round, remember to del an item in path_order
 				utils.Infof("[sc]: path %v !ALW", pathID)
 				//continue
 			}
@@ -2198,17 +2221,17 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 			sch.monitor.monitorApplyUtility(pth)
 		}
 		sch.monitor.monitorCurrentSessionState(s)
-	
-		numStreams := uint32(len(s.streamsMap.streams))		
-		leftoverdataforwriting := 0  																 //left dataforwritingsize have not been dispatched
-		dataineachstream := make(map[protocol.StreamID] int)	 //dataforwritingszie in each stream
+
+		numStreams := uint32(len(s.streamsMap.streams))
+		leftoverdataforwriting := 0                         //left dataforwritingsize have not been dispatched
+		dataineachstream := make(map[protocol.StreamID]int) //dataforwritingszie in each stream
 
 		for j := uint32(0); j < numStreams; j++ {
 			streamID := s.streamsMap.openStreams[j]
 			dataineachstream[streamID] = len(s.streamsMap.streams[streamID].dataForWriting)
 			leftoverdataforwriting += dataineachstream[streamID]
 		}
-		if(leftoverdataforwriting != 0){
+		if leftoverdataforwriting != 0 {
 			utils.Infof("[sc]Dataforwriting waitted for scheduling, size :%vB", leftoverdataforwriting)
 		}
 		/*order by RTT*/
@@ -2218,51 +2241,51 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 		sch.monitor.isBandwidthEnough(sch, leftoverdataforwriting, s)
 
 		///////////////////////////////////////////
-		// compute gap 
-		gap := make(map[uint8] int)					//gap size between paths
+		// compute gap
+		gap := make(map[uint8]int) //gap size between paths
 
 		//utils.Infof("[sch]------------------COMPUTE&POP--------------------")
 
 		var i int
 
-		for i = 0 ; ( i+1 ) < (len(path_order) - 1) ; i++ {			// -1 minus path 0 
+		for i = 0; (i + 1) < (len(path_order) - 1); i++ { // -1 minus path 0
 			inx := path_order[i]
 			inx1 := path_order[i+1]
 			rtt0 := sch.monitor.state_owd[protocol.PathID(inx)]
 			rtt1 := sch.monitor.state_owd[protocol.PathID(inx1)]
 			//bw0 := sch.monitor.state_bw[protocol.PathID(inx)]
-			//cw0 := sch.monitor.state_cwnd[protocol.PathID(inx)]			
-			
+			//cw0 := sch.monitor.state_cwnd[protocol.PathID(inx)]
+
 			var computed_needed int
 
-			if(i == 0 && rtt1 == 0 ){				// if i == 0 gap rtt1 == 0, first path need to send
+			if i == 0 && rtt1 == 0 { // if i == 0 gap rtt1 == 0, first path need to send
 				computed_needed = leftoverdataforwriting
 				//utils.Infof("[sch]Path %v	gap_needed all leftoverdataforwriting, because RTT is 0", inx)
-			}else{
+			} else {
 				//n := int( rtt1 / rtt0 )
-				n := int(( rtt1 - rtt0 ) / rtt0 )
-				//computed_needed = int(cw0) + int(((rtt1 - rtt0).Seconds() * float64(bw0)) ) 
-				for ; (leftoverdataforwriting ) -  computed_needed > 0 && n > 0 ; {
+				n := int((rtt1 - rtt0) / rtt0)
+				//computed_needed = int(cw0) + int(((rtt1 - rtt0).Seconds() * float64(bw0)) )
+				for (leftoverdataforwriting)-computed_needed > 0 && n > 0 {
 					//maxLen :=  protocol.ByteCount(cw0) + protocol.ByteCount( sch.monitor.state_inflight[protocol.PathID(inx)])
-					maxLen :=  1322
+					maxLen := 1322
 					computed_needed += int(maxLen)
 					n -= 1
 					//utils.Infof("[sch]Path %v	computed_needed %v, n %v", inx, computed_needed, n)
 				}
 
-				if ( computed_needed >= leftoverdataforwriting ){
-						computed_needed = leftoverdataforwriting
+				if computed_needed >= leftoverdataforwriting {
+					computed_needed = leftoverdataforwriting
 				}
 				//computed_needed = 0
-			}		
+			}
 			//utils.Infof("[sch]Path %v	computed_needed %v, left_dataforwriting %v", inx, computed_needed, leftoverdataforwriting)
-			// now change gap index, we use inx + 1 here, because previous path does not need gap 
-			gap[uint8(inx1)] = int(float64(computed_needed) )
-			if(gap[uint8(inx1)] < 0){
+			// now change gap index, we use inx + 1 here, because previous path does not need gap
+			gap[uint8(inx1)] = int(float64(computed_needed))
+			if gap[uint8(inx1)] < 0 {
 				gap[uint8(inx1)] = 0
 			}
 			leftoverdataforwriting -= gap[uint8(inx)]
-			if(i == 0 && rtt1 == 0 ){					// if i == 0 gap rtt1 == 0, first path need to send
+			if i == 0 && rtt1 == 0 { // if i == 0 gap rtt1 == 0, first path need to send
 				break
 			}
 		}
@@ -2274,14 +2297,13 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 
 		// Select the path here
 		s.pathsLock.RLock()
-		if sch.SchedulerName == "dispatch"{
+		if sch.SchedulerName == "dispatch" {
 			pth = sch.selectPathDispatch(s, hasRetransmission, hasStreamRetransmission, fromPth)
-		}else{
+		} else {
 			pth = sch.selectPath(s, hasRetransmission, hasStreamRetransmission, fromPth)
 		}
 		//utils.Infof("selected path:%v",pth.pathID)
 		s.pathsLock.RUnlock()
-
 
 		// XXX No more path available, should we have a new QUIC error message?
 		if pth == nil {
@@ -2333,18 +2355,18 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 		var err error
 		var pkt *ackhandler.Packet
 		var sent bool
-		
-		if(path_order[0] == pth.pathID && len(path_order) < 3) || sch.monitor.state_owd[pth.pathID] <= 0{
+
+		if (path_order[0] == pth.pathID && len(path_order) < 3) || sch.monitor.state_owd[pth.pathID] <= 0 {
 			//utils.Infof("[sch] stms -2")
 			pkt, sent, err = sch.performPacketSendingSTMS(s, windowUpdateFrames, pth, -2)
-		}else if(path_order[0] == pth.pathID && len(path_order) >= 3){
+		} else if path_order[0] == pth.pathID && len(path_order) >= 3 {
 			//utils.Infof("[sch] stms -1")
 			pkt, sent, err = sch.performPacketSendingSTMS(s, windowUpdateFrames, pth, -1)
-		}else{
-			utils.Infof("[sc] stms %v",gap[uint8(pth.pathID)])
-			pkt, sent, err = sch.performPacketSendingSTMS(s, windowUpdateFrames, pth, int(gap[uint8(pth.pathID)]))	
+		} else {
+			utils.Infof("[sc] stms %v", gap[uint8(pth.pathID)])
+			pkt, sent, err = sch.performPacketSendingSTMS(s, windowUpdateFrames, pth, int(gap[uint8(pth.pathID)]))
 		}
-	
+
 		if err != nil {
 			return err
 		}
@@ -2357,7 +2379,7 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 		//sch.totalruntime += coderuntimeend - coderuntimestart
 		sch.totalpacketnum += 1
 		//utils.Infof("thistime :%v totalruntime:%v, num:%v",coderuntimeend - coderuntimestart, sch.totalruntime, sch.totalpacketnum)
-		
+
 		// Duplicate traffic when it was sent on an unknown performing path
 		// FIXME adapt for new paths coming during the connection
 		if pth.rttStats.SmoothedRTT() == 0 {
@@ -2386,8 +2408,6 @@ func (sch *scheduler) sendPacketSTMS(s *session) error {
 	}
 }
 
-
-
 func (sch *scheduler) sendPacket(s *session) error {
 	var pth *path
 	//utils.Infof("Here rtt \n\n")
@@ -2395,10 +2415,10 @@ func (sch *scheduler) sendPacket(s *session) error {
 	s.pathsLock.RLock()
 	for _, pthTmp := range s.paths {
 		pthTmp.SetLeastUnacked(pthTmp.sentPacketHandler.GetLeastUnacked())
-		
+
 		//cx add :for zhudongdiubao
 		//utils.Infof("[monitor]inflight: %v, room: %v",pthTmp.sentPacketHandler.GetBytesInflight(), pthTmp.sentPacketHandler.GetCWND() - pthTmp.sentPacketHandler.GetBytesInflight())
-		
+
 	}
 	s.pathsLock.RUnlock()
 	sch.monitor.isAtbegining(sch, s)
@@ -2417,7 +2437,7 @@ func (sch *scheduler) sendPacket(s *session) error {
 		sch.monitor.monitorClear()
 		for pathID, pth := range s.paths {
 			//utils.Infof("[sendpacketmooo]: path_id: %v", pathID)
-			if !pth.SendingAllowed(sch.CWNDFlag){                                 // if path is not sendingallowed, skip this scheduling round, remember to del an item in path_order
+			if !pth.SendingAllowed(sch.CWNDFlag) { // if path is not sendingallowed, skip this scheduling round, remember to del an item in path_order
 				utils.Infof("[sc]: path %v NOT ALLOWEND", pathID)
 				//continue
 			}
@@ -2431,9 +2451,9 @@ func (sch *scheduler) sendPacket(s *session) error {
 		}
 		sch.monitor.monitorCurrentSessionState(s)
 		sch.monitor.mutex.Unlock()
-		numStreams := uint32(len(s.streamsMap.streams))		
-		leftoverdataforwriting := 0  																 //left dataforwritingsize have not been dispatched
-		dataineachstream := make(map[protocol.StreamID] int)	 //dataforwritingszie in each stream
+		numStreams := uint32(len(s.streamsMap.streams))
+		leftoverdataforwriting := 0                         //left dataforwritingsize have not been dispatched
+		dataineachstream := make(map[protocol.StreamID]int) //dataforwritingszie in each stream
 
 		for j := uint32(0); j < numStreams; j++ {
 
@@ -2441,19 +2461,17 @@ func (sch *scheduler) sendPacket(s *session) error {
 			dataineachstream[streamID] = len(s.streamsMap.streams[streamID].dataForWriting)
 			leftoverdataforwriting += dataineachstream[streamID]
 		}
-		if(leftoverdataforwriting != 0){
-			
+		if leftoverdataforwriting != 0 {
+
 			utils.Infof("[sch]Dataforwriting waitted for scheduling, size :%vB", leftoverdataforwriting)
 		}
 		/*order by RTT*/
 
 		//path_order, _ := sch.orderPaths(s)
-		
 
 		sch.monitor.isBandwidthEnough(sch, leftoverdataforwriting, s)
 
 		///////////////////////////////////////////
-
 
 		// We first check for retransmissions
 		hasRetransmission, retransmitHandshakePacket, fromPth := sch.getRetransmission(s)
@@ -2530,7 +2548,7 @@ func (sch *scheduler) sendPacket(s *session) error {
 		//sch.totalruntime += coderuntimeend - coderuntimestart
 		sch.totalpacketnum += 1
 		//utils.Infof("thistime :%v,totalruntime:%v, num:%v",coderuntimeend - coderuntimestart,sch.totalruntime, sch.totalpacketnum)
-		
+
 		// Duplicate traffic when it was sent on an unknown performing path
 		// FIXME adapt for new paths coming during the connection
 		if pth.rttStats.SmoothedRTT() == 0 {
@@ -2559,17 +2577,17 @@ func (sch *scheduler) sendPacket(s *session) error {
 	}
 }
 
-func (sch *scheduler) orderPaths(s *session)([]protocol.PathID, int){
+func (sch *scheduler) orderPaths(s *session) ([]protocol.PathID, int) {
 	var path_order []protocol.PathID
-	for i,_ := range s.paths{
-		if(i!=protocol.InitialPathID){
+	for i, _ := range s.paths {
+		if i != protocol.InitialPathID {
 			path_order = append(path_order, i)
 		}
 	}
 
-	var min int 
+	var min int
 	var inx int
-	for i, ori := range path_order {                      //sort based on rtt of each path
+	for i, ori := range path_order { //sort based on rtt of each path
 		//pthi := s.paths[ori]
 		//min = int(pthi.rttStats.SmoothedRTT())
 		min = int(sch.monitor.state_owd[ori])
@@ -2578,13 +2596,13 @@ func (sch *scheduler) orderPaths(s *session)([]protocol.PathID, int){
 		//pthi := s.paths[ori]
 		//utils.Infof("[sendpacketmooo]: min:%v path_id_inx:%v",min,inx)
 		for j, orj := range path_order {
-			if j < i {						//sort 
+			if j < i { //sort
 				continue
 			}
 			//pthj := s.paths[orj]
 			now := int(sch.monitor.state_owd[orj])
 			//if(j == protocol.InitialPathID || !pthj.SendingAllowed()){                         //when mp, skip initialpathid and Sengding not allowed paths.
-			if(j == protocol.InitialPathID){
+			if j == protocol.InitialPathID {
 				continue
 			}
 			//if (now < min && now != 0) || (now > min && min == 0) || (!pthi.SendingAllowed() && pthj.SendingAllowed()){		//e.g. p1 = 0 && p3 = 10, thus exchange p1 and p3
@@ -2599,11 +2617,10 @@ func (sch *scheduler) orderPaths(s *session)([]protocol.PathID, int){
 	}
 	path_order = append(path_order, protocol.PathID(0))
 	utils.Infof("[sc]Path_order: %v", path_order)
-	return path_order,min
+	return path_order, min
 }
 
-
-func (m *monitor) monitorClear(){
+func (m *monitor) monitorClear() {
 	m.totalbw = 0
 	m.totalcwnd = 0
 	m.retransBytes = 0
@@ -2665,6 +2682,10 @@ func (m *monitor) monitorApplyUtility(pth *path) {
 			lostDelta = 0
 		}
 	}
+	var senderBytes uint64
+	if counter, ok := pth.sentPacketHandler.(interface{ GetSentBytes() uint64 }); ok {
+		senderBytes = counter.GetSentBytes()
+	}
 	pm := PathMetrics{
 		PathID:            pth.pathID,
 		BWbps:             float64(m.state_bw[pth.pathID]) * 8,
@@ -2676,6 +2697,9 @@ func (m *monitor) monitorApplyUtility(pth *path) {
 		InflightBytes:     m.state_inflight[pth.pathID],
 		CwndRoom:          float64(m.state_cwnd[pth.pathID]),
 		Timestamp:         time.Now(),
+		LocalEndpoint:     pth.conn.LocalAddr().String(),
+		RemoteEndpoint:    pth.conn.RemoteAddr().String(),
+		SenderBytesTotal:  senderBytes,
 	}
 	sig := m.utilityController.Compute(pm)
 	pth.sentPacketHandler.SetUtilityControl(sig.Gain, sig.Backoff)
@@ -2699,13 +2723,12 @@ func (m *monitor) monitorCurrentPathState(pth *path) {
 	m.monitorUpdatePathState(pth)
 }
 
-func (m *monitor) monitorCurrentSessionState(s *session){
+func (m *monitor) monitorCurrentSessionState(s *session) {
 
-	
-	numStreams := uint32(len(s.streamsMap.streams))					
+	numStreams := uint32(len(s.streamsMap.streams))
 	for j := uint32(0); j < numStreams; j++ {
 		streamID := s.streamsMap.openStreams[j]
-		if(streamID == protocol.StreamID(3)){
+		if streamID == protocol.StreamID(3) {
 			//utils.Infof("[m]rcvbuf: %v", len(s.streamsMap.streams[streamID].frameQueue.queuedFrames))
 			utils.Infof("[m]dupsize: %vB", s.streamsMap.streams[streamID].frameQueue.dupframesize)
 		}
@@ -2714,30 +2737,30 @@ func (m *monitor) monitorCurrentSessionState(s *session){
 	//utils.Infof("[m]retransBytes: %vB", m.retransBytes)
 }
 
-func (m *monitor) isHighlossrate(sch *scheduler, s *session){
-	var highloss_flag	bool
+func (m *monitor) isHighlossrate(sch *scheduler, s *session) {
+	var highloss_flag bool
 	highloss_flag = false
-	for _, path := range s.paths{
+	for _, path := range s.paths {
 		pid := path.pathID
-		if(pid != protocol.InitialPathID){
-			if(sch.monitor.state_loss[pid] > 0.02){
+		if pid != protocol.InitialPathID {
+			if sch.monitor.state_loss[pid] > 0.02 {
 				sch.Flag_high_lossrate = true
 				highloss_flag = true
-				if(sch.SchedulerName == "moooko"){
+				if sch.SchedulerName == "moooko" {
 					sch.SchedulerName = "redundancy"
 				}
-				utils.Infof("high loss rate %v now change to red", sch.monitor.state_loss[pid] )
+				utils.Infof("high loss rate %v now change to red", sch.monitor.state_loss[pid])
 			}
 
 		}
 	}
-	if( highloss_flag == false && sch.Flag_high_lossrate == true && sch.SchedulerName == "redundancy" ){
+	if highloss_flag == false && sch.Flag_high_lossrate == true && sch.SchedulerName == "redundancy" {
 		sch.Flag_high_lossrate = false
 		sch.SchedulerName = "moooko"
-		utils.Infof("low loss rate now change back to moooko" )
+		utils.Infof("low loss rate now change back to moooko")
 	}
 }
-func (m *monitor) isBandwidthEnough(sch *scheduler, leftoverdataforwriting int, s *session){
+func (m *monitor) isBandwidthEnough(sch *scheduler, leftoverdataforwriting int, s *session) {
 	// // solution 1.
 	// T_video := time.Duration( float64( 1 / m.fps) * 1000 ) * time.Millisecond
 	// rtt_min := ( time.Duration( min ) / 1000000 ) * time.Millisecond
@@ -2764,50 +2787,48 @@ func (m *monitor) isBandwidthEnough(sch *scheduler, leftoverdataforwriting int, 
 	// }
 
 	// To fix : AI interface !!!!!!!!!!!!!!!!!!
-	if( m.totalbw + 2700000 < m.bitrate  && len(s.paths) >= 3 && sch.totalpacketnum > 30000){
-	//if( m.totalbw   < 0 && leftoverdataforwriting > 0){
+	if m.totalbw+2700000 < m.bitrate && len(s.paths) >= 3 && sch.totalpacketnum > 30000 {
+		//if( m.totalbw   < 0 && leftoverdataforwriting > 0){
 		//sch.Flag_bw_unenough = true
 		m.lackbw = true
-		utils.Infof("[m] lackbw :%v, totalbw :%v",m.lackbw, m.totalbw)
-	}else{
+		utils.Infof("[m] lackbw :%v, totalbw :%v", m.lackbw, m.totalbw)
+	} else {
 		m.lackbw = false
 		//sch.Flag_bw_unenough = false
 		//utils.Infof("[monitor] Bandwidth enough")
 	}
 }
 
-func (m *monitor) isAtbegining(sch *scheduler, s *session){
-	var RTT0_flag	bool
+func (m *monitor) isAtbegining(sch *scheduler, s *session) {
+	var RTT0_flag bool
 	RTT0_flag = false
-	for _, path := range s.paths{
+	for _, path := range s.paths {
 		pid := path.pathID
-		if( len(s.paths) < 3){
+		if len(s.paths) < 3 {
 			RTT0_flag = true
 			sch.Flag_beginining = true
-			if(sch.SchedulerName == "moooko" ){
+			if sch.SchedulerName == "moooko" {
 				sch.SchedulerName = "rtt"
-				utils.Infof("WARMUP! Begining from rtt" )
+				utils.Infof("WARMUP! Begining from rtt")
 			}
 		}
-		if(pid != protocol.InitialPathID){
-			if(path.rttStats.SmoothedRTT() == 0){
+		if pid != protocol.InitialPathID {
+			if path.rttStats.SmoothedRTT() == 0 {
 				RTT0_flag = true
 				sch.Flag_beginining = true
-				if(sch.SchedulerName == "moooko" ){
+				if sch.SchedulerName == "moooko" {
 					sch.SchedulerName = "rtt"
-					utils.Infof("WARMUP! Begining from rtt" )
+					utils.Infof("WARMUP! Begining from rtt")
 				}
-				
+
 			}
 
 		}
 	}
 
-	if( RTT0_flag  == false && sch.Flag_beginining == true && sch.SchedulerName == "rtt" && sch.OriginScheduler == "moooko"){
-		sch.Flag_beginining  = false
+	if RTT0_flag == false && sch.Flag_beginining == true && sch.SchedulerName == "rtt" && sch.OriginScheduler == "moooko" {
+		sch.Flag_beginining = false
 		sch.SchedulerName = "moooko"
-		utils.Infof("WARMUP END! Back to moooko" )
+		utils.Infof("WARMUP END! Back to moooko")
 	}
 }
-
-

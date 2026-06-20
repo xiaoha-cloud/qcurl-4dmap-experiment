@@ -83,9 +83,9 @@ type Session interface {
 	// Warning: This API should not be considered stable and might change soon.
 	Context() context.Context
 	//GetAvailiableSpace() int64	// provide transort layer info to  application
-	GetScheduler() (*scheduler)
+	GetScheduler() *scheduler
 
-	SetCWNDFlag(flag bool)() 
+	SetCWNDFlag(flag bool)
 }
 
 // A NonFWSession is a QUIC connection between two peers half-way through the handshake.
@@ -93,6 +93,27 @@ type Session interface {
 type NonFWSession interface {
 	Session
 	WaitUntilHandshakeComplete() error
+}
+
+const Phase2OwnerRole = "server_downlink_sender"
+
+// Phase2SessionConfig identifies the one transport session allowed to mutate
+// Phase 2 state. It is applied per session and never mutates listener config.
+type Phase2SessionConfig struct {
+	Enabled       bool
+	Owner         bool
+	EndpointRole  string
+	StateDir      string
+	RunID         string
+	RTMPSessionID string
+	StreamKey     string
+}
+
+// Phase2SessionController is implemented by QUIC streams used by qserver.
+type Phase2SessionController interface {
+	ConfigurePhase2(Phase2SessionConfig) error
+	DisablePhase2() error
+	Phase2ConnectionID() string
 }
 
 // Config contains all configuration data needed for a QUIC server or client.
@@ -130,17 +151,21 @@ type Config struct {
 	// Should we cache handshake parameters? If no cache available, should we create one?
 	CacheHandshake bool
 	// Should the host try to create new paths, if possible?
-	CreatePaths bool
-	SchedulerName string
+	CreatePaths        bool
+	SchedulerName      string
 	GenerateRedundancy bool
-	IPriority bool
+	IPriority          bool
 
 	// 4D-MAP experiment / logging (client-oriented; safe zero value = qaccess_t)
 	// UtilityMode: "baseline"/"off" (no utility control), "qaccess_collect" (training CSV), "qaccess_t" (Q-ACCeSS-T runtime).
 	UtilityMode         string
-	LogControlActions     bool // emit [control] lines on ACK/LOSS (verbose)
-	ExperimentRunID       string
-	ExperimentInputFile   string // label for [meta], e.g. FLV path
+	LogControlActions   bool // emit [control] lines on ACK/LOSS (verbose)
+	ExperimentRunID     string
+	ExperimentInputFile string // label for [meta], e.g. FLV path
+	Phase2Enabled       bool
+	Phase2Owner         bool
+	EndpointRole        string
+	Phase2StateDir      string
 }
 
 // A Listener for incoming QUIC connections

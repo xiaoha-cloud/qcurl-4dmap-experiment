@@ -93,6 +93,28 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
     check("model target compatibility", compatible, str(ready.get("compatibility_status", compatible)))
     check("execution mode", str(ready.get("execution_mode") or "") == mode, str(ready.get("execution_mode")))
 
+    owner_rows = _json_lines(session / "qaccess_owner_audit.jsonl")
+    owners = [
+        row for row in owner_rows
+        if row.get("phase2_owner") is True and row.get("controller_created") is True
+    ]
+    check("exactly one qserver Phase 2 owner", len(owners) == 1, f"count={len(owners)}")
+    owner = owners[0] if len(owners) == 1 else {}
+    check("owner is server_downlink_sender", owner.get("endpoint_role") == "server_downlink_sender", str(owner.get("endpoint_role")))
+    owner_pid = str(owner.get("pid") or "")
+    check("controller PID equals qserver PID", bool(owner_pid) and str(owner.get("controller_pid") or "") == owner_pid, owner_pid)
+    owner_state_dir = str(owner.get("phase2_state_dir") or "")
+    check("owner state dir is absolute", bool(owner_state_dir) and Path(owner_state_dir).is_absolute(), owner_state_dir)
+    timeline_rows: list[dict[str, Any]] = []
+    for timeline in (session / "combined_qaccess_t_dynamic").glob("experiment_timeline_*.jsonl"):
+        timeline_rows.extend(_json_lines(timeline))
+    identities = [row for row in timeline_rows if row.get("event") == "phase2_identity"]
+    for role in ("client_push_publisher", "client_pull_receiver"):
+        matches = [row for row in identities if row.get("endpoint_role") == role]
+        check(f"{role} is Phase 2 disabled", len(matches) == 1 and matches[0].get("phase2_enabled") is False and matches[0].get("phase2_owner") is False and matches[0].get("controller_created") is False)
+    ingress = [row for row in owner_rows if row.get("lease_decision") == "publisher_ingress_disabled"]
+    check("server publisher ingress is Phase 2 disabled", bool(ingress) and all(row.get("phase2_enabled") is False and row.get("phase2_owner") is False and row.get("controller_created") is False for row in ingress))
+
     trigger_rows = _json_lines(session / "qaccess_trigger_audit.jsonl")
     failed_writes = [r for r in trigger_rows if r.get("trigger_decision") == "request_write_failed"]
     written = [r for r in trigger_rows if r.get("trigger_decision") == "request_written"]
@@ -104,6 +126,24 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
     except ValueError as exc:
         continuous, serial_detail = False, str(exc)
     check("continuous request serials", continuous, serial_detail)
+
+    sample_files = sorted((session / "combined_qaccess_t_dynamic").rglob("qaccess_runtime_samples_*_path*.csv"))
+    sample_rows: list[dict[str, str]] = []
+    for path in sample_files:
+        with path.open(newline="", encoding="utf-8") as handle:
+            sample_rows.extend(csv.DictReader(handle))
+    check("archived runtime samples exist", bool(sample_rows), f"rows={len(sample_rows)}")
+    check("all samples come from qserver owner PID", bool(sample_rows) and all(row.get("producer_pid") == owner_pid for row in sample_rows), owner_pid)
+    check("all samples have downlink sender role", bool(sample_rows) and all(row.get("endpoint_role") == "server_downlink_sender" for row in sample_rows))
+    check("all samples use owner state dir", bool(sample_rows) and all(row.get("phase2_state_dir") == owner_state_dir for row in sample_rows))
+    check("sample transport identity is populated", bool(sample_rows) and all(row.get("connection_id") and row.get("rtmp_session_id") and row.get("stream_key") and row.get("local_endpoint") and row.get("remote_endpoint") for row in sample_rows))
+    sender_bytes = [int(float(row.get("sender_bytes_total") or 0)) for row in sample_rows]
+    check("qserver sender bytes are nonzero", bool(sender_bytes) and max(sender_bytes) > 0, f"max={max(sender_bytes, default=0)}")
+    inflight = [int(float(row.get("inflight_bytes") or 0)) for row in sample_rows]
+    check("qserver sender observes nonzero inflight", bool(inflight) and max(inflight) > 0, f"max={max(inflight, default=0)}")
+    cwnd = {int(float(row.get("cwnd_bytes") or 0)) for row in sample_rows}
+    check("qserver sender CWND varies", len(cwnd) > 1, f"unique={len(cwnd)}")
+    check("loss/retransmission instrumentation is present", bool(sample_rows) and all("loss_rate" in row and "retrans_bytes_delta" in row for row in sample_rows))
 
     tc_start_ms, tc_complete = _tc_start_and_complete(session)
     check("TC deterioration completed all steps", tc_complete)

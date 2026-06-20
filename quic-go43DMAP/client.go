@@ -206,6 +206,10 @@ func populateClientConfig(config *Config) *Config {
 		LogControlActions: config.LogControlActions,
 		ExperimentRunID: config.ExperimentRunID,
 		ExperimentInputFile: config.ExperimentInputFile,
+		Phase2Enabled: config.Phase2Enabled,
+		Phase2Owner: config.Phase2Owner,
+		EndpointRole: config.EndpointRole,
+		Phase2StateDir: config.Phase2StateDir,
 	}
 }
 

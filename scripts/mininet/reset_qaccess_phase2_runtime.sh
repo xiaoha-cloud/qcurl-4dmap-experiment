@@ -10,7 +10,11 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-DERIVED="$ROOT/derived"
+DERIVED="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived}"
+if [[ "$DERIVED" != /* ]]; then
+  echo "[reset] QACCESS_PHASE2_STATE_DIR must be absolute: $DERIVED" >&2
+  exit 2
+fi
 INITIAL="$DERIVED/qaccess_t_initial_coefficients.json"
 RUNTIME="$DERIVED/qaccess_t_runtime_coefficients.json"
 
@@ -42,7 +46,8 @@ _phase2_rm \
   "$DERIVED/qaccess_runtime_samples.csv" \
   "$DERIVED/qaccess_update_request.json" \
   "$DERIVED/qaccess_update_response.json" \
-  "$DERIVED/qaccess_trigger_audit.jsonl"
+	"$DERIVED/qaccess_trigger_audit.jsonl" \
+	"$DERIVED/qaccess_owner_audit.jsonl"
 
 # Prior sudo Mininet runs may leave root-owned Phase 2 files the worker cannot truncate.
 for f in qaccess_runtime_samples.csv qaccess_update_request.json qaccess_update_response.json; do
