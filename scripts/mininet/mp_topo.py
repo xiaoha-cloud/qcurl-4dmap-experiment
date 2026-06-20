@@ -610,11 +610,24 @@ def run_experiment(net, args):
     # ---- Start server on h2 ------------------------------------------------
     server_log_path = os.path.join(logs_dir, f"server_{run_id}.log")
     server_log = _open_log_file(server_log_path, save_logs)
-    server_cmd = f"{env_prefix} {server_bin} -protocol=quic -au=false"
+    phase2_state_dir = os.path.abspath(os.environ.get("QACCESS_PHASE2_STATE_DIR", os.path.join(ROOT, "derived")))
+    server_phase2_enabled = um == "qaccess_t"
+    server_cmd = (
+        f"QACCESS_PHASE2_ENABLED={int(server_phase2_enabled)} "
+        f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=server_listener "
+        f"QACCESS_PHASE2_STATE_DIR={shlex.quote(phase2_state_dir)} "
+        f"QACCESS_EXPERIMENT_RUN_ID={shlex.quote(run_id)} {env_prefix} "
+        f"{server_bin} -protocol=quic -au=false"
+    )
     _log("server", f"starting on h2 → {server_log_path}")
     server_proc = h2.popen(
         f"cd {server_dir} && {server_cmd}",
         stdout=server_log, stderr=server_log, shell=True,
+    )
+    _append_timeline(
+        timeline_path, "phase2_identity", endpoint_role="server_listener",
+        phase2_enabled=server_phase2_enabled, phase2_owner=False,
+        controller_created=False, phase2_state_dir=phase2_state_dir,
     )
     time.sleep(3)
 
@@ -628,18 +641,23 @@ def run_experiment(net, args):
     lc = " -log-control" if getattr(args, "log_control", False) else ""
     pull_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
-        f"QACCESS_PHASE2_OWNER=1 QACCESS_ENDPOINT_ROLE=client_pull_receiver {env_prefix} {client_bin}"
+        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_pull_receiver {env_prefix} {client_bin}"
         f" -type=true -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(outfile)}"
         f"{lc}"
         f" -file={shlex.quote(outfile)} rtmp://10.0.1.2/live/test"
     )
-    _log("phase2", "endpoint_role=client_pull_receiver phase2_owner=1 mutation_allowed=1")
+    _log("phase2", "endpoint_role=client_pull_receiver phase2_enabled=0 phase2_owner=0 mutation_allowed=0")
     _log("pull", f"starting on h1 → {pull_log_path}")
     pull_proc = h1.popen(
         pull_cmd,
         stdout=pull_log, stderr=pull_log, shell=True,
+    )
+    _append_timeline(
+        timeline_path, "phase2_identity", endpoint_role="client_pull_receiver",
+        phase2_enabled=False, phase2_owner=False, controller_created=False,
+        phase2_state_dir=phase2_state_dir,
     )
     time.sleep(3)
 
@@ -648,18 +666,23 @@ def run_experiment(net, args):
     push_log = _open_log_file(push_log_path, save_logs)
     push_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
-        f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_push_publisher {env_prefix} {client_bin}"
+        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_push_publisher {env_prefix} {client_bin}"
         f" -type=false -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(input_flv)}"
         f"{lc}"
         f" -file={shlex.quote(input_flv)} rtmp://10.0.1.2/live/test"
     )
-    _log("phase2", "endpoint_role=client_push_publisher phase2_owner=0 mutation_allowed=0")
+    _log("phase2", "endpoint_role=client_push_publisher phase2_enabled=0 phase2_owner=0 mutation_allowed=0")
     _log("push", f"starting on h1 → {push_log_path}")
     push_proc = h1.popen(
         push_cmd,
         stdout=push_log, stderr=push_log, shell=True,
+    )
+    _append_timeline(
+        timeline_path, "phase2_identity", endpoint_role="client_push_publisher",
+        phase2_enabled=False, phase2_owner=False, controller_created=False,
+        phase2_state_dir=phase2_state_dir,
     )
     _append_timeline(
         timeline_path,

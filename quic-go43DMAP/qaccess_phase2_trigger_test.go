@@ -27,8 +27,10 @@ func newTriggerTestController(t *testing.T, maxRows, minSamples int64) (*Utility
 		RunID:  "trigger-test",
 		coeffs: defaultQAccessTCoefficients(),
 		phase2: qaccessPhase2Config{
+			enabled:             true,
 			owner:               true,
-			endpointRole:        "test_owner",
+			endpointRole:        Phase2OwnerRole,
+			stateDir:            dir,
 			runtimeExport:       true,
 			runtimeBufferMax:    maxRows,
 			minSamplesPerPath:   minSamples,

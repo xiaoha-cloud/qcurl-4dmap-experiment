@@ -26,8 +26,13 @@ const (
 )
 
 type qaccessPhase2Config struct {
-	owner        bool
-	endpointRole string
+	enabled       bool
+	owner         bool
+	endpointRole  string
+	stateDir      string
+	connectionID  string
+	rtmpSessionID string
+	streamKey     string
 
 	coeffReload         bool
 	coeffReloadInterval time.Duration
@@ -51,9 +56,12 @@ type qaccessPhase2Config struct {
 }
 
 func loadQAccessPhase2Config() qaccessPhase2Config {
+	stateDir := strings.TrimSpace(os.Getenv("QACCESS_PHASE2_STATE_DIR"))
 	return qaccessPhase2Config{
+		enabled:      envBool("QACCESS_PHASE2_ENABLED", false),
 		owner:        envBool("QACCESS_PHASE2_OWNER", false),
 		endpointRole: strings.TrimSpace(os.Getenv("QACCESS_ENDPOINT_ROLE")),
+		stateDir:     stateDir,
 
 		coeffReload:         envBool("QACCESS_COEFF_RELOAD", false),
 		coeffReloadInterval: time.Duration(envInt("QACCESS_COEFF_RELOAD_INTERVAL_MS", defaultCoeffReloadIntervalMs)) * time.Millisecond,
@@ -77,8 +85,26 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 	}
 }
 
+func loadQAccessPhase2ConfigForSession(cfg Phase2SessionConfig, connectionID string) qaccessPhase2Config {
+	p := loadQAccessPhase2Config()
+	p.enabled = cfg.Enabled
+	p.owner = cfg.Owner
+	p.endpointRole = cfg.EndpointRole
+	p.stateDir = cfg.StateDir
+	p.connectionID = connectionID
+	p.rtmpSessionID = cfg.RTMPSessionID
+	p.streamKey = cfg.StreamKey
+	p.coeffJSONPath = filepath.Join(cfg.StateDir, "qaccess_t_runtime_coefficients.json")
+	p.runtimeSamples = filepath.Join(cfg.StateDir, "qaccess_runtime_samples.csv")
+	p.updateRequestPath = filepath.Join(cfg.StateDir, "qaccess_update_request.json")
+	p.updateResponsePath = filepath.Join(cfg.StateDir, "qaccess_update_response.json")
+	p.triggerAuditPath = filepath.Join(cfg.StateDir, "qaccess_trigger_audit.jsonl")
+	return p
+}
+
 func (uc *UtilityController) phase2MutationAllowed() bool {
-	return uc != nil && uc.Mode == ModeQAccessT && uc.phase2.owner
+	return uc != nil && uc.Mode == ModeQAccessT && uc.phase2.enabled && uc.phase2.owner &&
+		uc.phase2.endpointRole == Phase2OwnerRole && filepath.IsAbs(uc.phase2.stateDir)
 }
 
 func resolveTriggerAuditPath() string {

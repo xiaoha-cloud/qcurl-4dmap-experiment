@@ -89,11 +89,11 @@ type sentPacketHandler struct {
 	// packetsWindow int
 	// lossesWindow map[int] bool
 	// lossRecently	int
-	totalrecvsize float64	
-	thistimesize float64
-	totaltime float64	
-	starttime time.Time
-	lasttime time.Time
+	totalrecvsize  float64
+	thistimesize   float64
+	totaltime      float64
+	starttime      time.Time
+	lasttime       time.Time
 	estimaterecvtp float64
 	thistimerecvtp float64
 
@@ -128,9 +128,9 @@ func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlg
 		rttStats:           rttStats,
 		congestion:         congestionControl,
 		onRTOCallback:      onRTOCallback,
-		starttime: time.Now(),
-		lasttime : time.Now(),
-	
+		starttime:          time.Now(),
+		lasttime:           time.Now(),
+
 		//packetsWindow:		5000,
 		//lossesWindow:	window,
 		//lossRecently: 0,
@@ -141,17 +141,16 @@ func (h *sentPacketHandler) GetStatistics() (uint64, uint64, uint64) {
 	return h.packets, h.retransmissions, h.losses
 }
 
-//cx add 
-func  (h *sentPacketHandler) GetStatisticstp() (float64,float64) {
+// cx add
+func (h *sentPacketHandler) GetStatisticstp() (float64, float64) {
 	now := time.Now()
 	h.totaltime = float64(now.Sub(h.starttime).Milliseconds())
-	h.estimaterecvtp = (h.totalrecvsize * 8 /  (h.totaltime / 1000) ) / 1000000
-	h.thistimerecvtp = (h.thistimesize * 8 /  (float64(now.Sub(h.lasttime).Microseconds()) / 1000000) ) / 1000000
+	h.estimaterecvtp = (h.totalrecvsize * 8 / (h.totaltime / 1000)) / 1000000
+	h.thistimerecvtp = (h.thistimesize * 8 / (float64(now.Sub(h.lasttime).Microseconds()) / 1000000)) / 1000000
 	h.lasttime = now
 	h.thistimesize = 0
-	return h.estimaterecvtp,h.thistimerecvtp
+	return h.estimaterecvtp, h.thistimerecvtp
 }
-
 
 func (h *sentPacketHandler) largestInOrderAcked() protocol.PacketNumber {
 	if f := h.packetHistory.Front(); f != nil {
@@ -195,7 +194,7 @@ func (h *sentPacketHandler) SentPacket(packet *Packet) error {
 
 	packet.Frames = stripNonRetransmittableFrames(packet.Frames)
 	isRetransmittable := len(packet.Frames) != 0
-	if packet.NeedRetrans == false && !HasRetransmittableFramesForRed(packet.Frames){
+	if packet.NeedRetrans == false && !HasRetransmittableFramesForRed(packet.Frames) {
 		//utils.Infof("[ach]false")
 		isRetransmittable = false
 	}
@@ -222,7 +221,7 @@ func (h *sentPacketHandler) SentPacket(packet *Packet) error {
 	return nil
 }
 
-func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumber protocol.PacketNumber, rcvTime time.Time) (error) {
+func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumber protocol.PacketNumber, rcvTime time.Time) error {
 	if ackFrame.LargestAcked > h.lastSentPacketNumber {
 		//utils.Infof("last setn :%v, lagest ack:%v",h.lastSentPacketNumber, ackFrame.LargestAcked)
 		return errAckForUnsentPacket
@@ -238,7 +237,7 @@ func (h *sentPacketHandler) ReceivedAck(ackFrame *wire.AckFrame, withPacketNumbe
 	if ackFrame.LargestAcked <= h.largestInOrderAcked() {
 		return nil
 	}
-	
+
 	h.LargestAcked = ackFrame.LargestAcked
 
 	if h.skippedPacketsAcked(ackFrame) {
@@ -564,7 +563,7 @@ func (h *sentPacketHandler) SendingAllowed(flag bool) bool {
 	// if (flag){
 	// 	return true
 	// }
-	if (congestionLimited){
+	if congestionLimited {
 		utils.Debugf("CL: bytes in flight %d, window %d",
 			h.bytesInFlight,
 			h.congestion.GetCongestionWindow())
@@ -678,25 +677,29 @@ func (h *sentPacketHandler) garbageCollectSkippedPackets() {
 	h.skippedPackets = h.skippedPackets[deleteIndex:]
 }
 
-//cx add 1215
-func (h *sentPacketHandler) GetCWND() uint64{
+// cx add 1215
+func (h *sentPacketHandler) GetCWND() uint64 {
 	return uint64(h.congestion.GetCongestionWindow())
 }
 
-func (h *sentPacketHandler) GetBytesInflight() uint64{
+func (h *sentPacketHandler) GetBytesInflight() uint64 {
 	return uint64(h.bytesInFlight)
 }
 
-func (h *sentPacketHandler) GetBandwidthEstimate() uint64{
+func (h *sentPacketHandler) GetBandwidthEstimate() uint64 {
 	return uint64(h.congestion.BandwidthEstimate())
 }
 
-func (h * sentPacketHandler) GetLossRate() float64{
+func (h *sentPacketHandler) GetLossRate() float64 {
 	return float64(h.losses) / float64(h.packets)
 }
 
 func (h *sentPacketHandler) GetLostByte() protocol.ByteCount {
 	return h.lostbytes
+}
+
+func (h *sentPacketHandler) GetSentBytes() uint64 {
+	return uint64(h.totalrecvsize)
 }
 
 // SetUtilityControl passes gain/backoff to the congestion algorithm (4D-MAP utility controller)

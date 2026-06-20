@@ -205,6 +205,18 @@ func populateServerConfig(config *Config) *Config {
 		KeepAlive:                             config.KeepAlive,
 		MaxReceiveStreamFlowControlWindow:     maxReceiveStreamFlowControlWindow,
 		MaxReceiveConnectionFlowControlWindow: maxReceiveConnectionFlowControlWindow,
+		CreatePaths:                           config.CreatePaths,
+		SchedulerName:                         config.SchedulerName,
+		GenerateRedundancy:                    config.GenerateRedundancy,
+		IPriority:                             config.IPriority,
+		UtilityMode:                           config.UtilityMode,
+		LogControlActions:                     config.LogControlActions,
+		ExperimentRunID:                       config.ExperimentRunID,
+		ExperimentInputFile:                   config.ExperimentInputFile,
+		Phase2Enabled:                         config.Phase2Enabled,
+		Phase2Owner:                           config.Phase2Owner,
+		EndpointRole:                          config.EndpointRole,
+		Phase2StateDir:                        config.Phase2StateDir,
 	}
 }
 

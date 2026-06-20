@@ -58,9 +58,9 @@ type session struct {
 	version      protocol.VersionNumber
 	config       *Config
 
-	paths        map[protocol.PathID]*path
-	closedPaths  map[protocol.PathID]bool
-	pathsLock    sync.RWMutex
+	paths       map[protocol.PathID]*path
+	closedPaths map[protocol.PathID]bool
+	pathsLock   sync.RWMutex
 
 	createPaths bool
 
@@ -71,7 +71,7 @@ type session struct {
 	remoteRTTs         map[protocol.PathID]time.Duration
 	lastPathsFrameSent time.Time
 
-	streamFramer          *streamFramer
+	streamFramer *streamFramer
 
 	flowControlManager flowcontrol.FlowControlManager
 
@@ -113,7 +113,7 @@ type session struct {
 	sessionCreationTime     time.Time
 	lastNetworkActivityTime time.Time
 
-	timer           *utils.Timer
+	timer *utils.Timer
 	// keepAlivePingSent stores whether a Ping frame was sent to the peer or not
 	// it is reset as soon as we receive a packet from the peer
 	keepAlivePingSent bool
@@ -123,11 +123,10 @@ type session struct {
 	pathManager         *pathManager
 	pathManagerLaunched bool
 
-	scheduler           *scheduler
+	scheduler *scheduler
 
 	//feedback_gap map[protocol.PathID]protocol.ByteCount
 
-	
 }
 
 var _ Session = &session{}
@@ -240,7 +239,6 @@ func (s *session) setup(
 	s.streamFramer = newStreamFramer(s.streamsMap, s.flowControlManager)
 	s.pathTimers = make(chan *path)
 
-
 	var err error
 	if s.perspective == protocol.PerspectiveServer {
 		cryptoStream, _ := s.GetOrOpenStream(1)
@@ -311,6 +309,20 @@ func (s *session) setup(
 	return s, handshakeChan, nil
 }
 
+func (s *session) configurePhase2(cfg Phase2SessionConfig) error {
+	if s.scheduler == nil {
+		return fmt.Errorf("phase2 scheduler is not initialized")
+	}
+	return s.scheduler.configurePhase2(cfg, fmt.Sprintf("%x", s.connectionID))
+}
+
+func (s *session) disablePhase2() error {
+	if s.scheduler == nil {
+		return nil
+	}
+	return s.scheduler.disablePhase2()
+}
+
 // run the session main loop
 func (s *session) run() error {
 	// Start the crypto stream handler
@@ -320,19 +332,19 @@ func (s *session) run() error {
 		}
 	}()
 
-	//cx add 
+	//cx add
 	go func() {
 		rcvtp := 0.0
 		rcvthistimetp := 0.0
 		sndtp := 0.0
 		sndthistimetp := 0.0
-		for{
-			for _, pth :=range s.paths{
-				rcvtp , rcvthistimetp = pth.receivedPacketHandler.GetStatisticstp()
-				sndtp , sndthistimetp = pth.sentPacketHandler.GetStatisticstp()
+		for {
+			for _, pth := range s.paths {
+				rcvtp, rcvthistimetp = pth.receivedPacketHandler.GetStatisticstp()
+				sndtp, sndthistimetp = pth.sentPacketHandler.GetStatisticstp()
 				s.scheduler.monitor.mutex.Lock()
-				utils.Infof("path :%d mean tp: %fMbps, rcvim tp: %fMbps, RTT: %v,",pth.pathID, rcvtp, rcvthistimetp, float64(s.scheduler.monitor.state_owd[pth.pathID]) /1000000 * 2)
-				utils.Infof("path :%d mean tp: %fMbps, sndim tp: %fMbps, RTT: %v,",pth.pathID, sndtp, sndthistimetp, float64(s.scheduler.monitor.state_owd[pth.pathID]) /1000000 * 2)
+				utils.Infof("path :%d mean tp: %fMbps, rcvim tp: %fMbps, RTT: %v,", pth.pathID, rcvtp, rcvthistimetp, float64(s.scheduler.monitor.state_owd[pth.pathID])/1000000*2)
+				utils.Infof("path :%d mean tp: %fMbps, sndim tp: %fMbps, RTT: %v,", pth.pathID, sndtp, sndthistimetp, float64(s.scheduler.monitor.state_owd[pth.pathID])/1000000*2)
 				s.scheduler.monitor.mutex.Unlock()
 			}
 			time.Sleep(time.Second)
@@ -452,7 +464,7 @@ runLoop:
 		}
 
 		// Check if we should send a PATHS frame (currently hardcoded at 200 ms) only when at least one stream is open (not counting streams 1 and 3 never closed...)
-		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200 * time.Millisecond && len(s.streamsMap.openStreams) > 2 {
+		if s.handshakeComplete && s.version >= protocol.VersionMP && now.Sub(s.lastPathsFrameSent) >= 200*time.Millisecond && len(s.streamsMap.openStreams) > 2 {
 			s.schedulePathsFrame()
 		}
 
@@ -515,7 +527,7 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 	s.keepAlivePingSent = false
 
 	var pth *path
-	var ok  bool
+	var ok bool
 	var err error
 
 	pth, ok = s.paths[p.publicHeader.PathID]
@@ -523,20 +535,20 @@ func (s *session) handlePacketImpl(p *receivedPacket) error {
 		// It's a new path initiated from remote host
 		pth, err = s.pathManager.createPathFromRemote(p)
 		if err != nil {
-			return err  
+			return err
 		}
 	}
 	return pth.handlePacketImpl(p)
 }
 
 func (s *session) handleFrames(fs []wire.Frame, p *path, rcvtime time.Time) error {
-	
+
 	for _, ff := range fs {
 		var err error
 		//wire.LogFrame(ff, false)
 		switch frame := ff.(type) {
 		case *wire.StreamFrame:
-			frame.Rcvpkttime = rcvtime 
+			frame.Rcvpkttime = rcvtime
 			err = s.handleStreamFrame(frame, p.pathID)
 		case *wire.AckFrame:
 			err = s.handleAckFrame(frame)
@@ -569,7 +581,7 @@ func (s *session) handleFrames(fs []wire.Frame, p *path, rcvtime time.Time) erro
 			for i := 0; i < int(frame.NumPaths); i++ {
 				fmt.Println(s.paths)
 				s.remoteRTTs[frame.PathIDs[i]] = frame.RemoteRTTs[i]
-				if frame.RemoteRTTs[i] >= 30 * time.Minute {
+				if frame.RemoteRTTs[i] >= 30*time.Minute {
 					// Path is potentially failed
 					s.paths[frame.PathIDs[i]].potentiallyFailed.Set(true)
 				}
@@ -734,7 +746,7 @@ func (s *session) closePaths() {
 		s.pathsLock.RLock()
 		for _, pth := range s.paths {
 			select {
-			case pth.closeChan<-nil:
+			case pth.closeChan <- nil:
 			default:
 				// Don't block
 			}
@@ -808,17 +820,17 @@ func (s *session) handleCloseError(closeErr closeError) error {
 }
 
 func (s *session) sendPacket() error {
-	if s.scheduler.SchedulerName == "moooko" || s.scheduler.SchedulerName == "dispatch"{
+	if s.scheduler.SchedulerName == "moooko" || s.scheduler.SchedulerName == "dispatch" {
 		//utils.Infof("here  moooko")
-        return s.scheduler.sendPacketSTMS(s)      //cx add 1214 : a new scheduler mooo
-	}else if s.scheduler.SchedulerName == "redundancy"{			// cx add 1219
+		return s.scheduler.sendPacketSTMS(s) //cx add 1214 : a new scheduler mooo
+	} else if s.scheduler.SchedulerName == "redundancy" { // cx add 1219
 		//utils.Infof("here redundancy")
 		return s.scheduler.sendPacketRedundancy(s)
-	}else if s.scheduler.SchedulerName == "RDDT"{
+	} else if s.scheduler.SchedulerName == "RDDT" {
 		return s.scheduler.sendPacketRDDT(s)
-	}else{
-	    return s.scheduler.sendPacket(s)
-    }
+	} else {
+		return s.scheduler.sendPacket(s)
+	}
 }
 
 func (s *session) sendPackedPacket(packet *packedPacket, pth *path, needRetrans bool) error {
@@ -828,12 +840,12 @@ func (s *session) sendPackedPacket(packet *packedPacket, pth *path, needRetrans 
 		Frames:          packet.frames,
 		Length:          protocol.ByteCount(len(packet.raw)),
 		EncryptionLevel: packet.encryptionLevel,
-		NeedRetrans : needRetrans,
+		NeedRetrans:     needRetrans,
 	})
 	if err != nil {
 		return err
 	}
-	pth.sentPacket<-struct{}{}
+	pth.sentPacket <- struct{}{}
 
 	s.logPacket(packet, pth.pathID)
 	return pth.conn.Write(packet.raw)
@@ -881,7 +893,7 @@ func (s *session) logPacket(packet *packedPacket, pathID protocol.PathID) {
 		// We don't need to allocate the slices for calling the format functions
 		return
 	}
-	
+
 	//utils.Debugf("-> Sending packet 0x%x (%d bytes) for connection %x on path %x, %v, %s rtt:%v", packet.number, len(packet.raw), s.connectionID, pathID, s.paths[pathID].conn.LocalAddr(), packet.encryptionLevel,s.paths[pathID].rttStats.SmoothedRTT())
 	// for _, frame := range packet.frames {
 	// 	wire.LogFrame(frame, true)
@@ -916,7 +928,7 @@ func (s *session) OpenStreamSync() (Stream, error) {
 func (s *session) WaitUntilHandshakeComplete() error {
 	return <-s.handshakeCompleteChan
 }
-func (s *session) GetScheduler () *scheduler{
+func (s *session) GetScheduler() *scheduler {
 	return s.scheduler
 }
 
@@ -1017,19 +1029,18 @@ func (s *session) GetVersion() protocol.VersionNumber {
 	return s.version
 }
 
-//monitor transport layer
-func(s *session) GetAvailiableSpace() int64{
+// monitor transport layer
+func (s *session) GetAvailiableSpace() int64 {
 	var space int64
 	for _, pthTmp := range s.paths {
 		tmp := int64(pthTmp.sentPacketHandler.GetCWND() - pthTmp.sentPacketHandler.GetBytesInflight())
-		if tmp > 0{
+		if tmp > 0 {
 			space += tmp
 		}
 	}
 	return space
 }
 
-
-func (s *session) SetCWNDFlag(flag bool)() {
+func (s *session) SetCWNDFlag(flag bool) {
 	s.scheduler.CWNDFlag = flag
 }

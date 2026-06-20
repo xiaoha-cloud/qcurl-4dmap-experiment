@@ -14,6 +14,8 @@ import (
 
 var qaccessSampleCSVHeader = []string{
 	"timestamp_ms", "run_id", "path_id",
+	"endpoint_role", "producer_pid", "connection_id", "rtmp_session_id", "stream_key",
+	"local_endpoint", "remote_endpoint", "phase2_state_dir", "sender_bytes_total",
 	"bw_bps", "owd_ms", "delay_gradient_ms", "loss_rate",
 	"lost_bytes_delta", "retrans_bytes_delta",
 	"cwnd_bytes", "inflight_bytes", "cwnd_room",

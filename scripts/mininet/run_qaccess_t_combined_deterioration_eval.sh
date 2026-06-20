@@ -31,7 +31,7 @@ fi
 MP="$ROOT/scripts/mininet/mp_topo.py"
 RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
 FINALIZE="$ROOT/scripts/mininet/finalize_experiment_leg.sh"
-RUNTIME_COEFFS="${QACCESS_COEFFS_JSON:-derived/qaccess_t_runtime_coefficients.json}"
+PHASE2_STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived}"
 SCENARIO="${SCENARIO:-fig8}"
 DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile_90_150.env}"
 TIMEOUT="${TIMEOUT:-220}"
@@ -40,13 +40,6 @@ INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
 BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
 MIN_SAMPLES_PER_PATH="${QACCESS_MIN_SAMPLES_PER_PATH:-1}"
-TRIGGER_AUDIT="${QACCESS_TRIGGER_AUDIT_JSONL:-derived/qaccess_trigger_audit.jsonl}"
-if [[ "$TRIGGER_AUDIT" = /* ]]; then
-  TRIGGER_AUDIT_PATH="$TRIGGER_AUDIT"
-else
-  TRIGGER_AUDIT_PATH="$ROOT/$TRIGGER_AUDIT"
-fi
-ARCHIVE_DIR="${QACCESS_ARCHIVE_DIR:-derived/qaccess_processed_buffers}"
 WORKER_PYTHON="${WORKER_PYTHON:-${REPO_ROOT}/.venv/bin/python3}"
 WORKER_MODEL="${QACCESS_WORKER_MODEL:-derived/qaccess_t_redesign/qaccess_t_model_delta_bw_1s.pkl}"
 WORKER_MODEL_METADATA="${QACCESS_WORKER_MODEL_METADATA:-derived/qaccess_t_redesign/qaccess_t_redesign_report.json}"
@@ -67,6 +60,11 @@ resolve_repo_path() {
 WORKER_MODEL="$(resolve_repo_path "$WORKER_MODEL")"
 WORKER_MODEL_METADATA="$(resolve_repo_path "$WORKER_MODEL_METADATA")"
 DETERIORATION_PROFILE="$(resolve_repo_path "$DETERIORATION_PROFILE")"
+PHASE2_STATE_DIR="$(resolve_repo_path "$PHASE2_STATE_DIR")"
+[[ "$PHASE2_STATE_DIR" = /* ]] || { echo "[error] Phase 2 state dir must be absolute" >&2; exit 2; }
+RUNTIME_COEFFS="$PHASE2_STATE_DIR/qaccess_t_runtime_coefficients.json"
+TRIGGER_AUDIT_PATH="$PHASE2_STATE_DIR/qaccess_trigger_audit.jsonl"
+ARCHIVE_DIR="$PHASE2_STATE_DIR/qaccess_processed_buffers"
 
 case "$EXECUTION_MODE" in
   shadow|active) ;;
@@ -90,7 +88,13 @@ WORKER_CMD=(
   --model "$WORKER_MODEL"
   --model-metadata "$WORKER_MODEL_METADATA"
   --target-mode "$WORKER_TARGET_MODE"
-  --coeffs-out derived/qaccess_t_runtime_coefficients.json
+  --request "$PHASE2_STATE_DIR/qaccess_update_request.json"
+  --runtime-samples "$PHASE2_STATE_DIR/qaccess_runtime_samples.csv"
+  --coeffs-out "$PHASE2_STATE_DIR/qaccess_t_runtime_coefficients.json"
+  --response-out "$PHASE2_STATE_DIR/qaccess_update_response.json"
+  --state "$PHASE2_STATE_DIR/qaccess_worker_state.json"
+  --archive-dir "$PHASE2_STATE_DIR/qaccess_processed_buffers"
+  --audit-csv "$PHASE2_STATE_DIR/qaccess_update_audit.csv"
   --min-delta-gain-bps "$GATE_BPS"
 )
 if [[ "$EXECUTION_MODE" == "shadow" ]]; then
@@ -191,13 +195,14 @@ preflight_worker_python() {
     return 1
   fi
   "$WORKER_PYTHON" --version 2>&1 | sed 's/^/[combined_deterioration] worker python version: /'
-  "$WORKER_PYTHON" - "$ROOT" "$WORKER_MODEL" "$WORKER_MODEL_METADATA" >"$process_log" 2>&1 <<'PY'
+  "$WORKER_PYTHON" - "$ROOT" "$WORKER_MODEL" "$WORKER_MODEL_METADATA" "$PHASE2_STATE_DIR" >"$process_log" 2>&1 <<'PY'
 import sys
 from pathlib import Path
 
 repo = Path(sys.argv[1])
 model_path = Path(sys.argv[2])
 metadata_path = Path(sys.argv[3])
+state_dir = Path(sys.argv[4])
 if not model_path.is_absolute():
     model_path = repo / model_path
 if not metadata_path.is_absolute():
@@ -217,7 +222,9 @@ if not metadata_path.is_file():
     raise FileNotFoundError(f"missing model metadata {metadata_path}")
 print(f"[worker-preflight] model_metadata=ok path={metadata_path}", flush=True)
 
-coeffs_path = repo / "derived" / "qaccess_t_runtime_coefficients.json"
+if not state_dir.is_absolute():
+    raise ValueError(f"Phase 2 state dir must be absolute: {state_dir}")
+coeffs_path = state_dir / "qaccess_t_runtime_coefficients.json"
 if not coeffs_path.is_file():
     raise FileNotFoundError(f"missing runtime coefficients {coeffs_path}")
 with coeffs_path.open("a", encoding="utf-8"):
@@ -308,15 +315,15 @@ except Exception as e:
 sync_leg_inputs() {
   local dest_dir="$1"
   mkdir -p "$dest_dir/processed_buffers" "$dest_dir/derived_snapshots"
-  if [[ -d "$ROOT/$ARCHIVE_DIR" ]]; then
-    cp -a "$ROOT/$ARCHIVE_DIR/." "$dest_dir/processed_buffers/" 2>/dev/null || true
+  if [[ -d "$ARCHIVE_DIR" ]]; then
+    cp -a "$ARCHIVE_DIR/." "$dest_dir/processed_buffers/" 2>/dev/null || true
   fi
   for rel in \
-    "derived/qaccess_runtime_samples.csv" \
-    "derived/qaccess_update_response.json" \
+    "$PHASE2_STATE_DIR/qaccess_runtime_samples.csv" \
+    "$PHASE2_STATE_DIR/qaccess_update_response.json" \
     "$RUNTIME_COEFFS"; do
-    if [[ -f "$ROOT/$rel" ]]; then
-      cp "$ROOT/$rel" "$dest_dir/derived_snapshots/$(basename "$rel")"
+    if [[ -f "$rel" ]]; then
+      cp "$rel" "$dest_dir/derived_snapshots/$(basename "$rel")"
     fi
   done
 }
@@ -369,13 +376,13 @@ echo "[combined_deterioration] requested target mode: $WORKER_TARGET_MODE"
 preflight_worker_python "$(worker_process_log_file)"
 
 echo "[combined_deterioration] baseline leg (same deterioration profile, no qaccess, no worker)"
-bash "$RESET"
+QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
 run_one baseline combined_baseline
 
 echo "[combined_deterioration] reset runtime + initialize coefficients from initial"
-bash "$RESET"
+QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
 COEFFS_BEFORE="$SESSION_DIR/combined_qaccess_t_dynamic_coeffs_before.json"
-cp "$ROOT/$RUNTIME_COEFFS" "$COEFFS_BEFORE"
+cp "$RUNTIME_COEFFS" "$COEFFS_BEFORE"
 echo "[combined_deterioration] runtime coefficients BEFORE dynamic leg:"
 cat "$COEFFS_BEFORE"
 echo "[combined_deterioration] parsed: $(read_coeffs "$COEFFS_BEFORE")"
@@ -389,6 +396,7 @@ echo "[combined_deterioration] dynamic leg: qaccess_t + delta_bw_1s worker ($EXE
 echo "[combined_deterioration] worker model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
 echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
 run_one qaccess_t combined_qaccess_t_dynamic \
+  QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
   QACCESS_COEFF_RELOAD=1 \
   QACCESS_TRIGGER_UPDATE=1 \
@@ -404,9 +412,12 @@ stop_worker
 if [[ -f "$TRIGGER_AUDIT_PATH" ]]; then
   cp "$TRIGGER_AUDIT_PATH" "$SESSION_DIR/qaccess_trigger_audit.jsonl"
 fi
+if [[ -f "$PHASE2_STATE_DIR/qaccess_owner_audit.jsonl" ]]; then
+  cp "$PHASE2_STATE_DIR/qaccess_owner_audit.jsonl" "$SESSION_DIR/qaccess_owner_audit.jsonl"
+fi
 
 COEFFS_AFTER="$SESSION_DIR/combined_qaccess_t_dynamic_coeffs_after.json"
-cp "$ROOT/$RUNTIME_COEFFS" "$COEFFS_AFTER"
+cp "$RUNTIME_COEFFS" "$COEFFS_AFTER"
 echo ""
 echo "[combined_deterioration] runtime coefficients AFTER dynamic leg:"
 cat "$COEFFS_AFTER"

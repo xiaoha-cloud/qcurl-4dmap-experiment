@@ -3,6 +3,7 @@ package quic
 import (
 	"math"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -52,6 +53,9 @@ type PathMetrics struct {
 	Backoff           float64
 	Utility           float64
 	Timestamp         time.Time
+	LocalEndpoint     string
+	RemoteEndpoint    string
+	SenderBytesTotal  uint64
 }
 
 type PathState struct {
@@ -83,9 +87,9 @@ type ControlSignal struct {
 
 // UtilityController implements Q-ACCeSS-T utility → gain/backoff for OLIA secondary paths.
 type UtilityController struct {
-	Mode   UtilityMode
-	RunID  string
-	Prev   map[protocol.PathID]*PathState
+	Mode                   UtilityMode
+	RunID                  string
+	Prev                   map[protocol.PathID]*PathState
 	MinGain, MaxGain       float64
 	MinBackoff, MaxBackoff float64
 
@@ -99,19 +103,19 @@ type UtilityController struct {
 	perPathCoeffs map[protocol.PathID]QAccessCoefficients
 
 	// Phase 2 (qaccess_t only; disabled when env flags are 0).
-	phase2               qaccessPhase2Config
-	lastCoeffCheck       time.Time
-	lastCoeffMtime       time.Time
-	lastTriggerTime      time.Time
-	lastPeriodicTrigger  time.Time
-	requestSerial        int64
-	updateInProgress     bool
-	inflightRequestID    string
-	inflightPathID       protocol.PathID
-	inflightGlobalBuffer bool
-	lastBufferDecision   string
-	roundBwHistory       []float64
-	currentRoundTotalBwBps float64
+	phase2                  qaccessPhase2Config
+	lastCoeffCheck          time.Time
+	lastCoeffMtime          time.Time
+	lastTriggerTime         time.Time
+	lastPeriodicTrigger     time.Time
+	requestSerial           int64
+	updateInProgress        bool
+	inflightRequestID       string
+	inflightPathID          protocol.PathID
+	inflightGlobalBuffer    bool
+	lastBufferDecision      string
+	roundBwHistory          []float64
+	currentRoundTotalBwBps  float64
 	currentRoundActivePaths int
 	lastRoundActivePaths    int
 
@@ -127,6 +131,10 @@ type UtilityController struct {
 }
 
 func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
+	return newUtilityController(mode, runID, loadQAccessPhase2Config())
+}
+
+func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Config) *UtilityController {
 	uc := &UtilityController{
 		Mode:            mode,
 		RunID:           runID,
@@ -141,7 +149,7 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	}
 	switch mode {
 	case ModeQAccessT:
-		uc.phase2 = loadQAccessPhase2Config()
+		uc.phase2 = phase2
 		jsonPath := uc.phase2.coeffJSONPath
 		// Non-owners keep the same startup control coefficients, but never reload
 		// or mutate Phase 2 runtime state after initialization.
@@ -343,20 +351,20 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 	}
 
 	sig := ControlSignal{
-		PathID:     pm.PathID,
-		Mode:       uc.Mode,
-		Utility:    math.Round(u*10000) / 10000,
-		Gain:       math.Round(gain*10000) / 10000,
-		Backoff:    math.Round(backoff*10000) / 10000,
-		NormG:      math.Round(normG*10000) / 10000,
-		NormD:      math.Round(normD*10000) / 10000,
-		NormL:      math.Round(normL*10000) / 10000,
-		GTotal:     math.Round(gTotal*10000) / 10000,
-		Alpha:      alpha,
-		Beta:       beta,
-		Gamma:      gamma,
+		PathID:      pm.PathID,
+		Mode:        uc.Mode,
+		Utility:     math.Round(u*10000) / 10000,
+		Gain:        math.Round(gain*10000) / 10000,
+		Backoff:     math.Round(backoff*10000) / 10000,
+		NormG:       math.Round(normG*10000) / 10000,
+		NormD:       math.Round(normD*10000) / 10000,
+		NormL:       math.Round(normL*10000) / 10000,
+		GTotal:      math.Round(gTotal*10000) / 10000,
+		Alpha:       alpha,
+		Beta:        beta,
+		Gamma:       gamma,
 		DelayTrend:  math.Round(pm.DelayGradientMs*10000) / 10000,
-		Active:     active,
+		Active:      active,
 		Diagnostics: diag,
 	}
 
@@ -373,6 +381,15 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma, diag)
+		row["endpoint_role"] = uc.phase2.endpointRole
+		row["producer_pid"] = strconv.Itoa(os.Getpid())
+		row["connection_id"] = uc.phase2.connectionID
+		row["rtmp_session_id"] = uc.phase2.rtmpSessionID
+		row["stream_key"] = uc.phase2.streamKey
+		row["local_endpoint"] = pm.LocalEndpoint
+		row["remote_endpoint"] = pm.RemoteEndpoint
+		row["phase2_state_dir"] = uc.phase2.stateDir
+		row["sender_bytes_total"] = strconv.FormatUint(pm.SenderBytesTotal, 10)
 		if err := uc.runtimeExporter.recordPending(row, pm.PathID, pm.BWbps); err != nil {
 			utils.Infof("[qaccess_t] runtime sample export error path=%v: %v", pm.PathID, err)
 		}
