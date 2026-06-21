@@ -445,9 +445,18 @@ class ValidatorTests(unittest.TestCase):
                 frame = pd.DataFrame({"elapsed_s": list(range(220)), "throughput_mbps": [scale] * 220})
                 for filename in comparison.FILES.values():
                     frame.to_csv(directory / filename, index=False)
-            (session / "worker.log").write_text(json.dumps({
-                "request_id": "run_1", "status": "APPLIED_AGGREGATE", "actual_applied": True,
-            }) + "\n")
+            (session / "experiment_metadata.json").write_text(json.dumps({
+                "gate_mode": "hybrid", "min_relative_gain": 0.03, "min_delta_gain_bps": 100000,
+            }))
+            worker_events = [
+                {"request_id": "run_1", "request_classification": "PRE_DETERIORATION",
+                 "status": "ACTIVE_AGGREGATE_SKIPPED", "actual_applied": False,
+                 "relative_gate_pass": True, "absolute_gate_pass": False},
+                {"request_id": "run_2", "request_classification": "DURING_DETERIORATION",
+                 "status": "APPLIED_AGGREGATE", "actual_applied": True,
+                 "relative_gate_pass": True, "absolute_gate_pass": True},
+            ]
+            (session / "worker.log").write_text("".join(json.dumps(row) + "\n" for row in worker_events))
             (session / "qaccess_trigger_audit.jsonl").write_text(json.dumps({
                 "request_id": "run_1", "trigger_decision": "request_written",
             }) + "\n")
@@ -455,6 +464,10 @@ class ValidatorTests(unittest.TestCase):
             self.assertEqual(set(report["arms"]), {"baseline", "dynamic"})
             self.assertFalse(report["fixed_utility_arm"])
             self.assertEqual(report["verdict"], "dynamic_better")
+            self.assertEqual(report["gate_mode"], "hybrid")
+            self.assertEqual(report["applied_update_count"], 1)
+            self.assertEqual(report["applied_request_classifications"], ["DURING_DETERIORATION"])
+            self.assertTrue(report["pre_small_gain_updates_blocked"])
 
     def _validate(self, mode="shadow", during=True, failed=False):
         temp = tempfile.TemporaryDirectory()
