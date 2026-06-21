@@ -96,6 +96,10 @@ def _coefficient_signature(row: dict[str, Any]) -> tuple[float, float, float]:
     )
 
 
+def _coefficients_close(lhs: tuple[float, float, float], rhs: tuple[float, float, float], tol: float = 1e-9) -> bool:
+    return all(abs(a - b) <= tol for a, b in zip(lhs, rhs))
+
+
 def _diagnostic_timestamp_ms(row: dict[str, Any]) -> float | None:
     for key in ("timestamp_ms", "ts_ms", "time_ms"):
         value = row.get(key)
@@ -347,7 +351,7 @@ def validate_session(
                 if after_rows:
                     first_after_ms = _diagnostic_timestamp_ms(after_rows[0])
                 if applied_sig is not None:
-                    reload_confirmed = any(_coefficient_signature(row) == applied_sig for row in after_rows)
+                    reload_confirmed = any(_coefficients_close(_coefficient_signature(row), applied_sig) for row in after_rows)
                 had_pre_apply_diagnostics = bool(before_rows)
             else:
                 had_pre_apply_diagnostics = False
