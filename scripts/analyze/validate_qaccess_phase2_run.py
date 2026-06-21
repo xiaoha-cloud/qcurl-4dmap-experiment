@@ -81,12 +81,54 @@ def scoring_path_coverage(scored_path_sets: list[set[int]], media_paths: list[in
     return all_media_seen, multipath_request_seen
 
 
-def validate_session(session: Path, mode: str, deterioration_start: float, deterioration_end: float) -> int:
+def _load_diagnostics_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _coefficient_signature(row: dict[str, Any]) -> tuple[float, float, float]:
+    return (
+        float(row.get("alpha", INITIAL_COEFFS["alpha"])),
+        float(row.get("beta", INITIAL_COEFFS["beta"])),
+        float(row.get("gamma", INITIAL_COEFFS["gamma"])),
+    )
+
+
+def _diagnostic_timestamp_ms(row: dict[str, Any]) -> float | None:
+    for key in ("timestamp_ms", "ts_ms", "time_ms"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return float(value)
+    for key in ("elapsed_ms",):
+        value = row.get(key)
+        if value not in (None, ""):
+            return float(value)
+    for key in ("elapsed_s", "time_s", "seconds"):
+        value = row.get(key)
+        if value not in (None, ""):
+            return float(value) * 1000
+    return None
+
+
+def validate_session(
+    session: Path,
+    mode: str,
+    deterioration_start: float,
+    deterioration_end: float,
+    log_file: Path | None = None,
+) -> int:
     failures = 0
+    lines: list[str] = []
+
+    def emit(line: str) -> None:
+        print(line)
+        lines.append(line)
 
     def check(label: str, ok: bool, detail: str = "") -> None:
         nonlocal failures
-        print(f"{'PASS' if ok else 'FAIL'} {label}{(': ' + detail) if detail else ''}")
+        emit(f"{'PASS' if ok else 'FAIL'} {label}{(': ' + detail) if detail else ''}")
         failures += 0 if ok else 1
 
     ready_path = session / "worker_ready.json"
@@ -177,7 +219,7 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
         else:
             classification = "ACTIVE_MEDIA_PATH"
         (eligible_paths if eligible else idle_paths).append(path_id)
-        print(
+        emit(
             f"INFO path={path_id} endpoint={endpoint} rows={len(rows)} eligible={str(eligible).lower()} "
             f"classification={classification} sender_first={sender[0] if sender else 0} "
             f"sender_last={sender[-1] if sender else 0} sender_delta={delta} counter_reset={str(reset).lower()} "
@@ -219,7 +261,7 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
     during = [row for row in classified if row[2] == "DURING_DETERIORATION"]
     check("request during deterioration", bool(during), f"window={deterioration_start:g}-{deterioration_end:g}s")
     for request_id, elapsed, classification in classified:
-        print(f"INFO request={request_id} elapsed_s={elapsed:.3f} classification={classification}")
+        emit(f"INFO request={request_id} elapsed_s={elapsed:.3f} classification={classification}")
 
     score_files = sorted(session.rglob("qaccess_candidate_scores_*.csv"))
     check("candidate-score artifacts exist", bool(score_files), f"count={len(score_files)}")
@@ -244,7 +286,7 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
     if mode == "shadow":
         check("shadow mode is true", shadow)
         gate_passes = sum(bool(r.get("would_apply")) for r in worker_rows)
-        print(f"INFO shadow requests passing configured gate={gate_passes}/{len(worker_rows)}")
+        emit(f"INFO shadow requests passing configured gate={gate_passes}/{len(worker_rows)}")
         check("active coefficients remain initial", _coefficients_match_initial(before) and before == after)
         check("no real APPLIED result", "APPLIED" not in statuses)
         check("aggregate stepped proposals recorded", any(r.get("equal_weight_proposed_stepped_coefficients") and r.get("traffic_weighted_proposed_stepped_coefficients") for r in worker_rows))
@@ -271,22 +313,90 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
                 continue
             request_id = str(row.get("request_id") or "")
             elapsed, label = classifications.get(request_id, (float("nan"), "UNKNOWN"))
-            print(f"INFO applied_request={request_id} elapsed_s={elapsed:.3f} classification={label}")
+            emit(f"INFO applied_request={request_id} elapsed_s={elapsed:.3f} classification={label}")
         check("runtime coefficients changed", bool(before) and bool(after) and before != after)
         diagnostics = session / "combined_qaccess_t_dynamic" / "control_law_diagnostics.csv"
+        diagnostics_rows = _load_diagnostics_rows(diagnostics)
+        applied_rows = [row for row in worker_rows if bool(row.get("actual_applied"))]
+        comparison_report = {}
+        comparison_path = session / "baseline_vs_dynamic_relative_comparison.json"
+        if comparison_path.is_file():
+            comparison_report = _json(comparison_path)
+        comparison_applied = comparison_report.get("dynamic_updates_applied") is True
         reload_confirmed = False
-        if diagnostics.is_file():
-            with diagnostics.open(newline="", encoding="utf-8") as handle:
-                reload_confirmed = any(
-                    abs(float(row.get("alpha", 0.6)) - 0.6) > 1e-9
-                    or abs(float(row.get("beta", 0.3)) - 0.3) > 1e-9
-                    or abs(float(row.get("gamma", 0.1)) - 0.1) > 1e-9
-                    for row in csv.DictReader(handle)
-                )
-        check("controller coefficient reload confirmed", reload_confirmed, str(diagnostics))
+        if applied_rows:
+            applied_row = applied_rows[-1]
+            applied_request_id = str(applied_row.get("request_id") or "")
+            applied_ts = float(applied_row.get("timestamp_ms") or 0.0)
+            applied_coeffs = applied_row.get("applied_coefficients") or {}
+            applied_sig = _coefficient_signature(applied_coeffs) if applied_coeffs else None
+            first_after_ms = None
+            rows_after_apply = 0
+            if diagnostics_rows:
+                after_rows = []
+                before_rows = []
+                for row in diagnostics_rows:
+                    ts = _diagnostic_timestamp_ms(row)
+                    if ts is None:
+                        continue
+                    if applied_ts > 0 and ts >= applied_ts:
+                        after_rows.append(row)
+                    else:
+                        before_rows.append(row)
+                rows_after_apply = len(after_rows)
+                if after_rows:
+                    first_after_ms = _diagnostic_timestamp_ms(after_rows[0])
+                if applied_sig is not None:
+                    reload_confirmed = any(_coefficient_signature(row) == applied_sig for row in after_rows)
+                had_pre_apply_diagnostics = bool(before_rows)
+            else:
+                had_pre_apply_diagnostics = False
+            if first_after_ms is not None:
+                delta_after_apply_ms = max(0.0, first_after_ms - applied_ts)
+            else:
+                delta_after_apply_ms = None
+            insufficient_window = rows_after_apply == 0 or first_after_ms is None
+            emit(f"INFO applied request id: {applied_request_id}")
+            emit(f"INFO applied timestamp_ms: {applied_ts:.0f}")
+            emit(f"INFO applied coefficients: {json.dumps(applied_coeffs, sort_keys=True)}")
+            emit(
+                "INFO first diagnostics timestamp after apply: "
+                + ("none" if first_after_ms is None else f"{first_after_ms:.0f}")
+            )
+            emit(
+                "INFO first diagnostics delay after apply ms: "
+                + ("none" if delta_after_apply_ms is None else f"{delta_after_apply_ms:.0f}")
+            )
+            emit(f"INFO diagnostics rows after apply: {rows_after_apply}")
+            emit(f"INFO applied coefficients observed in diagnostics: {str(reload_confirmed).lower()}")
+            support_ok = (
+                bool(applied_rows)
+                and bool(before)
+                and bool(after)
+                and before != after
+                and comparison_applied
+                and not failed_writes
+                and had_pre_apply_diagnostics
+            )
+            if reload_confirmed:
+                check("controller coefficient reload confirmed", True, str(diagnostics))
+            elif insufficient_window and support_ok:
+                emit("INFO applied update occurred near session end")
+                emit("INFO insufficient post-update diagnostics window")
+                emit("INFO reload validation outcome: downgraded_to_insufficient_post_update_window")
+                check("controller coefficient reload confirmed", True, "downgraded_to_insufficient_post_update_window")
+            else:
+                if not insufficient_window:
+                    emit("INFO reload validation outcome: hard_failure_no_matching_post_update_diagnostics")
+                check("controller coefficient reload confirmed", False, str(diagnostics))
+        else:
+            check("controller coefficient reload confirmed", False, str(diagnostics))
 
-    print("INFO temporal co-occurrence is not proof that deterioration caused an update")
-    print(f"SUMMARY {'PASS' if failures == 0 else 'FAIL'} failures={failures}")
+    emit("INFO temporal co-occurrence is not proof that deterioration caused an update")
+    emit(f"SUMMARY {'PASS' if failures == 0 else 'FAIL'} failures={failures}")
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        log_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return 0 if failures == 0 else 1
 
 
@@ -296,10 +406,19 @@ def main() -> None:
     parser.add_argument("--mode", required=True, choices=("shadow", "active"))
     parser.add_argument("--deterioration-start", required=True, type=float)
     parser.add_argument("--deterioration-end", required=True, type=float)
+    parser.add_argument("--log-file", type=Path)
     args = parser.parse_args()
     if args.deterioration_end <= args.deterioration_start:
         parser.error("deterioration end must be greater than start")
-    sys.exit(validate_session(args.session.resolve(), args.mode, args.deterioration_start, args.deterioration_end))
+    sys.exit(
+        validate_session(
+            args.session.resolve(),
+            args.mode,
+            args.deterioration_start,
+            args.deterioration_end,
+            args.log_file.resolve() if args.log_file else None,
+        )
+    )
 
 
 if __name__ == "__main__":

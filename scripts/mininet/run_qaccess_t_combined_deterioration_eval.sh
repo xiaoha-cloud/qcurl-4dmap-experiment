@@ -35,6 +35,7 @@ PHASE2_STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived}"
 SCENARIO="${SCENARIO:-fig8}"
 DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile_90_150.env}"
 TIMEOUT="${TIMEOUT:-220}"
+POST_UPDATE_OBSERVE_SEC="${QACCESS_POST_UPDATE_OBSERVE_SEC:-15}"
 SAVE_VERBOSE_LOGS="${SAVE_VERBOSE_LOGS:-0}"
 INPUT_FLV="${INPUT_FLV:-}"
 LOG_CONTROL="${LOG_CONTROL:-0}"
@@ -363,10 +364,11 @@ print('[finalize] leg={} experiment_completed={} postprocess_ok={} pcap_retained
 run_one() {
   local um="$1"
   local label="$2"
-  shift 2
+  local run_timeout="$3"
+  shift 3
   local -a cmd=(
     python3 "$MP" --run-exp --scenario "$SCENARIO" --utility-mode "$um"
-    --timeout "$TIMEOUT" --log-parent "$SESSION_DIR" --run-label "$label"
+    --timeout "$run_timeout" --log-parent "$SESSION_DIR" --run-label "$label"
     --dynamic-deterioration-profile "$DETERIORATION_PROFILE"
   )
   [[ "$SAVE_VERBOSE_LOGS" == "1" ]] || cmd+=(--disable-logs)
@@ -390,7 +392,7 @@ preflight_worker_python "$(worker_process_log_file)"
 
 echo "[combined_deterioration] baseline leg (same deterioration profile, no qaccess, no worker)"
 QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
-run_one baseline combined_baseline
+run_one baseline combined_baseline "$TIMEOUT"
 
 echo "[combined_deterioration] reset runtime + initialize coefficients from initial"
 QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
@@ -408,7 +410,12 @@ fi
 echo "[combined_deterioration] dynamic leg: qaccess_t + delta_bw_1s worker ($EXECUTION_MODE, gate_mode=$GATE_MODE absolute=${GATE_BPS}bps relative=$MIN_RELATIVE_GAIN)"
 echo "[combined_deterioration] worker model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
 echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
-run_one qaccess_t combined_qaccess_t_dynamic \
+ACTIVE_DYNAMIC_TIMEOUT="$TIMEOUT"
+if [[ "$EXECUTION_MODE" == "active" ]]; then
+  ACTIVE_DYNAMIC_TIMEOUT=$((TIMEOUT + POST_UPDATE_OBSERVE_SEC))
+  echo "[combined_deterioration] active post-update observe window=${POST_UPDATE_OBSERVE_SEC}s dynamic_timeout=${ACTIVE_DYNAMIC_TIMEOUT}s"
+fi
+run_one qaccess_t combined_qaccess_t_dynamic "$ACTIVE_DYNAMIC_TIMEOUT" \
   QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
   QACCESS_COEFF_RELOAD=1 \
@@ -503,6 +510,8 @@ meta = {
     'final_coefficients': load('$COEFFS_AFTER'),
     'profile_path': '$DETERIORATION_PROFILE',
     'timeout': int('$TIMEOUT'),
+    'dynamic_timeout': int('$ACTIVE_DYNAMIC_TIMEOUT'),
+    'post_update_observe_sec': int('$POST_UPDATE_OBSERVE_SEC'),
     'KEEP_PCAP': int('$KEEP_PCAP'),
     'KEEP_RAW_RUNTIME': int('$KEEP_RAW_RUNTIME'),
     'SAVE_OUTPUT_FLV': int('$SAVE_OUTPUT_FLV'),

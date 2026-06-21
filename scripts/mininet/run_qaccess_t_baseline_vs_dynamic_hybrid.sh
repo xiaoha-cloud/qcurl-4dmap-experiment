@@ -8,5 +8,6 @@ export QACCESS_EXECUTION_MODE=active
 export QACCESS_GATE_MODE=hybrid
 export QACCESS_MIN_RELATIVE_GAIN="${QACCESS_MIN_RELATIVE_GAIN:-0.03}"
 export QACCESS_GATE_BPS="${QACCESS_GATE_BPS:-100000}"
+export QACCESS_POST_UPDATE_OBSERVE_SEC="${QACCESS_POST_UPDATE_OBSERVE_SEC:-15}"
 export DETERIORATION_PROFILE="$ROOT/scripts/mininet/combined_deterioration_profile_90_150.env"
 exec "$ROOT/scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh" "$@"
