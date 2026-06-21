@@ -48,6 +48,11 @@ def write_coefficients(path: Path, values: tuple[float, float, float], name: str
     }, indent=2) + "\n", encoding="utf-8")
 
 
+def runtime_samples_path(state_dir: Path) -> Path:
+    """Mirror the explicit Phase2StateDir contract used by qaccess_phase2.go."""
+    return state_dir / "qaccess_runtime_samples.csv"
+
+
 def owner_identity(audit_path: Path) -> dict:
     owners = []
     if audit_path.is_file():
@@ -98,14 +103,14 @@ def main() -> None:
         run_dir = session / name
         state_dir = run_dir / "phase2_state"
         run_dir.mkdir()
-        samples = run_dir / "qaccess_runtime_samples.csv"
+        samples = runtime_samples_path(state_dir)
         write_coefficients(state_dir / "qaccess_t_runtime_coefficients.json", values, name)
         env = os.environ.copy()
         env.update({
             "QACCESS_PHASE2_STATE_DIR": str(state_dir),
             "QACCESS_COEFFS_JSON": str(state_dir / "qaccess_t_runtime_coefficients.json"),
             "QACCESS_COEFF_RELOAD": "0", "QACCESS_TRIGGER_UPDATE": "0",
-            "QACCESS_RUNTIME_SAMPLE_EXPORT": "1", "QACCESS_RUNTIME_SAMPLES_CSV": str(samples),
+            "QACCESS_RUNTIME_SAMPLE_EXPORT": "1",
             "QACCESS_RUNTIME_BUFFER_SIZE": "0", "QACCESS_LABEL_INTERVAL_MS": "100",
             "KEEP_PCAP": "0", "SAVE_OUTPUT_FLV": "0",
         })
@@ -117,7 +122,9 @@ def main() -> None:
         print(f"[qserver-sweep] {index}/{len(tuples)} {name}", flush=True)
         subprocess.run(cmd, cwd=REPO, env=env, check=True)
         if not samples.is_file():
-            raise RuntimeError(f"missing qserver runtime samples: {samples}")
+            raise RuntimeError(
+                f"missing qserver runtime samples under explicit Phase2StateDir: {samples}"
+            )
         with samples.open(encoding="utf-8") as source:
             header = source.readline()
             tail = deque(source, maxlen=10_000)
