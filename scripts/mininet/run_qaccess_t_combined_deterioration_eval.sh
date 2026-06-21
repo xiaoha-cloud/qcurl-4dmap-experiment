@@ -46,12 +46,11 @@ WORKER_MODEL="${QACCESS_WORKER_MODEL:-derived/qaccess_t_redesign/qaccess_t_model
 WORKER_MODEL_METADATA="${QACCESS_WORKER_MODEL_METADATA:-derived/qaccess_t_redesign/qaccess_t_redesign_report.json}"
 WORKER_TARGET_MODE="${QACCESS_WORKER_TARGET_MODE:-delta_bw_1s}"
 EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-shadow}"
-MULTIPATH_SHADOW_SCORING=0
-if [[ "$EXECUTION_MODE" == "shadow" ]]; then
-  MULTIPATH_SHADOW_SCORING=1
-fi
+MULTIPATH_SHADOW_SCORING=1
 COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}"
 GATE_BPS="${QACCESS_MIN_DELTA_GAIN_BPS:-500000}"
+GATE_MODE="${QACCESS_GATE_MODE:-absolute}"
+MIN_RELATIVE_GAIN="${QACCESS_MIN_RELATIVE_GAIN:-0.03}"
 
 resolve_repo_path() {
   local path="$1"
@@ -74,6 +73,10 @@ ARCHIVE_DIR="$PHASE2_STATE_DIR/qaccess_processed_buffers"
 case "$EXECUTION_MODE" in
   shadow|active) ;;
   *) echo "[error] QACCESS_EXECUTION_MODE must be shadow or active, got: $EXECUTION_MODE" >&2; exit 2 ;;
+esac
+case "$GATE_MODE" in
+  absolute|relative|hybrid) ;;
+  *) echo "[error] QACCESS_GATE_MODE must be absolute, relative, or hybrid, got: $GATE_MODE" >&2; exit 2 ;;
 esac
 if [[ "$WORKER_TARGET_MODE" != "delta_bw_1s" ]]; then
   echo "[error] this diagnostic runner requires target mode delta_bw_1s" >&2
@@ -101,7 +104,10 @@ WORKER_CMD=(
   --archive-dir "$PHASE2_STATE_DIR/qaccess_processed_buffers"
   --audit-csv "$PHASE2_STATE_DIR/qaccess_update_audit.csv"
   --min-delta-gain-bps "$GATE_BPS"
+  --gate-mode "$GATE_MODE"
+  --min-relative-gain "$MIN_RELATIVE_GAIN"
   --min-sender-byte-delta "$MIN_SENDER_BYTE_DELTA"
+  --aggregate-multipath
 )
 if [[ "$EXECUTION_MODE" == "shadow" ]]; then
   WORKER_CMD+=(--shadow-per-subflow)
@@ -137,6 +143,7 @@ check_configuration() {
   echo "[check] buffer=$BUFFER_SIZE"
   echo "[check] cooldown_ms=$COOLDOWN_MS"
   echo "[check] gate_bps=$GATE_BPS"
+  echo "[check] gate_mode=$GATE_MODE min_relative_gain=$MIN_RELATIVE_GAIN"
   [[ -x "$WORKER_PYTHON" ]] || { echo "[FAIL] worker Python is not executable: $WORKER_PYTHON" >&2; return 1; }
   "$WORKER_PYTHON" scripts/analyze/qaccess_t_update_worker.py \
     --model "$WORKER_MODEL" \
@@ -396,9 +403,9 @@ echo "[combined_deterioration] parsed: $(read_coeffs "$COEFFS_BEFORE")"
 start_worker
 
 if [[ "$EXECUTION_MODE" == "active" ]]; then
-  echo "[warning] ACTIVE diagnostic mode: owner and selected-path questions remain unresolved" >&2
+  echo "[combined_deterioration] active aggregate safety checks enabled; traffic-weighted aggregate controls updates"
 fi
-echo "[combined_deterioration] dynamic leg: qaccess_t + delta_bw_1s worker ($EXECUTION_MODE, ${GATE_BPS} bps gate)"
+echo "[combined_deterioration] dynamic leg: qaccess_t + delta_bw_1s worker ($EXECUTION_MODE, gate_mode=$GATE_MODE absolute=${GATE_BPS}bps relative=$MIN_RELATIVE_GAIN)"
 echo "[combined_deterioration] worker model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
 echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
 run_one qaccess_t combined_qaccess_t_dynamic \
@@ -417,6 +424,25 @@ run_one qaccess_t combined_qaccess_t_dynamic \
   QACCESS_MIN_SENDER_BYTE_DELTA="$MIN_SENDER_BYTE_DELTA" \
   QACCESS_TRIGGER_AUDIT_JSONL="$TRIGGER_AUDIT_PATH"
 stop_worker
+python3 - "$(worker_log_file)" "$SESSION_DIR/dynamic_coefficient_timeline.jsonl" <<'PY'
+import json, sys
+from pathlib import Path
+source, target = map(Path, sys.argv[1:3])
+events = []
+if source.is_file():
+    for line in source.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        events.append({key: row.get(key) for key in (
+            "timestamp_ms", "request_id", "request_classification", "status", "gate_mode",
+            "absolute_gain_bps", "relative_gain", "would_apply_under_gate", "actual_applied",
+            "current_coefficients", "traffic_weighted_proposed_candidate",
+            "traffic_weighted_proposed_stepped_coefficients", "applied_coefficients",
+        )})
+target.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in events), encoding="utf-8")
+PY
 if [[ -f "$TRIGGER_AUDIT_PATH" ]]; then
   cp "$TRIGGER_AUDIT_PATH" "$SESSION_DIR/qaccess_trigger_audit.jsonl"
 fi
@@ -468,7 +494,9 @@ meta = {
     'model_path': '$WORKER_MODEL',
     'model_metadata_path': '$WORKER_MODEL_METADATA',
     'target_mode': '$WORKER_TARGET_MODE',
-    'gate_threshold': 'min_delta_gain_bps=$GATE_BPS',
+    'gate_mode': '$GATE_MODE',
+    'min_delta_gain_bps': float('$GATE_BPS'),
+    'min_relative_gain': float('$MIN_RELATIVE_GAIN'),
     'execution_mode': '$EXECUTION_MODE',
     'worker_shadow': '$EXECUTION_MODE' == 'shadow',
     'initial_coefficients': load('$COEFFS_BEFORE'),

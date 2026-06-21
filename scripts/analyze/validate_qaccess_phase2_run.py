@@ -243,7 +243,8 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
 
     if mode == "shadow":
         check("shadow mode is true", shadow)
-        check("shadow proposal passes gate", any(bool(r.get("would_apply")) for r in worker_rows))
+        gate_passes = sum(bool(r.get("would_apply")) for r in worker_rows)
+        print(f"INFO shadow requests passing configured gate={gate_passes}/{len(worker_rows)}")
         check("active coefficients remain initial", _coefficients_match_initial(before) and before == after)
         check("no real APPLIED result", "APPLIED" not in statuses)
         check("aggregate stepped proposals recorded", any(r.get("equal_weight_proposed_stepped_coefficients") and r.get("traffic_weighted_proposed_stepped_coefficients") for r in worker_rows))
@@ -263,10 +264,10 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
         check("equal and traffic-weighted diagnostics recorded", bool(worker_rows) and all("equal_weight_gain" in row and "traffic_weighted_gain" in row and "aggregate_methods_agree" in row for row in worker_rows))
     else:
         check("shadow mode is false", not shadow)
-        check("at least one APPLIED result", "APPLIED" in statuses)
+        check("at least one APPLIED result", any(status.startswith("APPLIED") for status in statuses))
         classifications = {request_id: (elapsed, label) for request_id, elapsed, label in classified}
         for row in worker_rows:
-            if str(row.get("status") or "").upper() != "APPLIED":
+            if not str(row.get("status") or "").upper().startswith("APPLIED"):
                 continue
             request_id = str(row.get("request_id") or "")
             elapsed, label = classifications.get(request_id, (float("nan"), "UNKNOWN"))

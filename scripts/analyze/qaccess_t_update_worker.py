@@ -79,7 +79,10 @@ TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s")
 
 DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
 DEFAULT_MIN_DELTA_GAIN_BPS = 500_000.0
+DEFAULT_MIN_RELATIVE_GAIN = 0.03
 DEFAULT_MIN_RELATIVE_DELTA_GAIN = 0.01
+GATE_MODES = ("absolute", "relative", "hybrid")
+RELATIVE_GAIN_EPSILON = 1e-9
 MAX_COEFF_STEP = 0.1
 MIN_BETA_GAMMA = 0.1
 DEFAULT_COEFFS_PREV = _REPO / "derived" / "qaccess_t_runtime_coefficients_prev.json"
@@ -501,6 +504,39 @@ def _evaluate_gate(
     raise ValueError(f"unsupported target_mode: {target_mode}")
 
 
+def evaluate_gain_gate(
+    current_score: float,
+    best_score: float,
+    *,
+    gate_mode: str,
+    min_delta_gain_bps: float,
+    min_relative_gain: float,
+    epsilon: float = RELATIVE_GAIN_EPSILON,
+) -> dict[str, Any]:
+    if gate_mode not in GATE_MODES:
+        raise ValueError(f"unsupported gate mode: {gate_mode}")
+    absolute_gain_bps = float(best_score - current_score)
+    relative_gain = absolute_gain_bps / max(abs(float(current_score)), epsilon)
+    strict_improvement = bool(best_score > current_score)
+    absolute_gate_pass = strict_improvement and absolute_gain_bps >= min_delta_gain_bps
+    relative_gate_pass = strict_improvement and relative_gain >= min_relative_gain
+    if gate_mode == "absolute":
+        would_apply = absolute_gate_pass
+    elif gate_mode == "relative":
+        would_apply = relative_gate_pass
+    else:
+        would_apply = absolute_gate_pass and relative_gate_pass
+    return {
+        "current_score": float(current_score), "best_score": float(best_score),
+        "absolute_gain_bps": absolute_gain_bps, "relative_gain": relative_gain,
+        "gate_mode": gate_mode, "min_delta_gain_bps": float(min_delta_gain_bps),
+        "min_relative_gain": float(min_relative_gain),
+        "strict_improvement": strict_improvement,
+        "absolute_gate_pass": absolute_gate_pass, "relative_gate_pass": relative_gate_pass,
+        "would_apply": bool(would_apply),
+    }
+
+
 def _write_candidate_scores_csv(
     out_path: Path,
     *,
@@ -699,11 +735,11 @@ def _write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def _process_multipath_shadow_request(
+def _process_multipath_request(
     *, req: dict[str, Any], samples: pd.DataFrame, request_id: str, model,
-    coeffs_out: Path, response_out: Path, request_path: Path, archive_dir: Path,
-    target_mode: str, min_improvement_pct: float, min_delta_gain_bps: float,
-    min_relative_delta_gain: float, fixed_gamma: float | None,
+    coeffs_out: Path, response_out: Path, request_path: Path, archive_dir: Path, prev_coeffs_out: Path,
+    target_mode: str, min_delta_gain_bps: float, min_relative_gain: float,
+    gate_mode: str, fixed_gamma: float | None, shadow: bool,
     log_file: Path | None, min_sender_byte_delta: int,
 ) -> bool:
     min_rows = max(1, int(req.get("min_samples_per_path", 1) or 1))
@@ -727,9 +763,9 @@ def _process_multipath_shadow_request(
         "timestamp_ms": int(time.time() * 1000),
         "run_id": str(req.get("run_id") or ""),
         "target_mode": target_mode,
-        "execution_mode": "shadow",
-        "shadow": True,
-        "shadow_mode": True,
+        "execution_mode": "shadow" if shadow else "active",
+        "shadow": shadow,
+        "shadow_mode": shadow,
         "request_classification": _request_classification(req),
         "active_path_ids": [item["path_id"] for item in path_diagnostics],
         "eligible_path_ids": [item["path_id"] for item in eligible],
@@ -742,13 +778,12 @@ def _process_multipath_shadow_request(
             for item in path_diagnostics
         ],
         "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
-        "aggregate_shadow_only": True,
-        "model_retraining_required_before_active": True,
-        "model_semantics_warning": "per-path delta predictions aggregated for Shadow diagnostics only",
+        "aggregate_scoring": True,
+        "aggregate_control_method": "traffic_weighted",
     }
 
     if not eligible:
-        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "skip_reason": "no_eligible_media_paths"}
+        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH" if shadow else "ACTIVE_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "actual_applied": False, "skip_reason": "no_eligible_media_paths"}
         atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
         atomic_write_json(archive_dir / f"qaccess_multipath_shadow_audit_{safe}.json", response)
         _worker_log_line(log_file, response)
@@ -770,7 +805,7 @@ def _process_multipath_shadow_request(
 
     total_delta = sum(item["sender_byte_delta"] for item in scored_paths)
     if total_delta <= 0:
-        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "skip_reason": "zero_total_sender_byte_delta"}
+        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH" if shadow else "ACTIVE_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "actual_applied": False, "skip_reason": "zero_total_sender_byte_delta"}
         atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
         _worker_log_line(log_file, response)
         if request_path.is_file():
@@ -833,15 +868,13 @@ def _process_multipath_shadow_request(
     for row in aggregate_rows:
         row["equal_weight_gain"] = row["equal_weight_score"] - current_row["equal_weight_score"]
         row["byte_weighted_gain"] = row["byte_weighted_score"] - current_row["byte_weighted_score"]
-    equal_ok, _, equal_skip, _, equal_gain_bps, _ = _evaluate_gate(
-        target_mode, current_row["equal_weight_score"], equal_best["equal_weight_score"],
-        min_improvement_pct=min_improvement_pct, min_delta_gain_bps=min_delta_gain_bps,
-        min_relative_delta_gain=min_relative_delta_gain,
+    equal_gate = evaluate_gain_gate(
+        current_row["equal_weight_score"], equal_best["equal_weight_score"], gate_mode=gate_mode,
+        min_delta_gain_bps=min_delta_gain_bps, min_relative_gain=min_relative_gain,
     )
-    weighted_ok, _, weighted_skip, gate_threshold, weighted_gain_bps, _ = _evaluate_gate(
-        target_mode, current_row["byte_weighted_score"], weighted_best["byte_weighted_score"],
-        min_improvement_pct=min_improvement_pct, min_delta_gain_bps=min_delta_gain_bps,
-        min_relative_delta_gain=min_relative_delta_gain,
+    weighted_gate = evaluate_gain_gate(
+        current_row["byte_weighted_score"], weighted_best["byte_weighted_score"], gate_mode=gate_mode,
+        min_delta_gain_bps=min_delta_gain_bps, min_relative_gain=min_relative_gain,
     )
 
     def coeffs(row: dict[str, Any]) -> dict[str, float]:
@@ -860,11 +893,36 @@ def _process_multipath_shadow_request(
         "gamma": max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, equal_raw["gamma"])),
     }
     methods_agree = equal_raw == weighted_raw
+    def aggregate_gate_report(gate: dict[str, Any], raw: dict[str, float], stepped: dict[str, float]) -> dict[str, Any]:
+        return {
+            **gate, "proposed_raw_coefficients": raw,
+            "proposed_stepped_coefficients": stepped,
+            "shadow_mode": shadow, "actual_applied": False,
+        }
+
+    owner_roles = sorted(set(str(item["samples"]["endpoint_role"].iloc[-1]) for item in scored_paths if "endpoint_role" in item["samples"]))
+    owner_ok = owner_roles == ["server_downlink_sender"]
+    proposed_differs = any(abs(weighted_stepped[name] - current) > 1e-9 for name, current in
+                           (("alpha", cur_alpha), ("beta", cur_beta), ("gamma", cur_gamma)))
+    active_safety_ok = bool(not shadow and owner_ok and eligible and target_mode == "delta_bw_1s" and proposed_differs)
+    actual_applied = bool(active_safety_ok and weighted_gate["would_apply"])
+    active_skip_reason = ""
+    if not shadow and not actual_applied:
+        if not owner_ok:
+            active_skip_reason = "owner_role_not_server_downlink_sender"
+        elif target_mode != "delta_bw_1s":
+            active_skip_reason = "model_target_not_delta_bw_1s"
+        elif not proposed_differs:
+            active_skip_reason = "proposed_coefficients_unchanged"
+        elif not weighted_gate["would_apply"]:
+            active_skip_reason = "aggregate_gate_not_met"
     response = {
         **base_response,
-        "status": "SHADOW_AGGREGATE_EVALUATED",
-        "would_apply": bool(equal_ok or weighted_ok),
-        "skip_reason": "" if (equal_ok or weighted_ok) else "aggregate_gates_not_met",
+        "status": "SHADOW_AGGREGATE_EVALUATED" if shadow else ("APPLIED_AGGREGATE" if actual_applied else "ACTIVE_AGGREGATE_SKIPPED"),
+        "would_apply": bool(weighted_gate["would_apply"]),
+        "would_apply_under_gate": bool(weighted_gate["would_apply"]),
+        "actual_applied": actual_applied,
+        "skip_reason": active_skip_reason,
         "candidate_count": len(aggregate_rows),
         "unique_prediction_count": len({float(row["byte_weighted_score"]) for row in aggregate_rows}),
         "path_sender_byte_deltas": raw_weights,
@@ -874,25 +932,60 @@ def _process_multipath_shadow_request(
         "per_path_best_gains": {str(item["path_id"]): item["pred_best"]-item["pred_current"] for item in scored_paths},
         "equal_weight_current": current_row["equal_weight_score"],
         "equal_weight_best": equal_best["equal_weight_score"],
-        "equal_weight_gain": equal_best["equal_weight_score"]-current_row["equal_weight_score"],
-        "equal_weight_would_apply": bool(equal_ok),
-        "equal_weight_skip_reason": "" if equal_ok else equal_skip,
+        "equal_weight_gain": equal_gate["absolute_gain_bps"],
+        "equal_weight_gate": equal_gate,
+        "equal_weight": aggregate_gate_report(equal_gate, equal_raw, equal_stepped),
+        "equal_weight_would_apply": bool(equal_gate["would_apply"]),
         "equal_weight_proposed_candidate": equal_raw,
         "equal_weight_proposed_stepped_coefficients": equal_stepped,
         "traffic_weighted_current": current_row["byte_weighted_score"],
         "traffic_weighted_best": weighted_best["byte_weighted_score"],
-        "traffic_weighted_gain": weighted_best["byte_weighted_score"]-current_row["byte_weighted_score"],
-        "traffic_weighted_would_apply": bool(weighted_ok),
+        "traffic_weighted_gain": weighted_gate["absolute_gain_bps"],
+        "traffic_weighted_gate": weighted_gate,
+        "traffic_weighted": aggregate_gate_report(weighted_gate, weighted_raw, weighted_stepped),
+        "traffic_weighted_would_apply": bool(weighted_gate["would_apply"]),
         "traffic_weighted_proposed_candidate": weighted_raw,
         "traffic_weighted_proposed_stepped_coefficients": weighted_stepped,
         "aggregate_methods_agree": methods_agree,
         "proposed_stepped_coefficients": equal_stepped if methods_agree else None,
-        "applied_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
-        "gate_threshold": gate_threshold,
-        "score_gain": weighted_gain_bps if weighted_gain_bps is not None else 0.0,
-        "score_gain_bps": weighted_gain_bps,
+        "applied_coefficients": weighted_stepped if actual_applied else {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+        "gate_mode": gate_mode,
+        "min_delta_gain_bps": min_delta_gain_bps,
+        "min_relative_gain": min_relative_gain,
+        "absolute_gain_bps": weighted_gate["absolute_gain_bps"],
+        "relative_gain": weighted_gate["relative_gain"],
+        "absolute_gate_pass": weighted_gate["absolute_gate_pass"],
+        "relative_gate_pass": weighted_gate["relative_gate_pass"],
+        "score_gain": weighted_gate["absolute_gain_bps"],
+        "score_gain_bps": weighted_gate["absolute_gain_bps"],
+        "owner_role_check": owner_ok,
+        "owner_roles": owner_roles,
+        "proposed_coefficients_differ": proposed_differs,
         "source": cur_source,
     }
+    if actual_applied:
+        response["traffic_weighted"]["actual_applied"] = True
+        _assert_runtime_coeffs_path(coeffs_out)
+        backup_path = _save_coeffs_backup(coeffs_out, archive_dir, request_id, prev_coeffs_out)
+        existing_path_ids = {
+            int(value) for value in (coeffs_doc.get("paths") or {})
+            if str(value).isdigit()
+        }
+        update_path_ids = sorted(existing_path_ids | {int(item["path_id"]) for item in scored_paths})
+        response["updated_path_ids"] = update_path_ids
+        for update_path_id in update_path_ids:
+            update_path_coeffs_locked(
+                coeffs_out, update_path_id,
+                alpha=weighted_stepped["alpha"], beta=weighted_stepped["beta"], gamma=weighted_stepped["gamma"],
+                metadata={
+                    "source": "qaccess_t_update_worker.py", "execution_mode": "active",
+                    "aggregate_scoring": True, "aggregate_control_method": "traffic_weighted",
+                    "request_id": request_id, "target_mode": target_mode, "gate_mode": gate_mode,
+                    "absolute_gain_bps": weighted_gate["absolute_gain_bps"],
+                    "relative_gain": weighted_gate["relative_gain"],
+                    "previous_coeffs_backup": str(backup_path) if backup_path else "",
+                },
+            )
     _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_per_path.csv", per_path_rows)
     _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_aggregate.csv", aggregate_rows)
     atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
@@ -922,7 +1015,10 @@ def _process_request(
     min_relative_delta_gain: float,
     *,
     shadow: bool,
-    fixed_gamma: float | None,
+    aggregate_multipath: bool = False,
+    gate_mode: str = "absolute",
+    min_relative_gain: float = DEFAULT_MIN_RELATIVE_GAIN,
+    fixed_gamma: float | None = None,
     log_file: Path | None = None,
     min_sender_byte_delta: int = 1,
 ) -> bool:
@@ -943,15 +1039,14 @@ def _process_request(
         return False
 
     model = joblib.load(model_path)
-    if shadow:
-        return _process_multipath_shadow_request(
+    if shadow or aggregate_multipath:
+        return _process_multipath_request(
             req=req, samples=samples, request_id=request_id, model=model,
             coeffs_out=coeffs_out, response_out=response_out, request_path=request_path,
-            archive_dir=archive_dir, target_mode=target_mode,
-            min_improvement_pct=min_improvement_pct,
+            archive_dir=archive_dir, prev_coeffs_out=prev_coeffs_out, target_mode=target_mode,
             min_delta_gain_bps=min_delta_gain_bps,
-            min_relative_delta_gain=min_relative_delta_gain,
-            fixed_gamma=fixed_gamma, log_file=log_file,
+            min_relative_gain=min_relative_gain, gate_mode=gate_mode,
+            fixed_gamma=fixed_gamma, shadow=shadow, log_file=log_file,
             min_sender_byte_delta=min_sender_byte_delta,
         )
 
@@ -1281,6 +1376,11 @@ def main() -> None:
         default=DEFAULT_MIN_DELTA_GAIN_BPS,
         help="Minimum pred_best - pred_current (bps) for delta_bw_1s gate (default: 500000)",
     )
+    ap.add_argument("--gate-mode", choices=GATE_MODES, default="absolute")
+    ap.add_argument(
+        "--min-relative-gain", type=float, default=DEFAULT_MIN_RELATIVE_GAIN,
+        help="Minimum (best-current)/max(abs(current), epsilon) for relative/hybrid gates (default: 0.03)",
+    )
     ap.add_argument(
         "--min-relative-delta-gain",
         type=float,
@@ -1303,6 +1403,10 @@ def main() -> None:
         "--shadow-per-subflow",
         action="store_true",
         help="Evaluate aggregate multipath candidates and write Shadow artifacts only; no runtime coefficient changes",
+    )
+    ap.add_argument(
+        "--aggregate-multipath", action="store_true",
+        help="Use aggregate multipath scoring; required for active aggregate updates",
     )
     ap.add_argument(
         "--fixed-gamma",
@@ -1348,17 +1452,24 @@ def main() -> None:
             else f"min_relative_delta_gain={args.min_relative_delta_gain}"
         )
     )
+    if args.target_mode == "delta_bw_1s":
+        gate_desc = (
+            f"gate_mode={args.gate_mode} min_delta_gain_bps={args.min_delta_gain_bps} "
+            f"min_relative_gain={args.min_relative_gain}"
+        )
     model_path = args.model.resolve()
     metadata_path = args.model_metadata.resolve()
     provenance = validate_model_configuration(model_path, metadata_path, args.target_mode)
     if args.validate_model_only:
         print(json.dumps(provenance, sort_keys=True))
         return
+    if not shadow and not args.aggregate_multipath:
+        ap.error("active execution requires --aggregate-multipath")
     _assert_runtime_coeffs_path(args.coeffs_out.resolve())
     load_coeffs_doc(args.coeffs_out.resolve())
 
     print(
-        f"[worker] scoring_mode={'aggregate_multipath_shadow' if shadow else 'per_subflow_active'} "
+        f"[worker] scoring_mode={'aggregate_multipath_shadow' if shadow else 'aggregate_multipath_active'} "
         f"shadow={shadow} fixed_gamma={fixed_gamma} "
         f"polling {args.request.resolve()} every {args.poll_interval}s "
         f"target_mode={args.target_mode} {gate_desc}",
@@ -1367,8 +1478,7 @@ def main() -> None:
     )
     if shadow:
         print(
-            "[worker] warning aggregate_shadow_only=true "
-            "model_retraining_required_before_active=true",
+            "[worker] aggregate_scoring_experimental=true shadow_mode=true",
             file=sys.stderr,
             flush=True,
         )
@@ -1399,11 +1509,14 @@ def main() -> None:
             "gate": gate_desc,
             "shadow": shadow,
             "shadow_mode": shadow,
-            "scoring_mode": "aggregate_multipath_shadow" if shadow else "per_subflow_active",
+            "scoring_mode": "aggregate_multipath_shadow" if shadow else "aggregate_multipath_active",
             "aggregate_shadow_only": shadow,
-            "model_retraining_required_before_active": shadow,
+            "aggregate_scoring_experimental": True,
             "fixed_gamma": fixed_gamma,
             "min_sender_byte_delta": args.min_sender_byte_delta,
+            "gate_mode": args.gate_mode,
+            "min_delta_gain_bps": args.min_delta_gain_bps,
+            "min_relative_gain": args.min_relative_gain,
         },
     )
 
@@ -1424,6 +1537,9 @@ def main() -> None:
             args.min_delta_gain_bps,
             args.min_relative_delta_gain,
             shadow=shadow,
+            aggregate_multipath=args.aggregate_multipath,
+            gate_mode=args.gate_mode,
+            min_relative_gain=args.min_relative_gain,
             fixed_gamma=fixed_gamma,
             log_file=log_file,
             min_sender_byte_delta=args.min_sender_byte_delta,

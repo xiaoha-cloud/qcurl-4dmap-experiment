@@ -32,6 +32,12 @@ validator_spec = importlib.util.spec_from_file_location(
 validator = importlib.util.module_from_spec(validator_spec)
 assert validator_spec.loader is not None
 validator_spec.loader.exec_module(validator)
+comparison_spec = importlib.util.spec_from_file_location(
+    "relative_comparison", ANALYZE / "compare_baseline_dynamic_relative.py"
+)
+comparison = importlib.util.module_from_spec(comparison_spec)
+assert comparison_spec.loader is not None
+comparison_spec.loader.exec_module(comparison)
 
 
 class CoefficientSensitiveModel:
@@ -85,6 +91,7 @@ def write_request_fixture(root: Path) -> dict[str, Path]:
         "bw_bps": 5_000_000, "owd_ms": 20, "inflight_bytes": 5000,
         "alpha": 0.6, "beta": 0.3, "gamma": 0.1, "next_bw_bps": 6_000_000,
         "sender_bytes_total": 100, "remote_endpoint": "10.0.1.1:1234",
+        "endpoint_role": "server_downlink_sender", "producer_pid": 42,
     })
     row2 = dict(row)
     row2.update({"timestamp_ms": 2, "sender_bytes_total": 200})
@@ -96,6 +103,73 @@ def write_request_fixture(root: Path) -> dict[str, Path]:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_gain_gate_modes_and_zero_current(self):
+        absolute = worker.evaluate_gain_gate(1_000_000, 1_400_000, gate_mode="absolute", min_delta_gain_bps=500_000, min_relative_gain=0.03)
+        relative = worker.evaluate_gain_gate(1_000_000, 1_040_000, gate_mode="relative", min_delta_gain_bps=500_000, min_relative_gain=0.03)
+        hybrid = worker.evaluate_gain_gate(1_000_000, 1_600_000, gate_mode="hybrid", min_delta_gain_bps=500_000, min_relative_gain=0.03)
+        near_zero = worker.evaluate_gain_gate(0.0, 1.0, gate_mode="relative", min_delta_gain_bps=500_000, min_relative_gain=0.03)
+        self.assertFalse(absolute["would_apply"])
+        self.assertTrue(relative["would_apply"])
+        self.assertTrue(hybrid["would_apply"])
+        self.assertTrue(near_zero["would_apply"])
+        self.assertAlmostEqual(relative["relative_gain"], 0.04)
+
+    def test_aggregate_relative_shadow_reports_without_mutation(self):
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        model, _ = write_model_fixture(root)
+        paths = write_request_fixture(root)
+        before = paths["coeffs.json"].read_bytes()
+        worker._process_request(
+            paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+            paths["response.json"], paths["state.json"], root / "archive", root / "previous.json",
+            paths["audit.csv"], "rf", "delta_bw_1s", 3.0, 500_000.0, 0.01,
+            shadow=True, aggregate_multipath=True, gate_mode="relative", min_relative_gain=0.03,
+        )
+        response = json.loads(paths["response.json"].read_text())
+        self.assertTrue(response["traffic_weighted_gate"]["relative_gate_pass"])
+        self.assertFalse(response["actual_applied"])
+        self.assertEqual(paths["coeffs.json"].read_bytes(), before)
+        temp.cleanup()
+
+    def _run_active_aggregate(self, *, owner_role="server_downlink_sender", sender_growth=True):
+        temp = tempfile.TemporaryDirectory()
+        root = Path(temp.name)
+        model, _ = write_model_fixture(root)
+        paths = write_request_fixture(root)
+        frame = pd.read_csv(paths["samples.csv"])
+        frame["endpoint_role"] = owner_role
+        if not sender_growth:
+            frame["sender_bytes_total"] = 100
+        frame.to_csv(paths["samples.csv"], index=False)
+        before = paths["coeffs.json"].read_bytes()
+        worker._process_request(
+            paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+            paths["response.json"], paths["state.json"], root / "archive", root / "previous.json",
+            paths["audit.csv"], "rf", "delta_bw_1s", 3.0, 500_000.0, 0.01,
+            shadow=False, aggregate_multipath=True, gate_mode="relative", min_relative_gain=0.03,
+        )
+        return temp, paths, before, json.loads(paths["response.json"].read_text())
+
+    def test_active_aggregate_mutates_only_after_safety_checks(self):
+        temp, paths, before, response = self._run_active_aggregate()
+        try:
+            self.assertEqual(response["status"], "APPLIED_AGGREGATE")
+            self.assertTrue(response["actual_applied"])
+            self.assertNotEqual(paths["coeffs.json"].read_bytes(), before)
+        finally:
+            temp.cleanup()
+
+    def test_active_aggregate_rejects_wrong_owner_and_no_media(self):
+        for kwargs, reason in [({"owner_role": "client_pull_receiver"}, "owner_role_not_server_downlink_sender"),
+                               ({"sender_growth": False}, "no_eligible_media_paths")]:
+            temp, paths, before, response = self._run_active_aggregate(**kwargs)
+            try:
+                self.assertFalse(response["actual_applied"])
+                self.assertEqual(paths["coeffs.json"].read_bytes(), before)
+                self.assertEqual(response["skip_reason"], reason)
+            finally:
+                temp.cleanup()
     def test_model_target_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -362,6 +436,26 @@ def datetime_from_ms(value: int) -> str:
 
 
 class ValidatorTests(unittest.TestCase):
+    def test_two_arm_comparison_has_no_fixed_utility_arm(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = Path(tmp)
+            for arm, scale in (("combined_baseline", 1.0), ("combined_qaccess_t_dynamic", 1.2)):
+                directory = session / arm
+                directory.mkdir()
+                frame = pd.DataFrame({"elapsed_s": list(range(220)), "throughput_mbps": [scale] * 220})
+                for filename in comparison.FILES.values():
+                    frame.to_csv(directory / filename, index=False)
+            (session / "worker.log").write_text(json.dumps({
+                "request_id": "run_1", "status": "APPLIED_AGGREGATE", "actual_applied": True,
+            }) + "\n")
+            (session / "qaccess_trigger_audit.jsonl").write_text(json.dumps({
+                "request_id": "run_1", "trigger_decision": "request_written",
+            }) + "\n")
+            report = comparison.analyze(session)
+            self.assertEqual(set(report["arms"]), {"baseline", "dynamic"})
+            self.assertFalse(report["fixed_utility_arm"])
+            self.assertEqual(report["verdict"], "dynamic_better")
+
     def _validate(self, mode="shadow", during=True, failed=False):
         temp = tempfile.TemporaryDirectory()
         session = make_validator_fixture(Path(temp.name), mode=mode, during=during, failed=failed)
