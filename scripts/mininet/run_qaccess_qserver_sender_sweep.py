@@ -53,6 +53,19 @@ def runtime_samples_path(state_dir: Path) -> Path:
     return state_dir / "qaccess_runtime_samples.csv"
 
 
+def restore_sudo_ownership(path: Path) -> None:
+    uid_text, gid_text = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
+    if not uid_text or not gid_text:
+        return
+    uid, gid = int(uid_text), int(gid_text)
+    for root, directories, files in os.walk(path):
+        os.chown(root, uid, gid)
+        for name in directories:
+            os.chown(Path(root) / name, uid, gid)
+        for name in files:
+            os.chown(Path(root) / name, uid, gid)
+
+
 def owner_identity(audit_path: Path) -> dict:
     owners = []
     if audit_path.is_file():
@@ -153,6 +166,8 @@ def main() -> None:
         (run_dir / "sweep_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         manifest["runs"].append(metadata)
         (session / "sweep_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    ownership_root = DEFAULT_ROOT.parent if args.output_root.resolve() == DEFAULT_ROOT.resolve() else session
+    restore_sudo_ownership(ownership_root)
     print(f"[qserver-sweep] complete: {session}")
 
 
