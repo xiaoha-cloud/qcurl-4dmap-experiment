@@ -408,15 +408,22 @@ def make_validator_fixture(root: Path, mode: str = "shadow", during: bool = True
                                 "sender_bytes_total": sent, "inflight_bytes": 0 if path_id == 0 else 5000,
                                 "loss_rate": 0.01 if path_id == 3 and sent == sent_values[-1] else 0})
     pd.DataFrame(sample_rows).to_csv(processed / "qaccess_runtime_samples_run_1_all_paths.csv", index=False)
-    status = "SHADOW_AGGREGATE_EVALUATED" if mode == "shadow" else "APPLIED"
-    (session / "worker.log").write_text(json.dumps({
+    status = "SHADOW_AGGREGATE_EVALUATED" if mode == "shadow" else "APPLIED_AGGREGATE"
+    worker_row = {
         "request_id": "run_1", "status": status, "would_apply": True,
         "proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
         "equal_weight_proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
         "traffic_weighted_proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
         "eligible_path_ids": [1, 3], "excluded_paths": [{"path_id": 0}],
         "equal_weight_gain": 1.0, "traffic_weighted_gain": 1.0, "aggregate_methods_agree": True,
-    }) + "\n")
+    }
+    if mode == "active":
+        worker_row.update({
+            "actual_applied": True,
+            "timestamp_ms": timestamp + 500,
+            "applied_coefficients": {"alpha": 0.6, "beta": 0.3, "gamma": 0.2},
+        })
+    (session / "worker.log").write_text(json.dumps(worker_row) + "\n")
     if mode == "shadow":
         (processed / "qaccess_multipath_shadow_audit_run_1.json").write_text(json.dumps({"eligible_path_ids": [1, 3]}))
     before = dict(worker=mode, **{"alpha": 0.6, "beta": 0.3, "gamma": 0.1})
@@ -425,8 +432,13 @@ def make_validator_fixture(root: Path, mode: str = "shadow", during: bool = True
     (session / "combined_qaccess_t_dynamic_coeffs_after.json").write_text(json.dumps(after))
     if mode == "active":
         with (dynamic / "control_law_diagnostics.csv").open("w", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["alpha", "beta", "gamma"])
-            writer.writeheader(); writer.writerow({"alpha": 0.7, "beta": 0.2, "gamma": 0.2})
+            writer = csv.DictWriter(handle, fieldnames=["timestamp_ms", "alpha", "beta", "gamma"])
+            writer.writeheader()
+            writer.writerow({"timestamp_ms": timestamp - 1000, "alpha": 0.6, "beta": 0.3, "gamma": 0.1})
+            writer.writerow({"timestamp_ms": timestamp + 1000, "alpha": 0.6, "beta": 0.3, "gamma": 0.2})
+        (session / "baseline_vs_dynamic_relative_comparison.json").write_text(json.dumps({
+            "dynamic_updates_applied": True,
+        }))
     return session
 
 
@@ -496,6 +508,22 @@ class ValidatorTests(unittest.TestCase):
                 self.assertEqual(code, 0, output)
             finally:
                 temp.cleanup()
+
+    def test_active_reload_downgrades_when_applied_near_session_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = make_validator_fixture(Path(tmp), mode="active", during=True, failed=False)
+            dynamic = session / "combined_qaccess_t_dynamic"
+            with (dynamic / "control_law_diagnostics.csv").open("w", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=["timestamp_ms", "alpha", "beta", "gamma"])
+                writer.writeheader()
+                writer.writerow({"timestamp_ms": 1_750_000_099_000, "alpha": 0.6, "beta": 0.3, "gamma": 0.1})
+            output = StringIO()
+            with redirect_stdout(output):
+                code = validator.validate_session(session, "active", 90, 150)
+            text = output.getvalue()
+            self.assertEqual(code, 0, text)
+            self.assertIn("INFO applied update occurred near session end", text)
+            self.assertIn("downgraded_to_insufficient_post_update_window", text)
 
     def test_detects_request_write_failed(self):
         temp, code, output = self._validate(failed=True)
