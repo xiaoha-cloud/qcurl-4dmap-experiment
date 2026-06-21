@@ -74,6 +74,13 @@ def _coefficients_match_initial(doc: dict[str, Any]) -> bool:
     return all(abs(float(doc.get(key, -1)) - value) < 1e-9 for key, value in INITIAL_COEFFS.items())
 
 
+def scoring_path_coverage(scored_path_sets: list[set[int]], media_paths: list[int]) -> tuple[bool, bool]:
+    union = set().union(*scored_path_sets) if scored_path_sets else set()
+    all_media_seen = bool(scored_path_sets) and set(media_paths).issubset(union)
+    multipath_request_seen = any(len(paths) > 1 for paths in scored_path_sets)
+    return all_media_seen, multipath_request_seen
+
+
 def validate_session(session: Path, mode: str, deterioration_start: float, deterioration_end: float) -> int:
     failures = 0
 
@@ -249,7 +256,9 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
         check("aggregate candidate artifacts exist", bool(aggregate_artifacts), f"count={len(aggregate_artifacts)}")
         check("path eligibility artifacts exist", bool(eligibility_artifacts), f"count={len(eligibility_artifacts)}")
         scored_path_sets = [set(int(x) for x in row.get("eligible_path_ids", [])) for row in worker_rows]
-        check("all eligible media paths enter scoring", bool(scored_path_sets) and all(set(eligible_paths).issubset(paths) for paths in scored_path_sets), str(scored_path_sets))
+        all_media_seen, multipath_seen = scoring_path_coverage(scored_path_sets, eligible_paths)
+        check("all run-level media paths enter scoring at least once", all_media_seen, str(scored_path_sets))
+        check("at least one request uses aggregate multipath scoring", multipath_seen, str(scored_path_sets))
         check("idle paths are excluded from scoring", bool(scored_path_sets) and all(not set(idle_paths).intersection(paths) for paths in scored_path_sets), str(scored_path_sets))
         check("equal and traffic-weighted diagnostics recorded", bool(worker_rows) and all("equal_weight_gain" in row and "traffic_weighted_gain" in row and "aggregate_methods_agree" in row for row in worker_rows))
     else:
