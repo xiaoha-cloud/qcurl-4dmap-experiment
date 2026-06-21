@@ -374,6 +374,14 @@ class ValidatorTests(unittest.TestCase):
         self.assertTrue(validator.continuous_request_serials(["run_1", "run_2", "run_3"]))
         self.assertFalse(validator.continuous_request_serials(["run_1", "run_3"]))
 
+    def test_scoring_coverage_allows_transiently_inactive_media_path(self):
+        all_seen, multipath_seen = validator.scoring_path_coverage(
+            [{1, 3}, {1, 3}, {1}, {1, 3}], [1, 3]
+        )
+        self.assertTrue(all_seen)
+        self.assertTrue(multipath_seen)
+        self.assertEqual(validator.scoring_path_coverage([{1}, {1}], [1, 3]), (False, False))
+
     def test_shadow_and_active_results(self):
         for mode in ("shadow", "active"):
             temp, code, output = self._validate(mode=mode)
