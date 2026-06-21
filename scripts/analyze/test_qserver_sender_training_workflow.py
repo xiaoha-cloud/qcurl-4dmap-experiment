@@ -72,6 +72,10 @@ class WorkflowTests(unittest.TestCase):
             timeline.write_text(json.dumps({"phase2_owner": True, "controller_created": True,
                                             "endpoint_role": "server_downlink_sender", "pid": 42}) + "\n")
             self.assertEqual(runner.owner_identity(timeline)["pid"], 42)
+            self.assertEqual(
+                runner.runtime_samples_path(root / "phase2_state"),
+                root / "phase2_state/qaccess_runtime_samples.csv",
+            )
 
     def test_phase_labels_and_grouped_future_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
