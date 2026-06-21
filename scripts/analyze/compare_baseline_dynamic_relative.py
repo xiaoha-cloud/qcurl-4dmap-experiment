@@ -27,6 +27,11 @@ def continuous(ids: list[str]) -> bool:
 
 def analyze(session: Path) -> dict:
     report: dict = {"session": str(session.resolve()), "arms": {}, "fixed_utility_arm": False}
+    metadata_path = session / "experiment_metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+    report["gate_mode"] = metadata.get("gate_mode")
+    report["min_relative_gain"] = metadata.get("min_relative_gain")
+    report["min_delta_gain_bps"] = metadata.get("min_delta_gain_bps")
     for arm, directory in ARMS.items():
         report["arms"][arm] = {metric: means(session / directory / filename) for metric, filename in FILES.items()}
         total = report["arms"][arm]["total"]
@@ -48,6 +53,19 @@ def analyze(session: Path) -> dict:
         for row in worker_rows]
     applied = any(bool(row.get("actual_applied")) for row in worker_rows)
     report["dynamic_updates_applied"] = applied
+    applied_rows = [row for row in worker_rows if bool(row.get("actual_applied"))]
+    report["applied_update_count"] = len(applied_rows)
+    report["applied_request_classifications"] = [str(row.get("request_classification") or "UNKNOWN") for row in applied_rows]
+    blocked_pre = [row for row in worker_rows if (
+        row.get("request_classification") == "PRE_DETERIORATION"
+        and row.get("relative_gate_pass") is True
+        and row.get("absolute_gate_pass") is False
+        and not row.get("actual_applied")
+    )]
+    report["pre_small_gain_updates_blocked"] = bool(blocked_pre)
+    report["blocked_pre_request_ids"] = [str(row.get("request_id")) for row in blocked_pre]
+    report["baseline_during_mbps"] = report["arms"]["baseline"]["total"]["DURING_90_150"]
+    report["dynamic_during_mbps"] = report["arms"]["dynamic"]["total"]["DURING_90_150"]
     report["verdict"] = observed_direction if applied else "inconclusive_no_active_update"
     request_ids = [str(row.get("request_id")) for row in worker_rows if row.get("request_id")]
     report["request_serial_continuity"] = continuous(request_ids) if request_ids else False
