@@ -43,6 +43,7 @@ class CoefficientSensitiveModel:
             frame["alpha"].to_numpy() * 10_000_000
             - frame["beta"].to_numpy() * 2_000_000
             - frame["gamma"].to_numpy() * 1_000_000
+            + frame["bw_bps"].to_numpy() * 0.2
         )
 
 
@@ -83,8 +84,11 @@ def write_request_fixture(root: Path) -> dict[str, Path]:
         "timestamp_ms": 1, "run_id": "test_run", "path_id": 0,
         "bw_bps": 5_000_000, "owd_ms": 20, "inflight_bytes": 5000,
         "alpha": 0.6, "beta": 0.3, "gamma": 0.1, "next_bw_bps": 6_000_000,
+        "sender_bytes_total": 100, "remote_endpoint": "10.0.1.1:1234",
     })
-    pd.DataFrame([row]).to_csv(paths["samples.csv"], index=False)
+    row2 = dict(row)
+    row2.update({"timestamp_ms": 2, "sender_bytes_total": 200})
+    pd.DataFrame([row, row2]).to_csv(paths["samples.csv"], index=False)
     paths["coeffs.json"].write_text(json.dumps({
         "alpha": 0.6, "beta": 0.3, "gamma": 0.1, "source": "initial"
     }), encoding="utf-8")
@@ -121,12 +125,13 @@ class WorkerTests(unittest.TestCase):
         temp, root, paths, before, response = self._run_worker(True)
         try:
             self.assertEqual(paths["coeffs.json"].read_bytes(), before)
-            self.assertEqual(response["status"], "SHADOW_WOULD_APPLY")
+            self.assertEqual(response["status"], "SHADOW_AGGREGATE_EVALUATED")
             self.assertTrue(response["would_apply"])
             self.assertEqual(response["candidate_count"], 27)
             self.assertGreater(response["unique_prediction_count"], 1)
             self.assertGreater(response["score_gain_bps"], 500_000)
-            self.assertTrue(response["proposed_stepped_coefficients"])
+            self.assertTrue(response["equal_weight_proposed_stepped_coefficients"])
+            self.assertTrue(response["traffic_weighted_proposed_stepped_coefficients"])
         finally:
             temp.cleanup()
 
@@ -143,6 +148,126 @@ class WorkerTests(unittest.TestCase):
         profile = REPO / "scripts/mininet/combined_deterioration_profile_90_150.env"
         rows = [line.split() for line in profile.read_text().splitlines() if line and not line.startswith(("#", "IFACE="))]
         self.assertEqual(rows, [["0", "20ms", "0%"], ["90", "80ms", "0.05%"], ["150", "20ms", "0%"]])
+
+    def test_multipath_shadow_excludes_idle_and_aggregates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model, _ = write_model_fixture(root)
+            paths = write_request_fixture(root)
+            base = pd.read_csv(paths["samples.csv"]).iloc[0].to_dict()
+            rows = []
+            for path_id, endpoint, bw, sent_values in (
+                (0, "10.0.1.1:50780", 1_000_000, (1337, 1337)),
+                (1, "10.0.1.1:49264", 10_000_000, (100, 1000)),
+                (3, "10.0.2.1:59496", 4_000_000, (100, 200)),
+            ):
+                for index, sent in enumerate(sent_values):
+                    row = dict(base)
+                    row.update({"path_id": path_id, "remote_endpoint": endpoint, "bw_bps": bw,
+                                "sender_bytes_total": sent, "timestamp_ms": index + 1})
+                    rows.append(row)
+            pd.DataFrame(rows).to_csv(paths["samples.csv"], index=False)
+            before = paths["coeffs.json"].read_bytes()
+            ok = worker._process_request(
+                paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+                paths["response.json"], paths["state.json"], root / "archive",
+                root / "previous.json", paths["audit.csv"], "rf", "delta_bw_1s",
+                3.0, 500_000.0, 0.01, shadow=True, fixed_gamma=None,
+                log_file=root / "worker.log",
+            )
+            self.assertTrue(ok)
+            response = json.loads(paths["response.json"].read_text())
+            self.assertEqual(response["eligible_path_ids"], [1, 3])
+            self.assertEqual(response["excluded_paths"][0]["exclusion_reason"], "no_sender_byte_growth")
+            self.assertNotEqual(response["equal_weight_current"], response["traffic_weighted_current"])
+            self.assertEqual(paths["coeffs.json"].read_bytes(), before)
+            per_path = pd.read_csv(next((root / "archive").glob("qaccess_candidate_scores_*_per_path.csv")))
+            self.assertEqual(set(per_path.path_id), {1, 3})
+            self.assertEqual(len(per_path), 54)
+            self.assertAlmostEqual(per_path[per_path.path_id == 1].media_activity_weight.iloc[0], 0.9)
+            self.assertAlmostEqual(per_path[per_path.path_id == 3].media_activity_weight.iloc[0], 0.1)
+            weights = per_path.groupby("path_id").media_activity_weight.first()
+            self.assertAlmostEqual(weights.sum(), 1.0)
+            aggregate = pd.read_csv(next((root / "archive").glob("qaccess_candidate_scores_*_aggregate.csv")))
+            self.assertEqual(len(aggregate), 27)
+            first = per_path.iloc[0][["alpha", "beta", "gamma"]]
+            candidate = per_path[
+                (per_path.alpha == first.alpha)
+                & (per_path.beta == first.beta)
+                & (per_path.gamma == first.gamma)
+            ]
+            aggregate_row = aggregate[
+                (aggregate.alpha == first.alpha)
+                & (aggregate.beta == first.beta)
+                & (aggregate.gamma == first.gamma)
+            ].iloc[0]
+            self.assertAlmostEqual(aggregate_row.equal_weight_score, candidate.path_pred_candidate.mean())
+            self.assertAlmostEqual(
+                aggregate_row.byte_weighted_score,
+                (candidate.path_pred_candidate * candidate.media_activity_weight).sum(),
+            )
+
+    def test_multipath_shadow_handles_one_eligible_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model, _ = write_model_fixture(root)
+            paths = write_request_fixture(root)
+            df = pd.read_csv(paths["samples.csv"])
+            df["path_id"] = 17
+            df["sender_bytes_total"] = [100, 200]
+            df.to_csv(paths["samples.csv"], index=False)
+            worker._process_request(
+                paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+                paths["response.json"], paths["state.json"], root / "archive",
+                root / "previous.json", paths["audit.csv"], "rf", "delta_bw_1s",
+                3.0, 500_000.0, 0.01, shadow=True, fixed_gamma=None,
+                log_file=root / "worker.log",
+            )
+            response = json.loads(paths["response.json"].read_text())
+            self.assertEqual(response["eligible_path_ids"], [17])
+            self.assertEqual(response["path_weights"], {"17": 1.0})
+            self.assertEqual(response["status"], "SHADOW_AGGREGATE_EVALUATED")
+
+    def test_multipath_shadow_skips_without_eligible_paths(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model, _ = write_model_fixture(root)
+            paths = write_request_fixture(root)
+            df = pd.read_csv(paths["samples.csv"])
+            df["sender_bytes_total"] = 1337
+            df.to_csv(paths["samples.csv"], index=False)
+            before = paths["coeffs.json"].read_bytes()
+            worker._process_request(
+                paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+                paths["response.json"], paths["state.json"], root / "archive",
+                root / "previous.json", paths["audit.csv"], "rf", "delta_bw_1s",
+                3.0, 500_000.0, 0.01, shadow=True, fixed_gamma=None,
+                log_file=root / "worker.log",
+            )
+            response = json.loads(paths["response.json"].read_text())
+            self.assertEqual(response["status"], "SHADOW_SKIPPED_NO_MEDIA_PATH")
+            self.assertEqual(response["skip_reason"], "no_eligible_media_paths")
+            self.assertEqual(paths["coeffs.json"].read_bytes(), before)
+
+    def test_sender_counter_reset_uses_positive_intervals(self):
+        rows = pd.DataFrame({
+            "path_id": [7, 7, 7, 7], "sender_bytes_total": [100, 200, 10, 60],
+            "bw_bps": [1_000_000] * 4, "owd_ms": [20] * 4, "inflight_bytes": [1000] * 4,
+            **{name: [0.0] * 4 for name in worker.FEATURES if name not in {"bw_bps", "owd_ms", "inflight_bytes"}},
+        })
+        result = worker._classify_media_paths(worker._clean_runtime_samples(rows), 1, 1)[0]
+        self.assertTrue(result["eligible"])
+        self.assertTrue(result["sender_counter_reset"])
+        self.assertEqual(result["sender_byte_delta"], 150)
+
+    def test_missing_sender_counter_is_rejected(self):
+        rows = pd.DataFrame({
+            "path_id": [9, 9], "bw_bps": [1_000_000] * 2, "owd_ms": [20] * 2,
+            **{name: [0.0] * 2 for name in worker.FEATURES if name not in {"bw_bps", "owd_ms"}},
+        })
+        result = worker._classify_media_paths(worker._clean_runtime_samples(rows), 1, 1)[0]
+        self.assertFalse(result["eligible"])
+        self.assertIn("missing_sender_bytes", result["exclusion_reason"])
 
 
 def make_validator_fixture(root: Path, mode: str = "shadow", during: bool = True, failed: bool = False) -> Path:
@@ -163,19 +288,63 @@ def make_validator_fixture(root: Path, mode: str = "shadow", during: bool = True
     if failed:
         trigger.append({"timestamp_ms": timestamp + 1, "trigger_decision": "request_write_failed"})
     (session / "qaccess_trigger_audit.jsonl").write_text("\n".join(json.dumps(x) for x in trigger) + "\n")
+    state_dir = str((root / "state").resolve())
+    owner_rows = [
+        {"pid": 42, "controller_pid": 42, "phase2_owner": True, "controller_created": True,
+         "endpoint_role": "server_downlink_sender", "phase2_state_dir": state_dir,
+         "lease_decision": "owner_acquired"},
+        {"pid": 42, "phase2_owner": False, "controller_created": False,
+         "endpoint_role": "server_publisher_ingress", "phase2_enabled": False,
+         "lease_decision": "publisher_ingress_disabled"},
+    ]
+    (session / "qaccess_owner_audit.jsonl").write_text("\n".join(json.dumps(x) for x in owner_rows) + "\n")
+    with (dynamic / "experiment_timeline_test.jsonl").open("w") as handle:
+        for role in ("client_push_publisher", "client_pull_receiver"):
+            handle.write(json.dumps({"event": "phase2_identity", "endpoint_role": role,
+                                     "phase2_enabled": False, "phase2_owner": False,
+                                     "controller_created": False}) + "\n")
     t0 = datetime_from_ms(t0_ms)
     (dynamic / "tc_deterioration.log").write_text(
         f"[{t0}] step 1/3 at=0s\n[{t0}] step 2/3 at=90s\n[{t0}] step 3/3 at=150s\n"
         f"[{t0}] finished all steps\n[{t0}] exiting status=0 current_step=3 completed=1\n"
     )
-    with (processed / "qaccess_candidate_scores_run_1_path0.csv").open("w", newline="") as handle:
+    with (processed / "qaccess_candidate_scores_run_1_aggregate.csv").open("w", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=["mean_prediction"])
         writer.writeheader(); writer.writerow({"mean_prediction": 1}); writer.writerow({"mean_prediction": 2})
-    status = "SHADOW_WOULD_APPLY" if mode == "shadow" else "APPLIED"
+    with (processed / "qaccess_candidate_scores_run_1_per_path.csv").open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=["mean_prediction"])
+        writer.writeheader(); writer.writerow({"mean_prediction": 1}); writer.writerow({"mean_prediction": 2})
+    (processed / "qaccess_path_eligibility_run_1.json").write_text(json.dumps([
+        {"path_id": 0, "eligible": False}, {"path_id": 1, "eligible": True}, {"path_id": 3, "eligible": True},
+    ]))
+    base_sample = {
+        "producer_pid": 42, "endpoint_role": "server_downlink_sender", "phase2_state_dir": state_dir,
+        "connection_id": "conn", "rtmp_session_id": "sub", "stream_key": "live/test",
+        "local_endpoint": "[::]:1935", "bw_bps": 1_000_000, "owd_ms": 20,
+        "loss_rate": 0, "retrans_bytes_delta": 0, "cwnd_bytes": 10000, "inflight_bytes": 5000,
+    }
+    sample_rows = []
+    for path_id, endpoint, sent_values in (
+        (0, "10.0.1.1:5000", (1337, 1337)),
+        (1, "10.0.1.1:5001", (100, 200)),
+        (3, "10.0.2.1:5003", (100, 150)),
+    ):
+        for sent in sent_values:
+            sample_rows.append({**base_sample, "path_id": path_id, "remote_endpoint": endpoint,
+                                "sender_bytes_total": sent, "inflight_bytes": 0 if path_id == 0 else 5000,
+                                "loss_rate": 0.01 if path_id == 3 and sent == sent_values[-1] else 0})
+    pd.DataFrame(sample_rows).to_csv(processed / "qaccess_runtime_samples_run_1_all_paths.csv", index=False)
+    status = "SHADOW_AGGREGATE_EVALUATED" if mode == "shadow" else "APPLIED"
     (session / "worker.log").write_text(json.dumps({
         "request_id": "run_1", "status": status, "would_apply": True,
         "proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
+        "equal_weight_proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
+        "traffic_weighted_proposed_stepped_coefficients": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2},
+        "eligible_path_ids": [1, 3], "excluded_paths": [{"path_id": 0}],
+        "equal_weight_gain": 1.0, "traffic_weighted_gain": 1.0, "aggregate_methods_agree": True,
     }) + "\n")
+    if mode == "shadow":
+        (processed / "qaccess_multipath_shadow_audit_run_1.json").write_text(json.dumps({"eligible_path_ids": [1, 3]}))
     before = dict(worker=mode, **{"alpha": 0.6, "beta": 0.3, "gamma": 0.1})
     after = dict(before) if mode == "shadow" else {"version": 1, "default": {"alpha": 0.6, "beta": 0.3, "gamma": 0.1}, "paths": {"0": {"alpha": 0.7, "beta": 0.2, "gamma": 0.2}}}
     (session / "combined_qaccess_t_dynamic_coeffs_before.json").write_text(json.dumps(before))

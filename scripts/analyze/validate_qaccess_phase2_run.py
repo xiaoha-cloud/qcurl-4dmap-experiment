@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import re
 import sys
@@ -127,23 +128,79 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
         continuous, serial_detail = False, str(exc)
     check("continuous request serials", continuous, serial_detail)
 
-    sample_files = sorted((session / "combined_qaccess_t_dynamic").rglob("qaccess_runtime_samples_*_path*.csv"))
+    dynamic_dir = session / "combined_qaccess_t_dynamic"
+    sample_files = sorted(dynamic_dir.rglob("qaccess_runtime_samples_*_all_paths.csv"))
     sample_rows: list[dict[str, str]] = []
     for path in sample_files:
         with path.open(newline="", encoding="utf-8") as handle:
             sample_rows.extend(csv.DictReader(handle))
-    check("archived runtime samples exist", bool(sample_rows), f"rows={len(sample_rows)}")
+    if not sample_rows:
+        tail = dynamic_dir / "qaccess_runtime_samples_tail.csv.gz"
+        if tail.is_file():
+            with gzip.open(tail, "rt", newline="", encoding="utf-8") as handle:
+                sample_rows.extend(csv.DictReader(handle))
+    check("all-path runtime samples exist", bool(sample_rows), f"rows={len(sample_rows)}")
     check("all samples come from qserver owner PID", bool(sample_rows) and all(row.get("producer_pid") == owner_pid for row in sample_rows), owner_pid)
     check("all samples have downlink sender role", bool(sample_rows) and all(row.get("endpoint_role") == "server_downlink_sender" for row in sample_rows))
     check("all samples use owner state dir", bool(sample_rows) and all(row.get("phase2_state_dir") == owner_state_dir for row in sample_rows))
     check("sample transport identity is populated", bool(sample_rows) and all(row.get("connection_id") and row.get("rtmp_session_id") and row.get("stream_key") and row.get("local_endpoint") and row.get("remote_endpoint") for row in sample_rows))
-    sender_bytes = [int(float(row.get("sender_bytes_total") or 0)) for row in sample_rows]
-    check("qserver sender bytes are nonzero", bool(sender_bytes) and max(sender_bytes) > 0, f"max={max(sender_bytes, default=0)}")
-    inflight = [int(float(row.get("inflight_bytes") or 0)) for row in sample_rows]
-    check("qserver sender observes nonzero inflight", bool(inflight) and max(inflight) > 0, f"max={max(inflight, default=0)}")
-    cwnd = {int(float(row.get("cwnd_bytes") or 0)) for row in sample_rows}
-    check("qserver sender CWND varies", len(cwnd) > 1, f"unique={len(cwnd)}")
+    rows_by_path: dict[int, list[dict[str, str]]] = {}
+    for row in sample_rows:
+        rows_by_path.setdefault(int(float(row.get("path_id") or 0)), []).append(row)
+    eligible_paths: list[int] = []
+    idle_paths: list[int] = []
+    for path_id, rows in sorted(rows_by_path.items()):
+        sender = [int(float(row.get("sender_bytes_total") or 0)) for row in rows]
+        inflight = [int(float(row.get("inflight_bytes") or 0)) for row in rows]
+        cwnd = [int(float(row.get("cwnd_bytes") or 0)) for row in rows]
+        bw = [float(row.get("bw_bps") or 0) for row in rows]
+        loss = [float(row.get("loss_rate") or 0) for row in rows]
+        retrans = [float(row.get("retrans_bytes_delta") or 0) for row in rows]
+        endpoint = next((row.get("remote_endpoint", "") for row in rows if row.get("remote_endpoint")), "")
+        delta = sum(max(0, after-before) for before, after in zip(sender, sender[1:]))
+        reset = any(after < before for before, after in zip(sender, sender[1:]))
+        telemetry_valid = bool(rows) and all("sender_bytes_total" in row and "cwnd_bytes" in row and "inflight_bytes" in row for row in rows)
+        eligible = len(sender) >= 2 and delta > 0 and telemetry_valid
+        if not telemetry_valid:
+            classification = "BROKEN_TELEMETRY_PATH"
+        elif len(sender) < 2:
+            classification = "INSUFFICIENT_DATA_PATH"
+        elif delta <= 0:
+            classification = "IDLE_CONTROL_PATH"
+        else:
+            classification = "ACTIVE_MEDIA_PATH"
+        (eligible_paths if eligible else idle_paths).append(path_id)
+        print(
+            f"INFO path={path_id} endpoint={endpoint} rows={len(rows)} eligible={str(eligible).lower()} "
+            f"classification={classification} sender_first={sender[0] if sender else 0} "
+            f"sender_last={sender[-1] if sender else 0} sender_delta={delta} counter_reset={str(reset).lower()} "
+            f"bw_range={min(bw, default=0):.3f}..{max(bw, default=0):.3f} "
+            f"inflight_range={min(inflight, default=0)}..{max(inflight, default=0)} "
+            f"cwnd_range={min(cwnd, default=0)}..{max(cwnd, default=0)} "
+            f"loss_range={min(loss, default=0):.6f}..{max(loss, default=0):.6f} "
+            f"retrans_range={min(retrans, default=0):.3f}..{max(retrans, default=0):.3f}"
+        )
+    check("authoritative media paths exist", bool(eligible_paths), str(eligible_paths))
+    check(
+        "multiple media paths are eligible for aggregate scoring",
+        len(eligible_paths) >= 2,
+        str(eligible_paths),
+    )
+    check("idle/control paths are classified separately", bool(idle_paths), str(idle_paths))
+    live_congestion = all(
+        max(int(float(row.get("inflight_bytes") or 0)) for row in rows_by_path[path_id]) > 0
+        and max(int(float(row.get("cwnd_bytes") or 0)) for row in rows_by_path[path_id]) > 0
+        for path_id in eligible_paths
+    ) if eligible_paths else False
+    check("eligible media paths have live congestion telemetry", live_congestion)
     check("loss/retransmission instrumentation is present", bool(sample_rows) and all("loss_rate" in row and "retrans_bytes_delta" in row for row in sample_rows))
+    path_b_ids = [path_id for path_id, rows in rows_by_path.items() if any((row.get("remote_endpoint") or "").startswith("10.0.2.") for row in rows)]
+    path_b_reflects_impairment = any(
+        max(float(row.get("loss_rate") or 0) for row in rows_by_path[path_id]) > 0
+        or len({float(row.get("owd_ms") or 0) for row in rows_by_path[path_id]}) > 1
+        for path_id in path_b_ids
+    )
+    check("Path B telemetry reflects loss or delay variation", bool(path_b_ids) and path_b_reflects_impairment, str(path_b_ids))
 
     tc_start_ms, tc_complete = _tc_start_and_complete(session)
     check("TC deterioration completed all steps", tc_complete)
@@ -162,7 +219,11 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
     diverse = False
     for path in score_files:
         with path.open(newline="", encoding="utf-8") as handle:
-            scores = {float(row["mean_prediction"]) for row in csv.DictReader(handle)}
+            rows = list(csv.DictReader(handle))
+            scores = {
+                float(row.get("mean_prediction") or row.get("byte_weighted_score") or 0)
+                for row in rows
+            }
         diverse = diverse or len(scores) > 1
     check("candidate predictions are non-constant", diverse)
 
@@ -178,7 +239,19 @@ def validate_session(session: Path, mode: str, deterioration_start: float, deter
         check("shadow proposal passes gate", any(bool(r.get("would_apply")) for r in worker_rows))
         check("active coefficients remain initial", _coefficients_match_initial(before) and before == after)
         check("no real APPLIED result", "APPLIED" not in statuses)
-        check("proposed stepped coefficients recorded", any(r.get("proposed_stepped_coefficients") for r in worker_rows))
+        check("aggregate stepped proposals recorded", any(r.get("equal_weight_proposed_stepped_coefficients") and r.get("traffic_weighted_proposed_stepped_coefficients") for r in worker_rows))
+        aggregate_audits = sorted(session.rglob("qaccess_multipath_shadow_audit_*.json"))
+        check("aggregate Shadow artifacts exist", bool(aggregate_audits), f"count={len(aggregate_audits)}")
+        per_path_artifacts = sorted(session.rglob("qaccess_candidate_scores_*_per_path.csv"))
+        aggregate_artifacts = sorted(session.rglob("qaccess_candidate_scores_*_aggregate.csv"))
+        eligibility_artifacts = sorted(session.rglob("qaccess_path_eligibility_*.json"))
+        check("per-path candidate artifacts exist", bool(per_path_artifacts), f"count={len(per_path_artifacts)}")
+        check("aggregate candidate artifacts exist", bool(aggregate_artifacts), f"count={len(aggregate_artifacts)}")
+        check("path eligibility artifacts exist", bool(eligibility_artifacts), f"count={len(eligibility_artifacts)}")
+        scored_path_sets = [set(int(x) for x in row.get("eligible_path_ids", [])) for row in worker_rows]
+        check("all eligible media paths enter scoring", bool(scored_path_sets) and all(set(eligible_paths).issubset(paths) for paths in scored_path_sets), str(scored_path_sets))
+        check("idle paths are excluded from scoring", bool(scored_path_sets) and all(not set(idle_paths).intersection(paths) for paths in scored_path_sets), str(scored_path_sets))
+        check("equal and traffic-weighted diagnostics recorded", bool(worker_rows) and all("equal_weight_gain" in row and "traffic_weighted_gain" in row and "aggregate_methods_agree" in row for row in worker_rows))
     else:
         check("shadow mode is false", not shadow)
         check("at least one APPLIED result", "APPLIED" in statuses)

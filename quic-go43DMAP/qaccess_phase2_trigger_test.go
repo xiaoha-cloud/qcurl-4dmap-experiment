@@ -50,12 +50,41 @@ func setTriggerTestRows(uc *UtilityController, rows map[protocol.PathID]int64) {
 	uc.runtimeExporter.rowsWrittenPerPath = make(map[protocol.PathID]int64, len(rows))
 	uc.runtimeExporter.rowsWritten = 0
 	uc.runtimeExporter.pending = make(map[protocol.PathID]map[string]string)
+	uc.runtimeExporter.senderBytesFirst = make(map[protocol.PathID]uint64)
+	uc.runtimeExporter.senderBytesLast = make(map[protocol.PathID]uint64)
+	uc.runtimeExporter.senderByteDelta = make(map[protocol.PathID]uint64)
+	uc.runtimeExporter.senderObservations = make(map[protocol.PathID]uint64)
+	uc.runtimeExporter.senderCounterReset = make(map[protocol.PathID]bool)
+	uc.runtimeExporter.endpoints = make(map[protocol.PathID]string)
 	for pathID, count := range rows {
 		uc.runtimeExporter.rowsWrittenPerPath[pathID] = count
 		uc.runtimeExporter.rowsWritten += count
+		uc.runtimeExporter.senderBytesFirst[pathID] = 100
+		uc.runtimeExporter.senderBytesLast[pathID] = 100 + uint64(count)
+		uc.runtimeExporter.senderByteDelta[pathID] = uint64(count)
+		uc.runtimeExporter.senderObservations[pathID] = 2
+		uc.runtimeExporter.endpoints[pathID] = "10.0.1.1:1234"
 	}
 	uc.runtimeExporter.windowStartMs = 1000
 	uc.runtimeExporter.windowEndMs = 2000
+}
+
+func TestQAccessMediaEligibilityExcludesIdlePathOnRowCountTie(t *testing.T) {
+	uc, _, _ := newTriggerTestController(t, 3000, 1)
+	setTriggerTestRows(uc, map[protocol.PathID]int64{0: 1000, 1: 1000, 3: 1000})
+	uc.runtimeExporter.senderBytesFirst[0] = 1337
+	uc.runtimeExporter.senderBytesLast[0] = 1337
+	uc.runtimeExporter.senderByteDelta[0] = 0
+	uc.runtimeExporter.endpoints[0] = "10.0.1.1:50780"
+	uc.runtimeExporter.endpoints[1] = "10.0.1.1:49264"
+	uc.runtimeExporter.endpoints[3] = "10.0.2.1:59496"
+	snapshot := uc.runtimeExporter.triggerSnapshot(1, true, 1)
+	if len(snapshot.EligiblePaths) != 2 || snapshot.EligiblePaths[0] != 1 || snapshot.EligiblePaths[1] != 3 {
+		t.Fatalf("expected media paths 1 and 3, got %+v", snapshot)
+	}
+	if snapshot.ExclusionReasons[0] != "no_sender_byte_growth" {
+		t.Fatalf("idle path reason=%q", snapshot.ExclusionReasons[0])
+	}
 }
 
 func readTriggerTestRequest(t *testing.T, path string) map[string]interface{} {
@@ -74,7 +103,7 @@ func readTriggerTestRequest(t *testing.T, path string) map[string]interface{} {
 func TestQAccessBufferGlobalCapacitySelectsLargestPath(t *testing.T) {
 	uc, _, _ := newTriggerTestController(t, 3000, 1)
 	setTriggerTestRows(uc, map[protocol.PathID]int64{0: 999, 1: 1000, 3: 1001})
-	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath)
+	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath, true, 1)
 	if !snapshot.AtCapacity || snapshot.TotalRows != 3000 {
 		t.Fatalf("expected full global buffer, got %+v", snapshot)
 	}
@@ -103,7 +132,7 @@ func TestQAccessBufferRemainsGloballyBounded(t *testing.T) {
 func TestQAccessBufferFullWithoutEligiblePath(t *testing.T) {
 	uc, requestPath, _ := newTriggerTestController(t, 3000, 1002)
 	setTriggerTestRows(uc, map[protocol.PathID]int64{0: 999, 1: 1000, 3: 1001})
-	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath)
+	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath, true, 1)
 	if !snapshot.AtCapacity || snapshot.HasSelectedPath || len(snapshot.EligiblePaths) != 0 {
 		t.Fatalf("expected full buffer with no eligible path, got %+v", snapshot)
 	}

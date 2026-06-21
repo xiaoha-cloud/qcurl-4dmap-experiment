@@ -50,6 +50,8 @@ type qaccessPhase2Config struct {
 	triggerDropPct          float64
 	triggerCooldown         time.Duration
 	triggerPeriodicMs       int
+	multipathShadowScoring  bool
+	minSenderByteDelta      uint64
 	updateRequestPath       string
 	updateResponsePath      string
 	triggerAuditPath        string
@@ -79,6 +81,8 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		triggerDropPct:          envFloat("QACCESS_TRIGGER_DROP_PCT", defaultTriggerDropPct),
 		triggerCooldown:         time.Duration(envInt("QACCESS_TRIGGER_COOLDOWN_MS", defaultTriggerCooldownMs)) * time.Millisecond,
 		triggerPeriodicMs:       envInt("QACCESS_TRIGGER_PERIODIC_MS", 0),
+		multipathShadowScoring:  envBool("QACCESS_MULTIPATH_SHADOW_SCORING", false),
+		minSenderByteDelta:      uint64(envInt("QACCESS_MIN_SENDER_BYTE_DELTA", 1)),
 		updateRequestPath:       resolveUpdateRequestJSONPath(),
 		updateResponsePath:      resolveUpdateResponseJSONPath(),
 		triggerAuditPath:        resolveTriggerAuditPath(),
@@ -425,18 +429,19 @@ func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.
 	}
 	requestID := uc.newRequestID(now)
 	req := map[string]interface{}{
-		"request_id":          requestID,
-		"path_id":             uint64(pathID),
-		"timestamp_ms":        now.UnixNano() / 1e6,
-		"reason":              reason,
-		"n_samples":           nSamples,
-		"runtime_buffer_size": bufSize,
-		"buffer_capacity":     uc.phase2.runtimeBufferMax,
-		"current_alpha":       c.Alpha,
-		"current_beta":        c.Beta,
-		"current_gamma":       c.Gamma,
-		"coeff_source":        c.Source,
-		"run_id":              uc.RunID,
+		"request_id":           requestID,
+		"path_id":              uint64(pathID),
+		"timestamp_ms":         now.UnixNano() / 1e6,
+		"reason":               reason,
+		"n_samples":            nSamples,
+		"runtime_buffer_size":  bufSize,
+		"buffer_capacity":      uc.phase2.runtimeBufferMax,
+		"current_alpha":        c.Alpha,
+		"current_beta":         c.Beta,
+		"current_gamma":        c.Gamma,
+		"coeff_source":         c.Source,
+		"run_id":               uc.RunID,
+		"experiment_elapsed_s": experimentElapsedSeconds(uc.RunID, now),
 	}
 	for key, value := range extra {
 		req[key] = value
@@ -456,6 +461,14 @@ func (uc *UtilityController) writePerPathTrigger(now time.Time, pathID protocol.
 	return true
 }
 
+func experimentElapsedSeconds(runID string, now time.Time) float64 {
+	start, err := time.ParseInLocation("20060102_150405", runID, time.Local)
+	if err != nil {
+		return -1
+	}
+	return now.Sub(start).Seconds()
+}
+
 func pathIDsAsUint64(paths []protocol.PathID) []uint64 {
 	out := make([]uint64, len(paths))
 	for i, pathID := range paths {
@@ -472,6 +485,30 @@ func rowsByPathForJSON(rows map[protocol.PathID]int64) map[string]int64 {
 	return out
 }
 
+func uint64ByPathForJSON(values map[protocol.PathID]uint64) map[string]uint64 {
+	out := make(map[string]uint64, len(values))
+	for pathID, value := range values {
+		out[strconv.FormatUint(uint64(pathID), 10)] = value
+	}
+	return out
+}
+
+func stringsByPathForJSON(values map[protocol.PathID]string) map[string]string {
+	out := make(map[string]string, len(values))
+	for pathID, value := range values {
+		out[strconv.FormatUint(uint64(pathID), 10)] = value
+	}
+	return out
+}
+
+func boolByPathForJSON(values map[protocol.PathID]bool) map[string]bool {
+	out := make(map[string]bool, len(values))
+	for pathID, value := range values {
+		out[strconv.FormatUint(uint64(pathID), 10)] = value
+	}
+	return out
+}
+
 func (uc *UtilityController) logBufferDecision(now time.Time, decision string, snapshot qaccessBufferSnapshot, cooldownRemaining time.Duration) {
 	if uc.lastBufferDecision == decision {
 		return
@@ -483,11 +520,29 @@ func (uc *UtilityController) logBufferDecision(now time.Time, decision string, s
 		"total_rows": snapshot.TotalRows, "valid_rows_total": snapshot.TotalRows,
 		"rows_by_path": rowsByPathForJSON(snapshot.RowsByPath), "active_paths": pathIDsAsUint64(snapshot.ActivePaths),
 		"eligible_paths": pathIDsAsUint64(snapshot.EligiblePaths), "selected_path": uint64(snapshot.SelectedPath),
-		"runtime_buffer_max": uc.phase2.runtimeBufferMax, "min_samples_per_path": uc.phase2.minSamplesPerPath,
+		"sender_byte_delta_by_path":    uint64ByPathForJSON(snapshot.SenderByteDelta),
+		"sender_bytes_first_by_path":   uint64ByPathForJSON(snapshot.SenderBytesFirst),
+		"sender_bytes_last_by_path":    uint64ByPathForJSON(snapshot.SenderBytesLast),
+		"sender_counter_reset_by_path": boolByPathForJSON(snapshot.SenderCounterReset),
+		"endpoints_by_path":            stringsByPathForJSON(snapshot.Endpoints),
+		"exclusion_reasons_by_path":    stringsByPathForJSON(snapshot.ExclusionReasons),
+		"runtime_buffer_max":           uc.phase2.runtimeBufferMax, "min_samples_per_path": uc.phase2.minSamplesPerPath,
 		"update_in_progress": uc.updateInProgress, "cooldown_remaining_ms": cooldownRemaining / time.Millisecond,
 		"request_id": uc.inflightRequestID, "measurement_window_start_ms": snapshot.WindowStartMs,
 		"measurement_window_end_ms": snapshot.WindowEndMs,
 	})
+	for _, pathID := range snapshot.ActivePaths {
+		_, eligible := snapshot.ExclusionReasons[pathID]
+		appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+			"timestamp_ms": now.UnixNano() / 1e6, "event": "path_media_eligibility",
+			"path_id": uint64(pathID), "endpoint": snapshot.Endpoints[pathID],
+			"row_count": snapshot.RowsByPath[pathID], "sender_byte_delta": snapshot.SenderByteDelta[pathID],
+			"sender_bytes_first": snapshot.SenderBytesFirst[pathID], "sender_bytes_last": snapshot.SenderBytesLast[pathID],
+			"sender_counter_reset": snapshot.SenderCounterReset[pathID],
+			"eligible":             !eligible, "exclusion_reason": snapshot.ExclusionReasons[pathID],
+			"parent_trigger_decision": decision,
+		})
+	}
 	utils.Infof(
 		"[qaccess_t] buffer_trigger_eval timestamp_ms=%d decision=%s total_rows=%d rows_by_path=%s active_paths=%v eligible_paths=%v selected_path=%d runtime_buffer_max=%d min_samples_per_path=%d update_in_progress=%t cooldown_remaining_ms=%d measurement_window_start_ms=%d measurement_window_end_ms=%d",
 		now.UnixNano()/1e6, decision, snapshot.TotalRows, string(rowsJSON), pathIDsAsUint64(snapshot.ActivePaths),
@@ -499,14 +554,20 @@ func (uc *UtilityController) logBufferDecision(now time.Time, decision string, s
 
 func (uc *UtilityController) writeBufferFullTrigger(now time.Time, snapshot qaccessBufferSnapshot) bool {
 	return uc.writePerPathTrigger(now, snapshot.SelectedPath, "buffer_full", true, map[string]interface{}{
-		"valid_rows_total":            snapshot.TotalRows,
-		"rows_by_path":                rowsByPathForJSON(snapshot.RowsByPath),
-		"active_paths":                pathIDsAsUint64(snapshot.ActivePaths),
-		"eligible_paths":              pathIDsAsUint64(snapshot.EligiblePaths),
-		"selected_path":               uint64(snapshot.SelectedPath),
-		"min_samples_per_path":        uc.phase2.minSamplesPerPath,
-		"measurement_window_start_ms": snapshot.WindowStartMs,
-		"measurement_window_end_ms":   snapshot.WindowEndMs,
+		"valid_rows_total":             snapshot.TotalRows,
+		"rows_by_path":                 rowsByPathForJSON(snapshot.RowsByPath),
+		"active_paths":                 pathIDsAsUint64(snapshot.ActivePaths),
+		"eligible_paths":               pathIDsAsUint64(snapshot.EligiblePaths),
+		"sender_byte_delta_by_path":    uint64ByPathForJSON(snapshot.SenderByteDelta),
+		"sender_bytes_first_by_path":   uint64ByPathForJSON(snapshot.SenderBytesFirst),
+		"sender_bytes_last_by_path":    uint64ByPathForJSON(snapshot.SenderBytesLast),
+		"sender_counter_reset_by_path": boolByPathForJSON(snapshot.SenderCounterReset),
+		"endpoints_by_path":            stringsByPathForJSON(snapshot.Endpoints),
+		"exclusion_reasons_by_path":    stringsByPathForJSON(snapshot.ExclusionReasons),
+		"selected_path":                uint64(snapshot.SelectedPath),
+		"min_samples_per_path":         uc.phase2.minSamplesPerPath,
+		"measurement_window_start_ms":  snapshot.WindowStartMs,
+		"measurement_window_end_ms":    snapshot.WindowEndMs,
 	})
 }
 
@@ -575,7 +636,7 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 		return
 	}
 
-	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath)
+	snapshot := uc.runtimeExporter.triggerSnapshot(uc.phase2.minSamplesPerPath, uc.phase2.multipathShadowScoring, uc.phase2.minSenderByteDelta)
 	bufSize := snapshot.TotalRows
 	if !snapshot.AtCapacity {
 		uc.logBufferDecision(now, "buffer_not_full", snapshot, 0)
@@ -652,7 +713,7 @@ func (uc *UtilityController) pickLegacyTriggerPath() protocol.PathID {
 	}
 	var best protocol.PathID = 1
 	var bestN int64
-	snapshot := uc.runtimeExporter.triggerSnapshot(1)
+	snapshot := uc.runtimeExporter.triggerSnapshot(1, false, 0)
 	for _, pid := range snapshot.EligiblePaths {
 		n := uc.runtimeExporter.pathBufferSize(pid)
 		if n > bestN {
