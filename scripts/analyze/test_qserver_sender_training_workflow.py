@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -76,6 +77,17 @@ class WorkflowTests(unittest.TestCase):
                 runner.runtime_samples_path(root / "phase2_state"),
                 root / "phase2_state/qaccess_runtime_samples.csv",
             )
+
+    def test_non_sudo_ownership_restore_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_uid, old_gid = os.environ.pop("SUDO_UID", None), os.environ.pop("SUDO_GID", None)
+            try:
+                runner.restore_sudo_ownership(Path(tmp))
+            finally:
+                if old_uid is not None:
+                    os.environ["SUDO_UID"] = old_uid
+                if old_gid is not None:
+                    os.environ["SUDO_GID"] = old_gid
 
     def test_phase_labels_and_grouped_future_labels(self):
         with tempfile.TemporaryDirectory() as tmp:
