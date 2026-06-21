@@ -38,6 +38,12 @@ comparison_spec = importlib.util.spec_from_file_location(
 comparison = importlib.util.module_from_spec(comparison_spec)
 assert comparison_spec.loader is not None
 comparison_spec.loader.exec_module(comparison)
+summary_spec = importlib.util.spec_from_file_location(
+    "gate_summary", ANALYZE / "summarize_gate_experiments.py"
+)
+gate_summary = importlib.util.module_from_spec(summary_spec)
+assert summary_spec.loader is not None
+summary_spec.loader.exec_module(gate_summary)
 
 
 class CoefficientSensitiveModel:
@@ -448,6 +454,102 @@ def datetime_from_ms(value: int) -> str:
 
 
 class ValidatorTests(unittest.TestCase):
+    def test_summary_builds_markdown_and_json_fields(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sessions = {}
+            for name, verdict, applied, reload, dynamic_scale in (
+                ("Relative Shadow", "inconclusive_no_active_update", False, None, 1.0),
+                ("Relative Active", "dynamic_worse", True, False, 0.8),
+                ("Hybrid Active", "dynamic_better", True, True, 1.4),
+            ):
+                session = root / name.replace(" ", "_")
+                session.mkdir()
+                dynamic = session / "combined_qaccess_t_dynamic"
+                baseline = session / "combined_baseline"
+                dynamic.mkdir()
+                baseline.mkdir()
+                frame_base = pd.DataFrame({"elapsed_s": list(range(220)), "throughput_mbps": [5.0] * 220})
+                frame_dyn = pd.DataFrame({"elapsed_s": list(range(220)), "throughput_mbps": [5.0 * dynamic_scale] * 220})
+                for filename in comparison.FILES.values():
+                    frame_base.to_csv(baseline / filename, index=False)
+                    frame_dyn.to_csv(dynamic / filename, index=False)
+                (session / "experiment_metadata.json").write_text(json.dumps({
+                    "gate_mode": "hybrid" if name == "Hybrid Active" else "relative",
+                    "execution_mode": "active" if name != "Relative Shadow" else "shadow",
+                    "min_relative_gain": 0.03,
+                    "min_delta_gain_bps": 100000,
+                }))
+                (session / "baseline_vs_dynamic_relative_comparison.json").write_text(json.dumps({
+                    "gate_mode": "hybrid" if name == "Hybrid Active" else "relative",
+                    "dynamic_updates_applied": applied,
+                    "applied_update_count": 1 if applied else 0,
+                    "applied_request_classifications": ["PRE_DETERIORATION"] if applied else [],
+                    "arms": {
+                        "baseline": {"total": {"PRE_70_90": 5.0, "DURING_90_150": 5.0, "POST_150_200": 5.0}},
+                        "dynamic": {"total": {"PRE_70_90": 5.0 * dynamic_scale, "DURING_90_150": 5.0 * dynamic_scale, "POST_150_200": 5.0 * dynamic_scale}},
+                    },
+                    "observed_during_difference_mbps": (5.0 * dynamic_scale) - 5.0,
+                    "observed_during_relative_difference": dynamic_scale - 1.0,
+                    "verdict": verdict,
+                    "request_serial_continuity": True,
+                    "request_write_failed": 0,
+                    "path_b_activity": [{
+                        "artifact": "qaccess_path_eligibility_run_1.json",
+                        "path_b": [{
+                            "physical_path": "Path B",
+                            "eligible": False if name == "Hybrid Active" else True,
+                            "exclusion_reason": "no_sender_byte_growth" if name == "Hybrid Active" else "",
+                            "sender_byte_delta": 0 if name == "Hybrid Active" else 100,
+                        }],
+                    }],
+                }))
+                worker_rows = [
+                    {
+                        "request_id": "run_1",
+                        "request_classification": "PRE_DETERIORATION",
+                        "status": "ACTIVE_AGGREGATE_SKIPPED" if not applied else "APPLIED_AGGREGATE",
+                        "actual_applied": applied,
+                        "applied_coefficients": {"alpha": 0.6, "beta": 0.3, "gamma": 0.2},
+                    }
+                ]
+                (session / "worker.log").write_text("".join(json.dumps(row) + "\n" for row in worker_rows))
+                (session / "qaccess_trigger_audit.jsonl").write_text(json.dumps({
+                    "request_id": "run_1", "trigger_decision": "request_written",
+                }) + "\n")
+                (session / "worker_ready.json").write_text(json.dumps({"execution_mode": "active" if name != "Relative Shadow" else "shadow"}))
+                (dynamic / "processed_buffers").mkdir()
+                (dynamic / "processed_buffers" / "qaccess_path_eligibility_run_1.json").write_text(json.dumps([
+                    {
+                        "physical_path": "Path B",
+                        "eligible": False if name == "Hybrid Active" else True,
+                        "exclusion_reason": "no_sender_byte_growth" if name == "Hybrid Active" else "",
+                        "sender_byte_delta": 0 if name == "Hybrid Active" else 100,
+                    }
+                ]))
+                (dynamic / "tc_deterioration.log").write_text(
+                    "[2026-06-21T00:00:00+00:00] step 1/3 at=0s\n"
+                    "[2026-06-21T00:00:00+00:00] step 2/3 at=90s\n"
+                    "[2026-06-21T00:00:00+00:00] step 3/3 at=150s\n"
+                    "[2026-06-21T00:00:00+00:00] finished all steps\n"
+                    "[2026-06-21T00:00:00+00:00] exiting status=0 current_step=3 completed=1\n"
+                )
+                (root / "validation_logs").mkdir(exist_ok=True)
+                if reload is not None:
+                    (root / "validation_logs" / f"{session.name}_active_validate.log").write_text(
+                        f"PASS controller coefficient reload confirmed: {session/'combined_qaccess_t_dynamic'/'control_law_diagnostics.csv'}\n"
+                        f"SUMMARY {'PASS' if reload else 'FAIL'} failures={0 if reload else 1}\n"
+                    )
+                sessions[name] = session
+            doc = gate_summary.build_summary(sessions, root / "validation_logs")
+            self.assertEqual(doc["final_candidate_session"], "Hybrid_Active")
+            hybrid = next(row for row in doc["sessions"] if row["label"] == "Hybrid Active")
+            self.assertEqual(hybrid["controller_reload_confirmed"], True)
+            self.assertEqual(doc["sessions"][1]["verdict"], "dynamic_worse")
+            md = gate_summary.render_markdown(doc)
+            self.assertIn("Relative Shadow", md)
+            self.assertIn("Hybrid Active", md)
+
     def test_two_arm_comparison_has_no_fixed_utility_arm(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = Path(tmp)
