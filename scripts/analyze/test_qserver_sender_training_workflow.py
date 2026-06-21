@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 import pandas as pd
+import sys
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -23,6 +24,11 @@ def load(name: str, path: Path):
 runner = load("qserver_sweep", REPO / "scripts/mininet/run_qaccess_qserver_sender_sweep.py")
 builder = load("qserver_builder", REPO / "scripts/analyze/build_qserver_sender_training.py")
 auditor = load("qserver_auditor", REPO / "scripts/analyze/audit_qserver_sender_training.py")
+sys.path.insert(0, str(REPO / "scripts/analyze"))
+try:
+    trainer = load("qserver_trainer", REPO / "scripts/analyze/train_qaccess_qserver_sender.py")
+except ModuleNotFoundError:
+    trainer = None
 
 
 def write_fixture(root: Path, *, run_id: str = "run1", alpha: float = 0.6) -> Path:
@@ -124,6 +130,18 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["endpoint_role_distribution"], {"server_downlink_sender": 2})
         self.assertEqual(len(report["coefficient_coverage"]), 2)
         self.assertFalse(report["aggregate_active_ready"])
+
+    @unittest.skipIf(trainer is None, "training dependencies are unavailable")
+    def test_training_excludes_idle_path_group_but_keeps_zero_windows_on_media_path(self):
+        frame = pd.DataFrame({
+            "run_id": ["r"] * 6, "connection_id": ["c"] * 6,
+            "path_id": [0, 0, 0, 3, 3, 3],
+            "sender_byte_delta": [0, 0, 0, 0, 100, 0],
+        })
+        filtered, summary = trainer.filter_active_media_groups(frame)
+        self.assertEqual(filtered.path_id.unique().tolist(), [3])
+        self.assertEqual(len(filtered), 3)
+        self.assertEqual(summary["excluded_path_ids"], [0])
 
 
 if __name__ == "__main__":
