@@ -47,7 +47,19 @@ _phase2_rm \
   "$DERIVED/qaccess_update_request.json" \
   "$DERIVED/qaccess_update_response.json" \
 	"$DERIVED/qaccess_trigger_audit.jsonl" \
-	"$DERIVED/qaccess_owner_audit.jsonl"
+	"$DERIVED/qaccess_owner_audit.jsonl" \
+	"$DERIVED/qaccess_worker_state.json" \
+	"$DERIVED/qaccess_update_audit.csv"
+
+# Processed buffers are copied into each completed session. Keeping this shared
+# working directory across runs contaminates the next session with old PIDs,
+# request IDs, samples, and candidate artifacts.
+if [[ -d "$DERIVED/qaccess_processed_buffers" ]]; then
+  rm -rf "$DERIVED/qaccess_processed_buffers" 2>/dev/null \
+    || sudo rm -rf "$DERIVED/qaccess_processed_buffers" 2>/dev/null \
+    || { echo "[reset] failed to clear $DERIVED/qaccess_processed_buffers" >&2; exit 1; }
+fi
+mkdir -p "$DERIVED/qaccess_processed_buffers"
 
 # Prior sudo Mininet runs may leave root-owned Phase 2 files the worker cannot truncate.
 for f in qaccess_runtime_samples.csv qaccess_update_request.json qaccess_update_response.json; do
