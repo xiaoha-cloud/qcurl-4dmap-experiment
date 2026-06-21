@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Q-ACCeSS-T Phase 2 update worker (buffer-full trigger, per-subflow coefficients).
+Q-ACCeSS-T Phase 2 update worker (buffer-full trigger).
 
 Polls qaccess_update_request.json written by Go when a path-specific runtime buffer is full.
 Each request_id is processed at most once.
@@ -224,7 +224,7 @@ def _clean_runtime_samples(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     work = df.copy()
-    for col in FEATURES + ["next_bw_bps", "path_id"]:
+    for col in FEATURES + ["next_bw_bps", "path_id", "sender_bytes_total"]:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
     if "next_bw_bps" in work.columns:
@@ -590,12 +590,11 @@ def _load_request_and_samples(
 
     df = _load_runtime_samples(samples_path)
     all_samples = _clean_runtime_samples(df)
-    samples = _filter_samples_by_path(all_samples, path_id)
-    if samples.empty:
-        print(f"[worker] skip: no valid runtime samples for path_id={path_id}", file=sys.stderr)
+    if all_samples.empty:
+        print(f"[worker] skip: no valid runtime samples request_id={request_id}", file=sys.stderr)
         return None, pd.DataFrame(), request_id, path_id
 
-    return req, samples, request_id, path_id
+    return req, all_samples, request_id, path_id
 
 
 def _worker_log_line(log_file: Path | None, payload: dict[str, Any]) -> None:
@@ -619,6 +618,293 @@ def _write_ready_file(path: Path | None, payload: dict[str, Any]) -> None:
         pass
 
 
+def _physical_path_label(endpoint: str) -> str:
+    if endpoint.startswith("10.0.1."):
+        return "Path A"
+    if endpoint.startswith("10.0.2."):
+        return "Path B"
+    return "unknown"
+
+
+def _request_classification(req: dict[str, Any]) -> str:
+    elapsed = float(req.get("experiment_elapsed_s", -1) or -1)
+    if elapsed < 0:
+        return "UNKNOWN"
+    if elapsed < 90:
+        return "PRE_DETERIORATION"
+    if elapsed < 150:
+        return "DURING_DETERIORATION"
+    return "POST_DETERIORATION"
+
+
+def _classify_media_paths(samples: pd.DataFrame, min_rows: int, min_sender_byte_delta: int) -> list[dict[str, Any]]:
+    diagnostics: list[dict[str, Any]] = []
+    if samples.empty or "path_id" not in samples.columns:
+        return diagnostics
+    for path_id, path_df in samples.groupby("path_id", sort=True):
+        work = path_df.reset_index(drop=True)
+        local_endpoint = ""
+        if "local_endpoint" in work.columns:
+            local_endpoints = work["local_endpoint"].dropna().astype(str)
+            if not local_endpoints.empty:
+                local_endpoint = local_endpoints.iloc[-1]
+        endpoint = ""
+        if "remote_endpoint" in work.columns:
+            endpoints = work["remote_endpoint"].dropna().astype(str)
+            if not endpoints.empty:
+                endpoint = endpoints.iloc[-1]
+        sent = pd.to_numeric(work.get("sender_bytes_total", pd.Series(dtype=float)), errors="coerce").dropna()
+        sender_values = [int(value) for value in sent.tolist()]
+        sender_first = sender_values[0] if sender_values else 0
+        sender_last = sender_values[-1] if sender_values else 0
+        sender_resets = sum(1 for before, after in zip(sender_values, sender_values[1:]) if after < before)
+        sender_delta = sum(max(0, after-before) for before, after in zip(sender_values, sender_values[1:]))
+        reasons: list[str] = []
+        if len(work) < min_rows:
+            reasons.append("insufficient_rows")
+        if len(sender_values) < 2:
+            reasons.append("missing_sender_bytes")
+        elif sender_delta < min_sender_byte_delta:
+            reasons.append("no_sender_byte_growth")
+        missing_features = [name for name in FEATURES if name not in work.columns]
+        if missing_features:
+            reasons.append("missing_model_features")
+        diagnostics.append({
+            "path_id": int(path_id),
+            "local_endpoint": local_endpoint,
+            "endpoint": endpoint,
+            "physical_path": _physical_path_label(endpoint),
+            "rows": int(len(work)),
+            "sender_bytes_first": sender_first,
+            "sender_bytes_last": sender_last,
+            "sender_byte_delta": sender_delta,
+            "sender_counter_reset": bool(sender_resets),
+            "sender_counter_reset_count": sender_resets,
+            "eligible": not reasons,
+            "exclusion_reason": ",".join(reasons),
+            "samples": work,
+        })
+    return diagnostics
+
+
+def _write_rows_csv(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fields = list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _process_multipath_shadow_request(
+    *, req: dict[str, Any], samples: pd.DataFrame, request_id: str, model,
+    coeffs_out: Path, response_out: Path, request_path: Path, archive_dir: Path,
+    target_mode: str, min_improvement_pct: float, min_delta_gain_bps: float,
+    min_relative_delta_gain: float, fixed_gamma: float | None,
+    log_file: Path | None, min_sender_byte_delta: int,
+) -> bool:
+    min_rows = max(1, int(req.get("min_samples_per_path", 1) or 1))
+    path_diagnostics = _classify_media_paths(samples, min_rows, min_sender_byte_delta)
+    eligible = [item for item in path_diagnostics if item["eligible"]]
+    safe = _safe_archive_name(request_id)
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    all_samples_path = archive_dir / f"qaccess_runtime_samples_{safe}_all_paths.csv"
+    samples.to_csv(all_samples_path, index=False)
+
+    coeffs_doc = load_coeffs_doc(coeffs_out)
+    selected_path = int(req.get("path_id", 0) or 0)
+    cur_alpha, cur_beta, cur_gamma, cur_source = resolve_path_coeffs(coeffs_doc, selected_path)
+    if "current_alpha" in req:
+        cur_alpha = float(req.get("current_alpha", cur_alpha) or cur_alpha)
+        cur_beta = float(req.get("current_beta", cur_beta) or cur_beta)
+        cur_gamma = float(req.get("current_gamma", cur_gamma) or cur_gamma)
+
+    base_response: dict[str, Any] = {
+        "request_id": request_id,
+        "timestamp_ms": int(time.time() * 1000),
+        "run_id": str(req.get("run_id") or ""),
+        "target_mode": target_mode,
+        "execution_mode": "shadow",
+        "shadow": True,
+        "shadow_mode": True,
+        "request_classification": _request_classification(req),
+        "active_path_ids": [item["path_id"] for item in path_diagnostics],
+        "eligible_path_ids": [item["path_id"] for item in eligible],
+        "excluded_paths": [
+            {key: item[key] for key in ("path_id", "local_endpoint", "endpoint", "physical_path", "rows", "sender_byte_delta", "sender_counter_reset", "exclusion_reason")}
+            for item in path_diagnostics if not item["eligible"]
+        ],
+        "path_eligibility": [
+            {key: item[key] for key in ("path_id", "local_endpoint", "endpoint", "physical_path", "rows", "sender_bytes_first", "sender_bytes_last", "sender_byte_delta", "sender_counter_reset", "eligible", "exclusion_reason")}
+            for item in path_diagnostics
+        ],
+        "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+        "aggregate_shadow_only": True,
+        "model_retraining_required_before_active": True,
+        "model_semantics_warning": "per-path delta predictions aggregated for Shadow diagnostics only",
+    }
+
+    if not eligible:
+        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "skip_reason": "no_eligible_media_paths"}
+        atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
+        atomic_write_json(archive_dir / f"qaccess_multipath_shadow_audit_{safe}.json", response)
+        _worker_log_line(log_file, response)
+        if request_path.is_file():
+            shutil.copy2(request_path, archive_dir / f"qaccess_update_request_{safe}.json")
+            request_path.unlink()
+        atomic_write_json(response_out, response)
+        return True
+
+    scored_paths: list[dict[str, Any]] = []
+    for item in eligible:
+        candidates, pred_current, _, _, _, _ = _score_all_candidates(
+            item["samples"], model,
+            cur_alpha=cur_alpha, cur_beta=cur_beta, cur_gamma=cur_gamma,
+            fixed_gamma=fixed_gamma,
+        )
+        best = max(candidates, key=lambda row: row["mean_prediction"])
+        scored_paths.append({**item, "candidates": candidates, "pred_current": pred_current, "pred_best": best["mean_prediction"]})
+
+    total_delta = sum(item["sender_byte_delta"] for item in scored_paths)
+    if total_delta <= 0:
+        response = {**base_response, "status": "SHADOW_SKIPPED_NO_MEDIA_PATH", "would_apply": False, "skip_reason": "zero_total_sender_byte_delta"}
+        atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
+        _worker_log_line(log_file, response)
+        if request_path.is_file():
+            shutil.copy2(request_path, archive_dir / f"qaccess_update_request_{safe}.json")
+            request_path.unlink()
+        atomic_write_json(response_out, response)
+        return True
+    raw_weights = {str(item["path_id"]): item["sender_byte_delta"] for item in scored_paths}
+    normalized_weights = {str(item["path_id"]): item["sender_byte_delta"] / total_delta for item in scored_paths}
+    path_rank_maps: dict[int, dict[tuple[float, float, float], int]] = {}
+    for item in scored_paths:
+        ranked = sorted(
+            item["candidates"],
+            key=lambda row: (-float(row["mean_prediction"]), not bool(row["is_current"]), row["alpha"], row["beta"], row["gamma"]),
+        )
+        path_rank_maps[item["path_id"]] = {
+            (float(row["alpha"]), float(row["beta"]), float(row["gamma"])): rank
+            for rank, row in enumerate(ranked, start=1)
+        }
+    per_path_rows: list[dict[str, Any]] = []
+    aggregate_rows: list[dict[str, Any]] = []
+    for index, triple in enumerate(_candidate_triples(fixed_gamma)):
+        alpha, beta, gamma = triple
+        predictions = [float(item["candidates"][index]["mean_prediction"]) for item in scored_paths]
+        weights = [item["sender_byte_delta"] / total_delta for item in scored_paths]
+        equal_prediction = float(np.mean(predictions))
+        weighted_prediction = float(sum(pred * weight for pred, weight in zip(predictions, weights)))
+        is_current = abs(alpha-cur_alpha) < 1e-9 and abs(beta-cur_beta) < 1e-9 and abs(gamma-cur_gamma) < 1e-9
+        aggregate_rows.append({
+            "request_id": request_id, "alpha": alpha, "beta": beta, "gamma": gamma,
+            "equal_weight_score": equal_prediction,
+            "byte_weighted_score": weighted_prediction,
+            "equal_weight_gain": equal_prediction,
+            "byte_weighted_gain": weighted_prediction,
+            "is_current_tuple": int(is_current),
+            "eligible_path_count": len(scored_paths),
+            "eligible_path_ids": ",".join(str(item["path_id"]) for item in scored_paths),
+        })
+        for item, prediction, weight in zip(scored_paths, predictions, weights):
+            per_path_rows.append({
+                "request_id": request_id, "path_id": item["path_id"], "local_endpoint": item["local_endpoint"],
+                "remote_endpoint": item["endpoint"],
+                "physical_path": item["physical_path"], "alpha": alpha, "beta": beta, "gamma": gamma,
+                "row_count": item["rows"], "sender_byte_delta": item["sender_byte_delta"],
+                "is_current_tuple": int(is_current), "path_pred_current": item["pred_current"],
+                "path_pred_candidate": prediction, "mean_prediction": prediction,
+                "path_score_gain": prediction-item["pred_current"],
+                "candidate_rank_within_path": path_rank_maps[item["path_id"]][(alpha, beta, gamma)],
+                "media_activity_weight": weight,
+            })
+
+    current_row = next(row for row in aggregate_rows if row["is_current_tuple"])
+    equal_ranked = sorted(aggregate_rows, key=lambda row: (-float(row["equal_weight_score"]), not bool(row["is_current_tuple"]), row["alpha"], row["beta"], row["gamma"]))
+    weighted_ranked = sorted(aggregate_rows, key=lambda row: (-float(row["byte_weighted_score"]), not bool(row["is_current_tuple"]), row["alpha"], row["beta"], row["gamma"]))
+    equal_best, weighted_best = equal_ranked[0], weighted_ranked[0]
+    for rank, row in enumerate(equal_ranked, start=1):
+        row["equal_weight_rank"] = rank
+    for rank, row in enumerate(weighted_ranked, start=1):
+        row["byte_weighted_rank"] = rank
+    for row in aggregate_rows:
+        row["equal_weight_gain"] = row["equal_weight_score"] - current_row["equal_weight_score"]
+        row["byte_weighted_gain"] = row["byte_weighted_score"] - current_row["byte_weighted_score"]
+    equal_ok, _, equal_skip, _, equal_gain_bps, _ = _evaluate_gate(
+        target_mode, current_row["equal_weight_score"], equal_best["equal_weight_score"],
+        min_improvement_pct=min_improvement_pct, min_delta_gain_bps=min_delta_gain_bps,
+        min_relative_delta_gain=min_relative_delta_gain,
+    )
+    weighted_ok, _, weighted_skip, gate_threshold, weighted_gain_bps, _ = _evaluate_gate(
+        target_mode, current_row["byte_weighted_score"], weighted_best["byte_weighted_score"],
+        min_improvement_pct=min_improvement_pct, min_delta_gain_bps=min_delta_gain_bps,
+        min_relative_delta_gain=min_relative_delta_gain,
+    )
+
+    def coeffs(row: dict[str, Any]) -> dict[str, float]:
+        return {name: float(row[name]) for name in ("alpha", "beta", "gamma")}
+
+    weighted_raw = coeffs(weighted_best)
+    weighted_stepped = {
+        "alpha": _apply_max_step(cur_alpha, weighted_raw["alpha"]),
+        "beta": max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, weighted_raw["beta"])),
+        "gamma": max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, weighted_raw["gamma"])),
+    }
+    equal_raw = coeffs(equal_best)
+    equal_stepped = {
+        "alpha": _apply_max_step(cur_alpha, equal_raw["alpha"]),
+        "beta": max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, equal_raw["beta"])),
+        "gamma": max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, equal_raw["gamma"])),
+    }
+    methods_agree = equal_raw == weighted_raw
+    response = {
+        **base_response,
+        "status": "SHADOW_AGGREGATE_EVALUATED",
+        "would_apply": bool(equal_ok or weighted_ok),
+        "skip_reason": "" if (equal_ok or weighted_ok) else "aggregate_gates_not_met",
+        "candidate_count": len(aggregate_rows),
+        "unique_prediction_count": len({float(row["byte_weighted_score"]) for row in aggregate_rows}),
+        "path_sender_byte_deltas": raw_weights,
+        "path_weights": normalized_weights,
+        "per_path_current_predictions": {str(item["path_id"]): item["pred_current"] for item in scored_paths},
+        "per_path_best_predictions": {str(item["path_id"]): item["pred_best"] for item in scored_paths},
+        "per_path_best_gains": {str(item["path_id"]): item["pred_best"]-item["pred_current"] for item in scored_paths},
+        "equal_weight_current": current_row["equal_weight_score"],
+        "equal_weight_best": equal_best["equal_weight_score"],
+        "equal_weight_gain": equal_best["equal_weight_score"]-current_row["equal_weight_score"],
+        "equal_weight_would_apply": bool(equal_ok),
+        "equal_weight_skip_reason": "" if equal_ok else equal_skip,
+        "equal_weight_proposed_candidate": equal_raw,
+        "equal_weight_proposed_stepped_coefficients": equal_stepped,
+        "traffic_weighted_current": current_row["byte_weighted_score"],
+        "traffic_weighted_best": weighted_best["byte_weighted_score"],
+        "traffic_weighted_gain": weighted_best["byte_weighted_score"]-current_row["byte_weighted_score"],
+        "traffic_weighted_would_apply": bool(weighted_ok),
+        "traffic_weighted_proposed_candidate": weighted_raw,
+        "traffic_weighted_proposed_stepped_coefficients": weighted_stepped,
+        "aggregate_methods_agree": methods_agree,
+        "proposed_stepped_coefficients": equal_stepped if methods_agree else None,
+        "applied_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
+        "gate_threshold": gate_threshold,
+        "score_gain": weighted_gain_bps if weighted_gain_bps is not None else 0.0,
+        "score_gain_bps": weighted_gain_bps,
+        "source": cur_source,
+    }
+    _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_per_path.csv", per_path_rows)
+    _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_aggregate.csv", aggregate_rows)
+    atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
+    atomic_write_json(archive_dir / f"qaccess_multipath_shadow_audit_{safe}.json", response)
+    _worker_log_line(log_file, response)
+    if request_path.is_file():
+        shutil.copy2(request_path, archive_dir / f"qaccess_update_request_{safe}.json")
+        request_path.unlink()
+    atomic_write_json(response_out, response)
+    return True
+
+
 def _process_request(
     request_path: Path,
     samples_path: Path,
@@ -638,6 +924,7 @@ def _process_request(
     shadow: bool,
     fixed_gamma: float | None,
     log_file: Path | None = None,
+    min_sender_byte_delta: int = 1,
 ) -> bool:
     req, samples, request_id, path_id = _load_request_and_samples(
         request_path,
@@ -656,6 +943,22 @@ def _process_request(
         return False
 
     model = joblib.load(model_path)
+    if shadow:
+        return _process_multipath_shadow_request(
+            req=req, samples=samples, request_id=request_id, model=model,
+            coeffs_out=coeffs_out, response_out=response_out, request_path=request_path,
+            archive_dir=archive_dir, target_mode=target_mode,
+            min_improvement_pct=min_improvement_pct,
+            min_delta_gain_bps=min_delta_gain_bps,
+            min_relative_delta_gain=min_relative_delta_gain,
+            fixed_gamma=fixed_gamma, log_file=log_file,
+            min_sender_byte_delta=min_sender_byte_delta,
+        )
+
+    samples = _filter_samples_by_path(samples, path_id)
+    if samples.empty:
+        print(f"[worker] skip: no valid runtime samples for path_id={path_id}", file=sys.stderr)
+        return False
     coeffs_doc = load_coeffs_doc(coeffs_out)
     cur_alpha, cur_beta, cur_gamma, cur_source = resolve_path_coeffs(coeffs_doc, path_id)
     if "current_alpha" in req:
@@ -985,6 +1288,12 @@ def main() -> None:
         help="Minimum pred_best - pred_current for relative_delta_bw_1s gate (default: 0.01)",
     )
     ap.add_argument(
+        "--min-sender-byte-delta",
+        type=int,
+        default=1,
+        help="Minimum positive sender-byte growth within one request buffer for media eligibility (default: 1)",
+    )
+    ap.add_argument(
         "--prev-coeffs-out",
         type=Path,
         default=DEFAULT_COEFFS_PREV,
@@ -993,7 +1302,7 @@ def main() -> None:
     ap.add_argument(
         "--shadow-per-subflow",
         action="store_true",
-        help="Evaluate per-path candidates and write audit artifacts only; no runtime coeff/buffer changes",
+        help="Evaluate aggregate multipath candidates and write Shadow artifacts only; no runtime coefficient changes",
     )
     ap.add_argument(
         "--fixed-gamma",
@@ -1010,7 +1319,7 @@ def main() -> None:
     ap.add_argument(
         "--dry-run",
         action="store_true",
-        help="Alias for --shadow-per-subflow --once",
+        help="Alias for Shadow evaluation --once",
     )
     ap.add_argument(
         "--log-file",
@@ -1049,12 +1358,20 @@ def main() -> None:
     load_coeffs_doc(args.coeffs_out.resolve())
 
     print(
-        f"[worker] per-subflow mode shadow={shadow} fixed_gamma={fixed_gamma} "
+        f"[worker] scoring_mode={'aggregate_multipath_shadow' if shadow else 'per_subflow_active'} "
+        f"shadow={shadow} fixed_gamma={fixed_gamma} "
         f"polling {args.request.resolve()} every {args.poll_interval}s "
         f"target_mode={args.target_mode} {gate_desc}",
         file=sys.stderr,
         flush=True,
     )
+    if shadow:
+        print(
+            "[worker] warning aggregate_shadow_only=true "
+            "model_retraining_required_before_active=true",
+            file=sys.stderr,
+            flush=True,
+        )
     _write_ready_file(
         args.ready_file.resolve() if args.ready_file else None,
         {
@@ -1082,7 +1399,11 @@ def main() -> None:
             "gate": gate_desc,
             "shadow": shadow,
             "shadow_mode": shadow,
+            "scoring_mode": "aggregate_multipath_shadow" if shadow else "per_subflow_active",
+            "aggregate_shadow_only": shadow,
+            "model_retraining_required_before_active": shadow,
             "fixed_gamma": fixed_gamma,
+            "min_sender_byte_delta": args.min_sender_byte_delta,
         },
     )
 
@@ -1105,6 +1426,7 @@ def main() -> None:
             shadow=shadow,
             fixed_gamma=fixed_gamma,
             log_file=log_file,
+            min_sender_byte_delta=args.min_sender_byte_delta,
         )
         if args.once or args.dry_run:
             break

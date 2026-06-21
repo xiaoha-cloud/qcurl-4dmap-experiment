@@ -35,6 +35,12 @@ type qaccessSampleExporter struct {
 	maxRows            int64
 	rowsWritten        int64
 	rowsWrittenPerPath map[protocol.PathID]int64
+	senderBytesFirst   map[protocol.PathID]uint64
+	senderBytesLast    map[protocol.PathID]uint64
+	senderByteDelta    map[protocol.PathID]uint64
+	senderObservations map[protocol.PathID]uint64
+	senderCounterReset map[protocol.PathID]bool
+	endpoints          map[protocol.PathID]string
 	opened             bool
 	writer             *csv.Writer
 	file               *os.File
@@ -44,15 +50,21 @@ type qaccessSampleExporter struct {
 }
 
 type qaccessBufferSnapshot struct {
-	TotalRows       int64
-	RowsByPath      map[protocol.PathID]int64
-	ActivePaths     []protocol.PathID
-	EligiblePaths   []protocol.PathID
-	SelectedPath    protocol.PathID
-	HasSelectedPath bool
-	AtCapacity      bool
-	WindowStartMs   int64
-	WindowEndMs     int64
+	TotalRows          int64
+	RowsByPath         map[protocol.PathID]int64
+	ActivePaths        []protocol.PathID
+	EligiblePaths      []protocol.PathID
+	SelectedPath       protocol.PathID
+	HasSelectedPath    bool
+	AtCapacity         bool
+	WindowStartMs      int64
+	WindowEndMs        int64
+	SenderByteDelta    map[protocol.PathID]uint64
+	SenderBytesFirst   map[protocol.PathID]uint64
+	SenderBytesLast    map[protocol.PathID]uint64
+	SenderCounterReset map[protocol.PathID]bool
+	Endpoints          map[protocol.PathID]string
+	ExclusionReasons   map[protocol.PathID]string
 }
 
 func newQAccessSampleExporter(csvPath, runID string, maxRows int64) *qaccessSampleExporter {
@@ -61,6 +73,12 @@ func newQAccessSampleExporter(csvPath, runID string, maxRows int64) *qaccessSamp
 		runID:              runID,
 		maxRows:            maxRows,
 		rowsWrittenPerPath: make(map[protocol.PathID]int64),
+		senderBytesFirst:   make(map[protocol.PathID]uint64),
+		senderBytesLast:    make(map[protocol.PathID]uint64),
+		senderByteDelta:    make(map[protocol.PathID]uint64),
+		senderObservations: make(map[protocol.PathID]uint64),
+		senderCounterReset: make(map[protocol.PathID]bool),
+		endpoints:          make(map[protocol.PathID]string),
 		pending:            make(map[protocol.PathID]map[string]string),
 	}
 }
@@ -81,7 +99,7 @@ func (e *qaccessSampleExporter) pathBufferSize(pathID protocol.PathID) int64 {
 	return n
 }
 
-func (e *qaccessSampleExporter) triggerSnapshot(minSamplesPerPath int64) qaccessBufferSnapshot {
+func (e *qaccessSampleExporter) triggerSnapshot(minSamplesPerPath int64, requireMediaActivity bool, minSenderByteDelta uint64) qaccessBufferSnapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if minSamplesPerPath < 1 {
@@ -96,12 +114,21 @@ func (e *qaccessSampleExporter) triggerSnapshot(minSamplesPerPath int64) qaccess
 	}
 	active := make([]protocol.PathID, 0, len(rowsByPath))
 	eligible := make([]protocol.PathID, 0, len(rowsByPath))
+	senderDelta := make(map[protocol.PathID]uint64, len(rowsByPath))
+	exclusionReasons := make(map[protocol.PathID]string, len(rowsByPath))
 	for pid, n := range rowsByPath {
 		if n <= 0 {
 			continue
 		}
 		active = append(active, pid)
-		if n >= minSamplesPerPath {
+		senderDelta[pid] = e.senderByteDelta[pid]
+		if n < minSamplesPerPath {
+			exclusionReasons[pid] = "insufficient_rows"
+		} else if requireMediaActivity && e.senderObservations[pid] < 2 {
+			exclusionReasons[pid] = "insufficient_sender_observations"
+		} else if requireMediaActivity && senderDelta[pid] < minSenderByteDelta {
+			exclusionReasons[pid] = "no_sender_byte_growth"
+		} else {
 			eligible = append(eligible, pid)
 		}
 	}
@@ -118,6 +145,11 @@ func (e *qaccessSampleExporter) triggerSnapshot(minSamplesPerPath int64) qaccess
 		TotalRows: total, RowsByPath: rowsByPath, ActivePaths: active, EligiblePaths: eligible,
 		AtCapacity:    e.maxRows > 0 && total >= e.maxRows,
 		WindowStartMs: e.windowStartMs, WindowEndMs: e.windowEndMs,
+		SenderByteDelta: senderDelta, Endpoints: copyPathStringMap(e.endpoints),
+		SenderBytesFirst:   copyPathUint64Map(e.senderBytesFirst),
+		SenderBytesLast:    copyPathUint64Map(e.senderBytesLast),
+		SenderCounterReset: copyPathBoolMap(e.senderCounterReset),
+		ExclusionReasons:   exclusionReasons,
 	}
 	if len(eligible) > 0 {
 		snapshot.SelectedPath = eligible[0]
@@ -238,6 +270,12 @@ func (e *qaccessSampleExporter) resetBuffer() error {
 	e.opened = false
 	e.rowsWritten = 0
 	e.rowsWrittenPerPath = make(map[protocol.PathID]int64)
+	e.senderBytesFirst = make(map[protocol.PathID]uint64)
+	e.senderBytesLast = make(map[protocol.PathID]uint64)
+	e.senderByteDelta = make(map[protocol.PathID]uint64)
+	e.senderObservations = make(map[protocol.PathID]uint64)
+	e.senderCounterReset = make(map[protocol.PathID]bool)
+	e.endpoints = make(map[protocol.PathID]string)
 	e.pending = make(map[protocol.PathID]map[string]string)
 	e.windowStartMs = 0
 	e.windowEndMs = 0
@@ -250,6 +288,12 @@ func (e *qaccessSampleExporter) removePathRows(pathID protocol.PathID) error {
 	defer e.mu.Unlock()
 	delete(e.pending, pathID)
 	e.rowsWrittenPerPath[pathID] = 0
+	delete(e.senderBytesFirst, pathID)
+	delete(e.senderBytesLast, pathID)
+	delete(e.senderByteDelta, pathID)
+	delete(e.senderObservations, pathID)
+	delete(e.senderCounterReset, pathID)
+	delete(e.endpoints, pathID)
 
 	if !e.opened && e.file == nil {
 		if _, err := os.Stat(e.path); os.IsNotExist(err) {
@@ -343,6 +387,20 @@ func (e *qaccessSampleExporter) recordPending(row map[string]string, pathID prot
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if sentBytes, err := strconv.ParseUint(row["sender_bytes_total"], 10, 64); err == nil {
+		if e.senderObservations[pathID] == 0 {
+			e.senderBytesFirst[pathID] = sentBytes
+		} else if sentBytes >= e.senderBytesLast[pathID] {
+			e.senderByteDelta[pathID] += sentBytes - e.senderBytesLast[pathID]
+		} else {
+			e.senderCounterReset[pathID] = true
+		}
+		e.senderBytesLast[pathID] = sentBytes
+		e.senderObservations[pathID]++
+	}
+	if endpoint := row["remote_endpoint"]; endpoint != "" {
+		e.endpoints[pathID] = endpoint
+	}
 	e.pending[pathID] = row
 	if timestampMs, err := strconv.ParseInt(row["timestamp_ms"], 10, 64); err == nil {
 		if e.windowStartMs == 0 || timestampMs < e.windowStartMs {
@@ -353,6 +411,30 @@ func (e *qaccessSampleExporter) recordPending(row map[string]string, pathID prot
 		}
 	}
 	return nil
+}
+
+func copyPathStringMap(in map[protocol.PathID]string) map[protocol.PathID]string {
+	out := make(map[protocol.PathID]string, len(in))
+	for pathID, value := range in {
+		out[pathID] = value
+	}
+	return out
+}
+
+func copyPathUint64Map(in map[protocol.PathID]uint64) map[protocol.PathID]uint64 {
+	out := make(map[protocol.PathID]uint64, len(in))
+	for pathID, value := range in {
+		out[pathID] = value
+	}
+	return out
+}
+
+func copyPathBoolMap(in map[protocol.PathID]bool) map[protocol.PathID]bool {
+	out := make(map[protocol.PathID]bool, len(in))
+	for pathID, value := range in {
+		out[pathID] = value
+	}
+	return out
 }
 
 func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta, gamma float64, diag ControlLawDiagnostics) map[string]string {
