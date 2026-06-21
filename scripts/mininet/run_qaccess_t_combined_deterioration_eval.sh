@@ -524,3 +524,7 @@ echo "[combined_deterioration] worker log: $SESSION_DIR/worker.log"
 echo "[combined_deterioration] worker process log: $SESSION_DIR/worker_process.log"
 echo "[combined_deterioration] worker ready marker: $SESSION_DIR/worker_ready.json"
 echo "[combined_deterioration] retained per leg: control_law_diagnostics.csv throughput_*_down.csv tc_deterioration.log (+ dynamic coeffs JSON at session root)"
+if [[ -n "${SUDO_UID:-}" && -n "${SUDO_GID:-}" ]]; then
+  chown -R "${SUDO_UID}:${SUDO_GID}" "$SESSION_DIR" 2>/dev/null \
+    || echo "[warn] could not restore session ownership: $SESSION_DIR" >&2
+fi

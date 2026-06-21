@@ -38,13 +38,17 @@ def analyze(session: Path) -> dict:
     relative = (dynamic - base) / max(abs(base), 1e-9)
     report["observed_during_difference_mbps"] = dynamic - base
     report["observed_during_relative_difference"] = relative
-    report["verdict"] = "dynamic_better" if relative > 0.02 else ("dynamic_worse" if relative < -0.02 else "inconclusive")
+    observed_direction = "dynamic_better" if relative > 0.02 else ("dynamic_worse" if relative < -0.02 else "inconclusive")
+    report["observed_throughput_direction"] = observed_direction
     worker_rows = [json.loads(line) for line in (session / "worker.log").read_text().splitlines() if line.strip()]
     report["coefficient_events"] = [{key: row.get(key) for key in (
         "request_id", "timestamp_ms", "request_classification", "status", "gate_mode", "absolute_gain_bps",
         "relative_gain", "would_apply_under_gate", "actual_applied", "eligible_path_ids",
         "traffic_weighted_proposed_candidate", "traffic_weighted_proposed_stepped_coefficients", "applied_coefficients")}
         for row in worker_rows]
+    applied = any(bool(row.get("actual_applied")) for row in worker_rows)
+    report["dynamic_updates_applied"] = applied
+    report["verdict"] = observed_direction if applied else "inconclusive_no_active_update"
     request_ids = [str(row.get("request_id")) for row in worker_rows if row.get("request_id")]
     report["request_serial_continuity"] = continuous(request_ids) if request_ids else False
     report["request_write_failed"] = sum('"trigger_decision":"request_write_failed"' in line.replace(" ", "")
@@ -66,7 +70,12 @@ def main() -> None:
     text = json.dumps(report, indent=2)
     print(text)
     output = args.output or args.session / "baseline_vs_dynamic_relative_comparison.json"
-    output.write_text(text + "\n", encoding="utf-8")
+    try:
+        output.write_text(text + "\n", encoding="utf-8")
+    except PermissionError as exc:
+        raise SystemExit(
+            f"cannot write {output}: {exc}; repair session ownership or pass --output to a writable path"
+        )
     print(f"[compare] wrote {output} verdict={report['verdict']}")
 
 
