@@ -388,6 +388,7 @@ def run_experiment(net, args):
     logs_dir = os.path.join(logdir, "logs")
     pcap_dir = os.path.join(logdir, "pcaps")
     throughput_dir = os.path.join(logdir, "csv")
+    qoe_dir = os.path.join(logdir, "qoe")
     os.makedirs(logs_dir, exist_ok=True)
     os.makedirs(pcap_dir, exist_ok=True)
     os.makedirs(throughput_dir, exist_ok=True)
@@ -401,7 +402,10 @@ def run_experiment(net, args):
     os.makedirs(videos_dir, exist_ok=True)
     save_output_flv = _env_flag("SAVE_OUTPUT_FLV", False)
     keep_pcap = _env_flag("KEEP_PCAP", False)
+    qoe_enabled = _env_flag("QACCESS_ENABLE_QOE_LOG", False)
     throughput_interval = _env_float("THROUGHPUT_INTERVAL", 1.0)
+    if qoe_enabled:
+        os.makedirs(qoe_dir, exist_ok=True)
     if save_output_flv:
         outfile = os.path.join(logdir, f"output_{run_id}.flv")
     else:
@@ -607,6 +611,28 @@ def run_experiment(net, args):
     env_prefix = "QUIC_GO_LOG_LEVEL=info"
     if getattr(args, "log_control", False):
         env_prefix += " QUIC_GO_LOG_CONTROL=1"
+
+    qoe_env_base = ""
+    if qoe_enabled:
+        qoe_experiment_name = os.environ.get("QACCESS_QOE_EXPERIMENT_NAME", _scenario_tag_for_dir(scen))
+        qoe_video_every_n = os.environ.get("QACCESS_QOE_LOG_VIDEO_EVERY_N", "1")
+        qoe_log_audio = os.environ.get("QACCESS_QOE_LOG_AUDIO", "0")
+        qoe_env_base = (
+            f"QACCESS_ENABLE_QOE_LOG=1 "
+            f"QACCESS_QOE_LOG_DIR={shlex.quote(os.path.abspath(qoe_dir))} "
+            f"QACCESS_QOE_SESSION_ID={shlex.quote(run_id)} "
+            f"QACCESS_QOE_EXPERIMENT_NAME={shlex.quote(qoe_experiment_name)} "
+            f"QACCESS_QOE_VARIANT={shlex.quote(run_label or subdir)} "
+            f"QACCESS_QOE_LOG_VIDEO_EVERY_N={shlex.quote(qoe_video_every_n)} "
+            f"QACCESS_QOE_LOG_AUDIO={shlex.quote(qoe_log_audio)} "
+        )
+        _log("qoe", f"enabled dir={qoe_dir} video_every_n={qoe_video_every_n} audio={qoe_log_audio}")
+
+    def qoe_env_for(role):
+        if not qoe_env_base:
+            return ""
+        return qoe_env_base + f"QACCESS_QOE_ROLE={shlex.quote(role)} "
+
     # ---- Start server on h2 ------------------------------------------------
     server_log_path = os.path.join(logs_dir, f"server_{run_id}.log")
     server_log = _open_log_file(server_log_path, save_logs)
@@ -616,7 +642,7 @@ def run_experiment(net, args):
         f"QACCESS_PHASE2_ENABLED={int(server_phase2_enabled)} "
         f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=server_listener "
         f"QACCESS_PHASE2_STATE_DIR={shlex.quote(phase2_state_dir)} "
-        f"QACCESS_EXPERIMENT_RUN_ID={shlex.quote(run_id)} {env_prefix} "
+        f"QACCESS_EXPERIMENT_RUN_ID={shlex.quote(run_id)} {qoe_env_for('server')} {env_prefix} "
         f"{server_bin} -protocol=quic -au=false"
     )
     _log("server", f"starting on h2 → {server_log_path}")
@@ -641,7 +667,7 @@ def run_experiment(net, args):
     lc = " -log-control" if getattr(args, "log_control", False) else ""
     pull_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
-        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_pull_receiver {env_prefix} {client_bin}"
+        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_pull_receiver {qoe_env_for('puller')} {env_prefix} {client_bin}"
         f" -type=true -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(outfile)}"
@@ -666,7 +692,7 @@ def run_experiment(net, args):
     push_log = _open_log_file(push_log_path, save_logs)
     push_cmd = (
         f"export RUN_ID={shlex.quote(run_id)} && cd {ROOT} && "
-        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_push_publisher {env_prefix} {client_bin}"
+        f"QACCESS_PHASE2_ENABLED=0 QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=client_push_publisher {qoe_env_for('pusher')} {env_prefix} {client_bin}"
         f" -type=false -protocol=quic -multi=true -sch=rr"
         f" -run-id={shlex.quote(run_id)} -utility-mode={shlex.quote(um)}"
         f" -experiment-input={shlex.quote(input_flv)}"
