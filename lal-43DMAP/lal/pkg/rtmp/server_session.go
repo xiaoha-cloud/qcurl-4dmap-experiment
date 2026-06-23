@@ -80,6 +80,9 @@ type ServerSession struct {
 	// only for SubSession
 	IsFresh          bool
 	phase2Controller quic.Phase2SessionController
+
+	qoeSeenFirstReceive bool
+	qoeVideoCount       int64
 }
 
 func NewServerSession(observer ServerSessionObserver, conn net.Conn) *ServerSession {
@@ -171,7 +174,16 @@ func (s *ServerSession) RunLoop() (err error) {
 			}
 		}
 	}()
-	return s.runReadLoop()
+	err = s.runReadLoop()
+	logRTMPQoEEvent(rtmpQoEEvent{
+		role:           "server",
+		event:          "stream_end",
+		physicalTimeMS: rtmpQoENowMS(),
+		streamID:       s.uniqueKey,
+		connectionID:   s.Phase2ConnectionID(),
+		note:           rtmpQoENote("err=%v", err),
+	})
+	return err
 }
 
 func (s *ServerSession) Write(msg []byte) error {
@@ -304,12 +316,67 @@ func (s *ServerSession) doMsg(stream *Stream) error {
 			nazalog.Errorf("[%s] read audio/video message but server session not pub type.", s.uniqueKey)
 			return ErrRTMP
 		}
-		s.avObserver.OnReadRTMPAVMsg(stream.toAVMsg())
+		msg := stream.toAVMsg()
+		s.logQoEReceive(msg)
+		s.avObserver.OnReadRTMPAVMsg(msg)
 	default:
 		nazalog.Warnf("[%s] read unknown message. typeid=%d, %s", s.uniqueKey, stream.header.MsgTypeID, stream.toDebugString())
 
 	}
 	return nil
+}
+
+func (s *ServerSession) logQoEReceive(msg base.RTMPMsg) {
+	if msg.Header.MsgTypeID != base.RTMPTypeIDVideo && msg.Header.MsgTypeID != base.RTMPTypeIDAudio {
+		return
+	}
+	if !s.qoeSeenFirstReceive {
+		s.qoeSeenFirstReceive = true
+		logRTMPQoEEvent(rtmpQoEEvent{
+			role:           "server",
+			event:          "server_first_receive",
+			flvTimestampMS: rtmpQoEUint32(msg.Header.TimestampAbs),
+			physicalTimeMS: rtmpQoENowMS(),
+			tagType:        rtmpQoETagType(msg),
+			frameType:      rtmpQoEFrameType(msg),
+			chunkSize:      rtmpQoEInt(len(msg.Payload)),
+			streamID:       s.uniqueKey,
+			connectionID:   s.Phase2ConnectionID(),
+			note:           rtmpQoENote("rtmp_stream_id=%d", msg.Header.MsgStreamID),
+		})
+	}
+	if msg.Header.MsgTypeID == base.RTMPTypeIDVideo {
+		s.qoeVideoCount++
+		if rtmpQoEShouldLogVideo(s.qoeVideoCount) {
+			logRTMPQoEEvent(rtmpQoEEvent{
+				role:           "server",
+				event:          "server_video_receive",
+				flvTimestampMS: rtmpQoEUint32(msg.Header.TimestampAbs),
+				physicalTimeMS: rtmpQoENowMS(),
+				tagType:        rtmpQoETagType(msg),
+				frameType:      rtmpQoEFrameType(msg),
+				chunkSize:      rtmpQoEInt(len(msg.Payload)),
+				streamID:       s.uniqueKey,
+				connectionID:   s.Phase2ConnectionID(),
+				note:           rtmpQoENote("rtmp_stream_id=%d video_index=%d", msg.Header.MsgStreamID, s.qoeVideoCount),
+			})
+		}
+		return
+	}
+	if rtmpQoEShouldLogAudio() {
+		logRTMPQoEEvent(rtmpQoEEvent{
+			role:           "server",
+			event:          "server_audio_receive",
+			flvTimestampMS: rtmpQoEUint32(msg.Header.TimestampAbs),
+			physicalTimeMS: rtmpQoENowMS(),
+			tagType:        rtmpQoETagType(msg),
+			frameType:      rtmpQoEFrameType(msg),
+			chunkSize:      rtmpQoEInt(len(msg.Payload)),
+			streamID:       s.uniqueKey,
+			connectionID:   s.Phase2ConnectionID(),
+			note:           rtmpQoENote("rtmp_stream_id=%d", msg.Header.MsgStreamID),
+		})
+	}
 }
 
 func (s *ServerSession) doACK(stream *Stream) error {
