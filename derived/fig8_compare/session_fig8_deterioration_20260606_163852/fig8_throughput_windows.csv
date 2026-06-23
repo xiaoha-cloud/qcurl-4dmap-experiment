@@ -1,0 +1,15 @@
+experiment,method,window,t_lo,t_hi,total_quic_wire_mbps_mean,path_a_quic_wire_mbps_mean,path_b_quic_wire_mbps_mean
+Fig.8-style sudden link quality deterioration,baseline,0-50,0.0,50.0,20.532768640000004,18.639977119999998,1.89279152
+Fig.8-style sudden link quality deterioration,baseline,50-90,50.0,90.0,25.723695600000003,22.6476502,3.0760454
+Fig.8-style sudden link quality deterioration,baseline,90-100,90.0,100.0,26.6974976,23.4855512,3.2119464
+Fig.8-style sudden link quality deterioration,baseline,100-110,100.0,110.0,26.576124800000002,23.3031576,3.2729672
+Fig.8-style sudden link quality deterioration,baseline,100-150,100.0,150.0,25.10334976,23.662340000000004,1.44100976
+Fig.8-style sudden link quality deterioration,baseline,150-220,150.0,220.0,27.057361485714285,26.125752914285712,0.9316085714285716
+Fig.8-style sudden link quality deterioration,baseline,full,0.0,220.0,24.871563745454544,23.11218218181818,1.7593815636363637
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,0-50,0.0,50.0,20.01390176,18.08626192,1.9276398399999999
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,50-90,50.0,90.0,24.976647000000003,21.5218336,3.4548134000000004
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,90-100,90.0,100.0,24.1468608,20.4658848,3.6809760000000002
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,100-110,100.0,110.0,22.501879199999998,20.646512,1.8553671999999994
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,100-150,100.0,150.0,22.156530559999997,21.5031592,0.65337136
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,150-220,150.0,220.0,24.37952445714286,24.050003999999998,0.3295204571428571
+Fig.8-style sudden link quality deterioration,qaccess_t_dynamic,full,0.0,220.0,22.98010370909091,21.493197854545457,1.4869058545454545

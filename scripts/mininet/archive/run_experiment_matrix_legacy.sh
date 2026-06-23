@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# ARCHIVED — not part of final Q-ACCeSS-T workflow. Use ../run_qaccess_t_fig7_dynamic_eval.sh instead.
+# ARCHIVED — not part of the current Q-ACCeSS-T workflow.
+# Use ../run_qaccess_t_combined_deterioration_eval.sh for current experiments.
 #
 # Batch runner for mp_topo.py: Phase 1 (static) + Phase 2 (fixed T/D/L + dynamic tc) + Phase 3 (auto).
 #

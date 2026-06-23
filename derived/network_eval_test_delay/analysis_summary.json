@@ -1,0 +1,24 @@
+{
+  "scenario": "delay",
+  "runs": {
+    "baseline": "/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/session_fig7_dynamic_20260602_201354/fig7_baseline",
+    "qaccess_t_dynamic": "/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/session_fig7_dynamic_20260602_201354/fig7_qaccess_t_dynamic"
+  },
+  "baseline_label": "baseline",
+  "windows": [
+    "0-50",
+    "50-60",
+    "50-100",
+    "100-110",
+    "100-150",
+    "150-220",
+    "full"
+  ],
+  "outputs": [
+    "output_flv_sizes.csv",
+    "quic_wire_improvement_vs_baseline.csv",
+    "quic_wire_throughput_windows.csv",
+    "quic_wire_timeseries_baseline.csv",
+    "quic_wire_timeseries_qaccess_t_dynamic.csv"
+  ]
+}

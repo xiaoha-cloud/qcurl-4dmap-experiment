@@ -1,0 +1,8 @@
+session_key,session_label,expected_gate_pct,request_id,status,skip_reason,min_improvement_pct,improvement_pct,score_mode,current_coeffs,candidate_coeffs,final_coeffs,n_samples,timestamp_ms
+gate_3pct,3% formal,3.0,qaccess_1780863354229_1_buffer_full,skipped,improvement_gate,3.0,0.0,cwnd_proxy,0.6 / 0.3 / 0.1,0.599688 / 0.304913 / 0.1,0.6 / 0.3 / 0.1,4610,1780863354229
+gate_3pct,3% formal,3.0,qaccess_1780863366597_1_buffer_full,skipped,improvement_gate,3.0,0.274,cwnd_proxy,0.6 / 0.3 / 0.1,0.6 / 0.314179 / 0.1,0.6 / 0.3 / 0.1,4760,1780863366597
+gate_3pct,3% formal,3.0,qaccess_1780863426537_2_buffer_full,skipped,improvement_gate,3.0,1.614,cwnd_proxy,0.6 / 0.3 / 0.1,0.635355 / 0.2 / 0.1,0.6 / 0.3 / 0.1,4997,1780863426537
+gate_3pct,3% formal,3.0,qaccess_1780863435185_2_buffer_full,skipped,improvement_gate,3.0,0.006,cwnd_proxy,0.6 / 0.3 / 0.1,0.6 / 0.30153 / 0.1,0.6 / 0.3 / 0.1,4997,1780863435185
+gate_3pct,3% formal,3.0,qaccess_1780863494506_3_buffer_full,skipped,improvement_gate,3.0,0.541,cwnd_proxy,0.6 / 0.3 / 0.1,0.6 / 0.235355 / 0.1,0.6 / 0.3 / 0.1,4997,1780863494506
+gate_3pct,3% formal,3.0,qaccess_1780863503889_3_buffer_full,skipped,improvement_gate,3.0,0.088,cwnd_proxy,0.6 / 0.3 / 0.1,0.6 / 0.299628 / 0.1,0.6 / 0.3 / 0.1,4997,1780863503889
+gate_3pct,3% formal,3.0,qaccess_1780863563453_4_buffer_full,skipped,improvement_gate,3.0,0.0,cwnd_proxy,0.6 / 0.3 / 0.1,0.6 / 0.3 / 0.1,0.6 / 0.3 / 0.1,4997,1780863571645

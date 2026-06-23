@@ -1,9 +1,11 @@
-# Legacy Mininet scripts (not part of final Q-ACCeSS-T workflow)
+# Legacy Mininet scripts (not part of the current Q-ACCeSS-T workflow)
 
-Final evaluation uses only (parent directory):
+Historical Fig.7 capacity-change entry points have been removed. The current
+evaluation pipeline uses the combined deterioration runner in the parent
+directory. Shared topology and traffic-control helpers remain there because
+they are still used by active experiments.
 
 - `mp_topo.py`
-- `run_qaccess_t_fig7_dynamic_eval.sh`
 - `tc_bw_steps.sh`
 - `bw_profile.fig7_200s.env`
 

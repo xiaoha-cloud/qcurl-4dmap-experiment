@@ -1,0 +1,15 @@
+experiment,method,window,t_lo,t_hi,total_quic_wire_mbps_mean,path_a_quic_wire_mbps_mean,path_b_quic_wire_mbps_mean
+Fig.7-style capacity change (Path B TBF),baseline,0-50,0.0,50.0,17.411200960000002,16.970996799999998,0.44020416000000007
+Fig.7-style capacity change (Path B TBF),baseline,50-90,50.0,90.0,23.0074602,22.567830800000003,0.4396294
+Fig.7-style capacity change (Path B TBF),baseline,90-100,90.0,100.0,23.675165600000003,23.2381888,0.43697680000000005
+Fig.7-style capacity change (Path B TBF),baseline,100-110,100.0,110.0,23.8837592,23.4482016,0.4355576
+Fig.7-style capacity change (Path B TBF),baseline,100-150,100.0,150.0,24.379799839999997,23.947663519999995,0.43213632
+Fig.7-style capacity change (Path B TBF),baseline,150-220,150.0,220.0,25.77321211428572,25.318247885714282,0.45496422857142854
+Fig.7-style capacity change (Path B TBF),baseline,full,0.0,220.0,22.957840690909084,22.515024945454545,0.4428157454545455
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,0-50,0.0,50.0,19.966273920000003,18.051557600000002,1.9147163199999997
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,50-90,50.0,90.0,25.150525,22.3341806,2.8163443999999997
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,90-100,90.0,100.0,25.2498512,22.4799424,2.7699088
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,100-110,100.0,110.0,25.4343256,22.4526416,2.981684
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,100-150,100.0,150.0,24.64223888,22.76948928,1.8727496000000001
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,150-220,150.0,220.0,25.118097142857142,24.252606742857147,0.8654903999999999
+Fig.7-style capacity change (Path B TBF),qaccess_t_dynamic,full,0.0,220.0,23.850963418181816,22.076824836363635,1.7741385818181816

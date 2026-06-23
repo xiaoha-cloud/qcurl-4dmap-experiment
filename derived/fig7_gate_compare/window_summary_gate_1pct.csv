@@ -1,0 +1,8 @@
+session_key,session_label,gate_pct,window,baseline_total_mbps,dynamic_total_mbps,dynamic_vs_baseline_pct,baseline_pathA_mbps,dynamic_pathA_mbps,baseline_pathB_mbps,dynamic_pathB_mbps
+gate_1pct,1% debug,1.0,0-50,18.454,18.789,1.82,17.865,17.005,0.589,1.783
+gate_1pct,1% debug,1.0,50-100,23.107,22.363,-3.22,22.665,20.723,0.442,1.64
+gate_1pct,1% debug,1.0,100-110,23.829,21.894,-8.12,23.392,21.452,0.437,0.442
+gate_1pct,1% debug,1.0,100-150,24.259,22.399,-7.67,23.826,21.961,0.433,0.438
+gate_1pct,1% debug,1.0,150-200,25.673,23.611,-8.03,25.249,23.182,0.424,0.429
+gate_1pct,1% debug,1.0,0-220,23.231,22.027,-5.19,22.764,21.013,0.467,1.013
+gate_1pct,1% debug,1.0,full,23.25,22.038,-5.21,22.783,21.028,0.467,1.011

@@ -1,0 +1,4 @@
+path_id,gain_min,gain_max,owd_ms_mean,bw_bps_mean,utility_controlled,inferred_pcap_path,inferred_cc
+0,1.0,1.1847,263.0668421750663,6858247.533156498,True,pathA,"Cubic (InitialPathID=0, gain=1.0)"
+1,1.1001,1.1855,232.32594528828272,21780931.451952882,True,pathB,OLIA secondary (responds to gain/backoff)
+3,1.0325,1.2,199.57029994408728,73227455.87475538,True,pathB,OLIA secondary (responds to gain/backoff)

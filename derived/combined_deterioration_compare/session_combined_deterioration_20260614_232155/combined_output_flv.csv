@@ -1,0 +1,3 @@
+method,output_flv_mb,run_dir
+baseline,83.301143,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/session_combined_deterioration_20260614_232155/combined_baseline
+qaccess_t_dynamic,61.673023,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/session_combined_deterioration_20260614_232155/combined_qaccess_t_dynamic

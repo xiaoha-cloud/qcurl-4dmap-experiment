@@ -1,0 +1,3 @@
+session_key,runtime_alpha,runtime_beta,runtime_gamma,runtime_source,n_requests,n_pass_gate,max_improvement_pct,n_traces,n_candidate_scores,artifact_dir
+gate_3pct,0.6,0.3,0.1,phase1_stable_initial_coefficients,7,0,1.614,0,0,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/derived/fig7_gate_compare/201152
+gate_1pct,,,,,0,0,,0,0,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/derived/fig7_gate_compare/203634

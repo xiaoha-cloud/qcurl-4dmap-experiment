@@ -1,0 +1,7 @@
+leg,window,loss_event_count,loss_event_fraction,loss_rate_mean,owd_ms_mean,alpha_mean,beta_mean,gamma_mean,n_samples
+loss_qaccess_dynamic,0-50 normal,999,0.3333333333333333,0.00021830663997330667,257.7046666666667,0.6,0.3,0.09999999999999998,2997
+loss_qaccess_dynamic,50-90 pre-stress,0,,,,,,,0
+loss_qaccess_dynamic,90-100 stress,0,,,,,,,0
+loss_qaccess_dynamic,100-150 recovery,0,,,,,,,0
+loss_qaccess_dynamic,150-200 stable,0,,,,,,,0
+loss_qaccess_dynamic,0-200 full,999,0.3333333333333333,0.00021830663997330667,257.7046666666667,0.6,0.3,0.09999999999999998,2997

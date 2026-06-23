@@ -1,0 +1,21 @@
+{
+  "request_id": "qaccess_1780863563453_4_buffer_full",
+  "status": "skipped",
+  "skip_reason": "improvement_gate",
+  "min_improvement_pct": 3.0,
+  "improvement_pct": 0.0,
+  "score_mode": "cwnd_proxy",
+  "current_alpha": 0.6,
+  "current_beta": 0.3,
+  "current_gamma": 0.1,
+  "candidate_alpha": 0.6,
+  "candidate_beta": 0.3,
+  "candidate_gamma": 0.1,
+  "final_alpha": 0.6,
+  "final_beta": 0.3,
+  "final_gamma": 0.1,
+  "pred_current": 4207371,
+  "pred_best": 4207371,
+  "n_samples": 4997,
+  "timestamp_ms": 1780863571645
+}

@@ -81,6 +81,11 @@ DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
 DEFAULT_MIN_DELTA_GAIN_BPS = 500_000.0
 DEFAULT_MIN_RELATIVE_GAIN = 0.03
 DEFAULT_MIN_RELATIVE_DELTA_GAIN = 0.01
+DEFAULT_CHANGED_PATH_IDS = (3,)
+DEFAULT_CHANGED_PATH_GAIN_BPS = 100_000.0
+DEFAULT_MIN_AGGREGATE_GAIN_BPS = 0.0
+DEFAULT_MAX_OTHER_PATH_LOSS_RATIO = 0.75
+DEFAULT_MAX_OTHER_PATH_LOSS_BPS = 200_000.0
 GATE_MODES = ("absolute", "relative", "hybrid")
 RELATIVE_GAIN_EPSILON = 1e-9
 MAX_COEFF_STEP = 0.1
@@ -348,6 +353,66 @@ def _score_all_candidates(
 def _apply_max_step(current: float, target: float, max_step: float = MAX_COEFF_STEP) -> float:
     delta = max(-max_step, min(max_step, target - current))
     return current + delta
+
+
+def _candidate_changed_path_metrics(
+    *,
+    candidate: dict[str, Any],
+    path_entries: list[dict[str, Any]],
+    changed_path_ids: set[int],
+    changed_path_gain_bps: float,
+    min_aggregate_gain_bps: float,
+    max_other_path_loss_ratio: float,
+    max_other_path_loss_bps: float,
+) -> dict[str, Any]:
+    changed_path_rows = [row for row in path_entries if int(row["path_id"]) in changed_path_ids]
+    other_rows = [row for row in path_entries if int(row["path_id"]) not in changed_path_ids]
+    changed_path_raw_gain_bps = float(sum(float(row["gain_bps"]) for row in changed_path_rows))
+    changed_path_weighted_gain_bps = float(sum(float(row["weighted_gain_bps"]) for row in changed_path_rows))
+    other_path_loss_bps = float(sum(-float(row["gain_bps"]) for row in other_rows if float(row["gain_bps"]) < 0))
+    other_path_gain_bps = float(sum(float(row["gain_bps"]) for row in other_rows if float(row["gain_bps"]) > 0))
+    aggregate_gain_bps = float(candidate["byte_weighted_gain"])
+    changed_path_gate_pass = changed_path_weighted_gain_bps >= changed_path_gain_bps
+    aggregate_safety_pass = aggregate_gain_bps > min_aggregate_gain_bps
+    other_path_loss_pass = (
+        other_path_loss_bps <= max_other_path_loss_ratio * max(changed_path_weighted_gain_bps, 0.0)
+        and other_path_loss_bps <= max_other_path_loss_bps
+    )
+    fig7_changed_path_would_apply = bool(
+        changed_path_gate_pass and aggregate_safety_pass and other_path_loss_pass
+    )
+    return {
+        "coefficients": {
+            "alpha": float(candidate["alpha"]),
+            "beta": float(candidate["beta"]),
+            "gamma": float(candidate["gamma"]),
+        },
+        "aggregate_gain_bps": aggregate_gain_bps,
+        "changed_path_raw_gain_bps": changed_path_raw_gain_bps,
+        "changed_path_weighted_gain_bps": changed_path_weighted_gain_bps,
+        "other_path_loss_bps": other_path_loss_bps,
+        "other_path_gain_bps": other_path_gain_bps,
+        "changed_path_gate_pass": changed_path_gate_pass,
+        "aggregate_safety_pass": aggregate_safety_pass,
+        "other_path_loss_pass": other_path_loss_pass,
+        "fig7_changed_path_would_apply": fig7_changed_path_would_apply,
+        "path_entries": path_entries,
+    }
+
+
+def _select_changed_path_priority_candidate(
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    safe = [row for row in candidates if row["aggregate_safety_pass"] and row["other_path_loss_pass"]]
+    population = safe if safe else candidates
+    return sorted(
+        population,
+        key=lambda row: (
+            -float(row["changed_path_weighted_gain_bps"]),
+            -float(row["aggregate_gain_bps"]),
+            float(row["other_path_loss_bps"]),
+        ),
+    )[0]
 
 
 def _ensure_path_writable(path: Path) -> None:
@@ -741,6 +806,12 @@ def _process_multipath_request(
     target_mode: str, min_delta_gain_bps: float, min_relative_gain: float,
     gate_mode: str, fixed_gamma: float | None, shadow: bool,
     log_file: Path | None, min_sender_byte_delta: int,
+    changed_path_priority_shadow: bool,
+    changed_path_ids: set[int],
+    changed_path_gain_bps: float,
+    min_aggregate_gain_bps: float,
+    max_other_path_loss_ratio: float,
+    max_other_path_loss_bps: float,
 ) -> bool:
     min_rows = max(1, int(req.get("min_samples_per_path", 1) or 1))
     path_diagnostics = _classify_media_paths(samples, min_rows, min_sender_byte_delta)
@@ -780,6 +851,8 @@ def _process_multipath_request(
         "current_coefficients": {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
         "aggregate_scoring": True,
         "aggregate_control_method": "traffic_weighted",
+        "changed_path_priority_shadow": bool(changed_path_priority_shadow),
+        "changed_path_ids": sorted(changed_path_ids),
     }
 
     if not eligible:
@@ -816,6 +889,7 @@ def _process_multipath_request(
     raw_weights = {str(item["path_id"]): item["sender_byte_delta"] for item in scored_paths}
     normalized_weights = {str(item["path_id"]): item["sender_byte_delta"] / total_delta for item in scored_paths}
     path_rank_maps: dict[int, dict[tuple[float, float, float], int]] = {}
+    path_entries_by_coeff: dict[tuple[float, float, float], list[dict[str, Any]]] = {}
     for item in scored_paths:
         ranked = sorted(
             item["candidates"],
@@ -845,7 +919,7 @@ def _process_multipath_request(
             "eligible_path_ids": ",".join(str(item["path_id"]) for item in scored_paths),
         })
         for item, prediction, weight in zip(scored_paths, predictions, weights):
-            per_path_rows.append({
+            path_entry = {
                 "request_id": request_id, "path_id": item["path_id"], "local_endpoint": item["local_endpoint"],
                 "remote_endpoint": item["endpoint"],
                 "physical_path": item["physical_path"], "alpha": alpha, "beta": beta, "gamma": gamma,
@@ -855,6 +929,20 @@ def _process_multipath_request(
                 "path_score_gain": prediction-item["pred_current"],
                 "candidate_rank_within_path": path_rank_maps[item["path_id"]][(alpha, beta, gamma)],
                 "media_activity_weight": weight,
+            }
+            per_path_rows.append(path_entry)
+            path_entries_by_coeff.setdefault((alpha, beta, gamma), []).append({
+                "path_id": int(item["path_id"]),
+                "local_endpoint": item["local_endpoint"],
+                "remote_endpoint": item["endpoint"],
+                "physical_path": item["physical_path"],
+                "weight": float(weight),
+                "current_score": float(item["pred_current"]),
+                "candidate_score": float(prediction),
+                "gain_bps": float(prediction-item["pred_current"]),
+                "weighted_gain_bps": float(weight * (prediction-item["pred_current"])),
+                "effect": "helps" if prediction-item["pred_current"] > 0 else ("hurts" if prediction-item["pred_current"] < 0 else "neutral"),
+                "is_changed_path": int(item["path_id"]) in changed_path_ids,
             })
 
     current_row = next(row for row in aggregate_rows if row["is_current_tuple"])
@@ -916,6 +1004,71 @@ def _process_multipath_request(
             active_skip_reason = "proposed_coefficients_unchanged"
         elif not weighted_gate["would_apply"]:
             active_skip_reason = "aggregate_gate_not_met"
+
+    changed_path_priority = None
+    changed_path_diagnoses: list[str] = []
+    if changed_path_priority_shadow:
+        changed_path_candidates = [
+            _candidate_changed_path_metrics(
+                candidate=row,
+                path_entries=path_entries_by_coeff[(float(row["alpha"]), float(row["beta"]), float(row["gamma"]))],
+                changed_path_ids=changed_path_ids,
+                changed_path_gain_bps=changed_path_gain_bps,
+                min_aggregate_gain_bps=min_aggregate_gain_bps,
+                max_other_path_loss_ratio=max_other_path_loss_ratio,
+                max_other_path_loss_bps=max_other_path_loss_bps,
+            )
+            for row in aggregate_rows
+        ]
+        changed_path_best = _select_changed_path_priority_candidate(changed_path_candidates)
+        changed_path_raw = changed_path_best["coefficients"]
+        changed_path_stepped = {
+            "alpha": _apply_max_step(cur_alpha, changed_path_raw["alpha"]),
+            "beta": max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, changed_path_raw["beta"])),
+            "gamma": max(MIN_BETA_GAMMA, _apply_max_step(cur_gamma, changed_path_raw["gamma"])),
+        }
+        changed_path_stepped_match = next(
+            (row for row in changed_path_candidates if row["coefficients"] == changed_path_stepped),
+            changed_path_best,
+        )
+        if changed_path_best["fig7_changed_path_would_apply"]:
+            changed_path_diagnoses.append("changed_path_priority_would_apply")
+        elif changed_path_best["changed_path_weighted_gain_bps"] < changed_path_gain_bps:
+            changed_path_diagnoses.append("changed_path_priority_blocks_no_changed_path_gain")
+        elif changed_path_best["aggregate_gain_bps"] <= min_aggregate_gain_bps:
+            changed_path_diagnoses.append("changed_path_priority_blocks_negative_aggregate")
+        else:
+            changed_path_diagnoses.append("changed_path_priority_blocks_excessive_other_path_loss")
+        if changed_path_raw != changed_path_stepped:
+            if bool(changed_path_best["fig7_changed_path_would_apply"]) == bool(changed_path_stepped_match["fig7_changed_path_would_apply"]):
+                changed_path_diagnoses.append("step_limit_not_decisive")
+            else:
+                changed_path_diagnoses.append("step_limit_decisive")
+        changed_path_priority = {
+            "enabled": True,
+            "changed_path_ids": sorted(changed_path_ids),
+            "thresholds": {
+                "changed_path_gain_bps": changed_path_gain_bps,
+                "min_aggregate_gain_bps": min_aggregate_gain_bps,
+                "max_other_path_loss_ratio": max_other_path_loss_ratio,
+                "max_other_path_loss_bps": max_other_path_loss_bps,
+            },
+            "best_candidate": {
+                "coefficients": changed_path_raw,
+                "stepped_coefficients": changed_path_stepped,
+                "changed_path_raw_gain_bps": changed_path_best["changed_path_raw_gain_bps"],
+                "changed_path_weighted_gain_bps": changed_path_best["changed_path_weighted_gain_bps"],
+                "other_path_loss_bps": changed_path_best["other_path_loss_bps"],
+                "other_path_gain_bps": changed_path_best["other_path_gain_bps"],
+                "aggregate_gain_bps": changed_path_best["aggregate_gain_bps"],
+                "changed_path_gate_pass": changed_path_best["changed_path_gate_pass"],
+                "aggregate_safety_pass": changed_path_best["aggregate_safety_pass"],
+                "other_path_loss_pass": changed_path_best["other_path_loss_pass"],
+                "fig7_changed_path_would_apply": changed_path_best["fig7_changed_path_would_apply"],
+                "per_path": changed_path_best["path_entries"],
+            },
+            "diagnoses": changed_path_diagnoses,
+        }
     response = {
         **base_response,
         "status": "SHADOW_AGGREGATE_EVALUATED" if shadow else ("APPLIED_AGGREGATE" if actual_applied else "ACTIVE_AGGREGATE_SKIPPED"),
@@ -963,6 +1116,46 @@ def _process_multipath_request(
         "proposed_coefficients_differ": proposed_differs,
         "source": cur_source,
     }
+    aggregate_diagnoses: list[str] = []
+    aggregate_path_entries = path_entries_by_coeff[(weighted_raw["alpha"], weighted_raw["beta"], weighted_raw["gamma"])]
+    positives = [row for row in aggregate_path_entries if float(row["gain_bps"]) > 0]
+    negatives = [row for row in aggregate_path_entries if float(row["gain_bps"]) < 0]
+    if bool(weighted_gate["would_apply"]):
+        aggregate_diagnoses.append("aggregate_accepts")
+    elif positives and negatives:
+        aggregate_diagnoses.append("aggregate_blocks_due_to_cross_path_tradeoff")
+    elif not positives:
+        aggregate_diagnoses.append("aggregate_blocks_no_path_improvement")
+    else:
+        aggregate_diagnoses.append("aggregate_blocks_below_threshold")
+    step_limit_label = ""
+    if weighted_raw != weighted_stepped:
+        stepped_gate = evaluate_gain_gate(
+            current_row["byte_weighted_score"],
+            next(
+                (row["byte_weighted_score"] for row in aggregate_rows
+                 if abs(float(row["alpha"]) - weighted_stepped["alpha"]) < 1e-9
+                 and abs(float(row["beta"]) - weighted_stepped["beta"]) < 1e-9
+                 and abs(float(row["gamma"]) - weighted_stepped["gamma"]) < 1e-9),
+                weighted_best["byte_weighted_score"],
+            ),
+            gate_mode=gate_mode,
+            min_delta_gain_bps=min_delta_gain_bps,
+            min_relative_gain=min_relative_gain,
+        )
+        if bool(stepped_gate["would_apply"]) == bool(weighted_gate["would_apply"]):
+            step_limit_label = "step_limit_not_decisive"
+        else:
+            step_limit_label = "step_limit_decisive"
+    if step_limit_label:
+        aggregate_diagnoses.append(step_limit_label)
+    response["aggregate_diagnoses"] = aggregate_diagnoses
+    if changed_path_priority is not None:
+        if step_limit_label:
+            changed_path_diagnoses.append(step_limit_label)
+            changed_path_priority["diagnoses"] = changed_path_diagnoses
+        response["changed_path_priority_shadow"] = changed_path_priority
+        response["changed_path_priority_diagnoses"] = changed_path_priority["diagnoses"]
     if actual_applied:
         response["traffic_weighted"]["actual_applied"] = True
         _assert_runtime_coeffs_path(coeffs_out)
@@ -990,6 +1183,28 @@ def _process_multipath_request(
     _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_aggregate.csv", aggregate_rows)
     atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])
     atomic_write_json(archive_dir / f"qaccess_multipath_shadow_audit_{safe}.json", response)
+    if changed_path_priority is not None:
+        atomic_write_json(
+            archive_dir / f"qaccess_changed_path_priority_{safe}.json",
+            {
+                "request_id": request_id,
+                "phase_classification": base_response["request_classification"],
+                "changed_path_ids": sorted(changed_path_ids),
+                "aggregate_decision": {
+                    "candidate": weighted_raw,
+                    "stepped_candidate": weighted_stepped,
+                    "aggregate_gain_bps": weighted_gate["absolute_gain_bps"],
+                    "relative_gain": weighted_gate["relative_gain"],
+                    "absolute_gate_pass": weighted_gate["absolute_gate_pass"],
+                    "relative_gate_pass": weighted_gate["relative_gate_pass"],
+                    "aggregate_would_apply": bool(weighted_gate["would_apply"]),
+                    "actual_applied": actual_applied,
+                    "diagnoses": aggregate_diagnoses,
+                },
+                "changed_path_priority_decision": changed_path_priority["best_candidate"],
+                "diagnoses": changed_path_priority["diagnoses"],
+            },
+        )
     _worker_log_line(log_file, response)
     if request_path.is_file():
         shutil.copy2(request_path, archive_dir / f"qaccess_update_request_{safe}.json")
@@ -1021,6 +1236,12 @@ def _process_request(
     fixed_gamma: float | None = None,
     log_file: Path | None = None,
     min_sender_byte_delta: int = 1,
+    changed_path_priority_shadow: bool = False,
+    changed_path_ids: set[int] | None = None,
+    changed_path_gain_bps: float = DEFAULT_CHANGED_PATH_GAIN_BPS,
+    min_aggregate_gain_bps: float = DEFAULT_MIN_AGGREGATE_GAIN_BPS,
+    max_other_path_loss_ratio: float = DEFAULT_MAX_OTHER_PATH_LOSS_RATIO,
+    max_other_path_loss_bps: float = DEFAULT_MAX_OTHER_PATH_LOSS_BPS,
 ) -> bool:
     req, samples, request_id, path_id = _load_request_and_samples(
         request_path,
@@ -1048,6 +1269,12 @@ def _process_request(
             min_relative_gain=min_relative_gain, gate_mode=gate_mode,
             fixed_gamma=fixed_gamma, shadow=shadow, log_file=log_file,
             min_sender_byte_delta=min_sender_byte_delta,
+            changed_path_priority_shadow=changed_path_priority_shadow,
+            changed_path_ids=changed_path_ids or set(DEFAULT_CHANGED_PATH_IDS),
+            changed_path_gain_bps=changed_path_gain_bps,
+            min_aggregate_gain_bps=min_aggregate_gain_bps,
+            max_other_path_loss_ratio=max_other_path_loss_ratio,
+            max_other_path_loss_bps=max_other_path_loss_bps,
         )
 
     samples = _filter_samples_by_path(samples, path_id)
@@ -1394,6 +1621,42 @@ def main() -> None:
         help="Minimum positive sender-byte growth within one request buffer for media eligibility (default: 1)",
     )
     ap.add_argument(
+        "--changed-path-priority-shadow",
+        action="store_true",
+        help="Evaluate Fig.7 changed-path-priority diagnostics in shadow only; no coefficient changes",
+    )
+    ap.add_argument(
+        "--changed-path-ids",
+        nargs="+",
+        type=int,
+        default=list(DEFAULT_CHANGED_PATH_IDS),
+        help="Path IDs treated as changed/impaired for changed-path shadow scoring (default: 3)",
+    )
+    ap.add_argument(
+        "--changed-path-gain-bps",
+        type=float,
+        default=DEFAULT_CHANGED_PATH_GAIN_BPS,
+        help="Minimum changed-path weighted gain for changed-path shadow apply diagnosis (default: 100000)",
+    )
+    ap.add_argument(
+        "--min-aggregate-gain-bps",
+        type=float,
+        default=DEFAULT_MIN_AGGREGATE_GAIN_BPS,
+        help="Minimum aggregate gain required by changed-path shadow safety (default: 0)",
+    )
+    ap.add_argument(
+        "--max-other-path-loss-ratio",
+        type=float,
+        default=DEFAULT_MAX_OTHER_PATH_LOSS_RATIO,
+        help="Maximum allowed ratio of other-path loss to changed-path weighted gain (default: 0.75)",
+    )
+    ap.add_argument(
+        "--max-other-path-loss-bps",
+        type=float,
+        default=DEFAULT_MAX_OTHER_PATH_LOSS_BPS,
+        help="Maximum allowed absolute other-path loss for changed-path shadow safety (default: 200000)",
+    )
+    ap.add_argument(
         "--prev-coeffs-out",
         type=Path,
         default=DEFAULT_COEFFS_PREV,
@@ -1517,6 +1780,12 @@ def main() -> None:
             "gate_mode": args.gate_mode,
             "min_delta_gain_bps": args.min_delta_gain_bps,
             "min_relative_gain": args.min_relative_gain,
+            "changed_path_priority_shadow": bool(args.changed_path_priority_shadow),
+            "changed_path_ids": list(args.changed_path_ids),
+            "changed_path_gain_bps": args.changed_path_gain_bps,
+            "min_aggregate_gain_bps": args.min_aggregate_gain_bps,
+            "max_other_path_loss_ratio": args.max_other_path_loss_ratio,
+            "max_other_path_loss_bps": args.max_other_path_loss_bps,
         },
     )
 
@@ -1543,6 +1812,12 @@ def main() -> None:
             fixed_gamma=fixed_gamma,
             log_file=log_file,
             min_sender_byte_delta=args.min_sender_byte_delta,
+            changed_path_priority_shadow=args.changed_path_priority_shadow,
+            changed_path_ids=set(args.changed_path_ids),
+            changed_path_gain_bps=args.changed_path_gain_bps,
+            min_aggregate_gain_bps=args.min_aggregate_gain_bps,
+            max_other_path_loss_ratio=args.max_other_path_loss_ratio,
+            max_other_path_loss_bps=args.max_other_path_loss_bps,
         )
         if args.once or args.dry_run:
             break

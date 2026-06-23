@@ -1,0 +1,17 @@
+experiment,method,window,t_lo,t_hi,total_quic_wire_mbps_mean,path_a_quic_wire_mbps_mean,path_b_quic_wire_mbps_mean
+Fig.8-style combined sudden link quality deterioration,baseline,0-50,0.0,50.0,17.69191152,16.400181279999998,1.29173024
+Fig.8-style combined sudden link quality deterioration,baseline,50-90,50.0,90.0,22.729861,21.889969,0.8398920000000001
+Fig.8-style combined sudden link quality deterioration,baseline,90-100,90.0,100.0,22.8055848,22.450484799999998,0.3551
+Fig.8-style combined sudden link quality deterioration,baseline,100-110,100.0,110.0,23.067668,22.7138504,0.35381760000000007
+Fig.8-style combined sudden link quality deterioration,baseline,100-150,100.0,150.0,23.511893920000002,23.153290079999998,0.35860384
+Fig.8-style combined sudden link quality deterioration,baseline,150-200,150.0,200.0,24.719649279999995,24.375284479999994,0.3443648
+Fig.8-style combined sudden link quality deterioration,baseline,0-200,0.0,200.0,22.16711512,21.482707,0.6844081200000001
+Fig.8-style combined sudden link quality deterioration,baseline,full,0.0,220.0,22.509407527272725,21.856848254545454,0.6525592727272728
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,0-50,0.0,50.0,18.34614416,16.95666896,1.3894752
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,50-90,50.0,90.0,21.414640600000002,20.969916599999998,0.444724
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,90-100,90.0,100.0,22.1562016,21.7144224,0.44177920000000004
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,100-110,100.0,110.0,22.3831192,21.9430032,0.440116
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,100-150,100.0,150.0,22.865543520000003,22.429545280000003,0.43599824
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,150-200,150.0,200.0,24.006814400000003,23.580735360000002,0.4260790400000001
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,0-200,0.0,200.0,21.69536372,21.021441839999998,0.6739218800000001
+Fig.8-style combined sudden link quality deterioration,qaccess_t_dynamic,full,0.0,220.0,21.97452116363636,21.32376127272727,0.6507598909090909

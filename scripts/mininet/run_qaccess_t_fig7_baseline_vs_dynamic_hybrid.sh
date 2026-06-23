@@ -31,6 +31,12 @@ BUFFER_SIZE="${QACCESS_RUNTIME_BUFFER_SIZE:-3000}"
 MIN_SAMPLES_PER_PATH="${QACCESS_MIN_SAMPLES_PER_PATH:-1}"
 MIN_SENDER_BYTE_DELTA="${QACCESS_MIN_SENDER_BYTE_DELTA:-1}"
 COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}"
+CHANGED_PATH_PRIORITY_SHADOW="${QACCESS_CHANGED_PATH_PRIORITY_SHADOW:-1}"
+CHANGED_PATH_IDS="${QACCESS_CHANGED_PATH_IDS:-3}"
+CHANGED_PATH_GAIN_BPS="${QACCESS_CHANGED_PATH_GAIN_BPS:-100000}"
+MIN_AGGREGATE_GAIN_BPS="${QACCESS_MIN_AGGREGATE_GAIN_BPS:-0}"
+MAX_OTHER_PATH_LOSS_RATIO="${QACCESS_MAX_OTHER_PATH_LOSS_RATIO:-0.75}"
+MAX_OTHER_PATH_LOSS_BPS="${QACCESS_MAX_OTHER_PATH_LOSS_BPS:-200000}"
 
 WORKER_PYTHON="${WORKER_PYTHON:-${REPO_ROOT}/.venv/bin/python3}"
 WORKER_MODEL="${QACCESS_WORKER_MODEL:-$ROOT/derived/qaccess_t_qserver_sender/qaccess_t_model_delta_bw_1s.pkl}"
@@ -88,6 +94,20 @@ WORKER_CMD=(
   --min-sender-byte-delta "$MIN_SENDER_BYTE_DELTA"
   --aggregate-multipath
 )
+if [[ "$CHANGED_PATH_PRIORITY_SHADOW" == "1" ]]; then
+  WORKER_CMD+=(
+    --changed-path-priority-shadow
+    --changed-path-gain-bps "$CHANGED_PATH_GAIN_BPS"
+    --min-aggregate-gain-bps "$MIN_AGGREGATE_GAIN_BPS"
+    --max-other-path-loss-ratio "$MAX_OTHER_PATH_LOSS_RATIO"
+    --max-other-path-loss-bps "$MAX_OTHER_PATH_LOSS_BPS"
+  )
+  # shellcheck disable=SC2206
+  changed_ids=( $CHANGED_PATH_IDS )
+  if [[ "${#changed_ids[@]}" -gt 0 ]]; then
+    WORKER_CMD+=(--changed-path-ids "${changed_ids[@]}")
+  fi
+fi
 if [[ "$EXECUTION_MODE" == "shadow" ]]; then
   WORKER_CMD+=(--shadow-per-subflow)
 fi
@@ -212,6 +232,7 @@ if [[ "$CHECK_ONLY" == "1" ]]; then
   echo "[check] bandwidth_profile=$BW_PROFILE"
   echo "[check] execution_mode=$EXECUTION_MODE"
   echo "[check] gate_mode=$GATE_MODE min_relative_gain=$MIN_RELATIVE_GAIN min_delta_gain_bps=$GATE_BPS"
+  echo "[check] changed_path_priority_shadow=$CHANGED_PATH_PRIORITY_SHADOW changed_path_ids=$CHANGED_PATH_IDS"
   echo "[check] buffer=$BUFFER_SIZE cooldown_ms=$COOLDOWN_MS"
   [[ -f "$WORKER_MODEL" ]] || { echo "[FAIL] model is missing: $WORKER_MODEL" >&2; exit 1; }
   [[ -f "$WORKER_MODEL_METADATA" ]] || { echo "[FAIL] model metadata is missing: $WORKER_MODEL_METADATA" >&2; exit 1; }
@@ -259,6 +280,7 @@ if [[ "$EXECUTION_MODE" == "active" ]]; then
   echo "[fig7_hybrid] active post-update observe window=${POST_UPDATE_OBSERVE_SEC}s dynamic_timeout=${ACTIVE_DYNAMIC_TIMEOUT}s"
 fi
 echo "[fig7_hybrid] dynamic leg: qaccess_t + delta_bw_1s worker ($EXECUTION_MODE, gate_mode=$GATE_MODE absolute=${GATE_BPS}bps relative=$MIN_RELATIVE_GAIN)"
+echo "[fig7_hybrid] changed-path shadow: enabled=$CHANGED_PATH_PRIORITY_SHADOW ids=$CHANGED_PATH_IDS gain=${CHANGED_PATH_GAIN_BPS}bps aggregate>${MIN_AGGREGATE_GAIN_BPS} other_loss_ratio<=${MAX_OTHER_PATH_LOSS_RATIO} other_loss_bps<=${MAX_OTHER_PATH_LOSS_BPS}"
 run_one qaccess_t fig7_qaccess_t_dynamic "$ACTIVE_DYNAMIC_TIMEOUT" \
   QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
@@ -323,6 +345,12 @@ meta = {
     "gate_mode": "$GATE_MODE",
     "min_relative_gain": float("$MIN_RELATIVE_GAIN"),
     "min_delta_gain_bps": float("$GATE_BPS"),
+    "changed_path_priority_shadow": bool(int("$CHANGED_PATH_PRIORITY_SHADOW")),
+    "changed_path_ids": [int(part) for part in "$CHANGED_PATH_IDS".split() if part.strip()],
+    "changed_path_gain_bps": float("$CHANGED_PATH_GAIN_BPS"),
+    "min_aggregate_gain_bps": float("$MIN_AGGREGATE_GAIN_BPS"),
+    "max_other_path_loss_ratio": float("$MAX_OTHER_PATH_LOSS_RATIO"),
+    "max_other_path_loss_bps": float("$MAX_OTHER_PATH_LOSS_BPS"),
     "timeout": int("$TIMEOUT"),
     "dynamic_timeout": int("$ACTIVE_DYNAMIC_TIMEOUT"),
     "post_update_observe_sec": int("$POST_UPDATE_OBSERVE_SEC"),
