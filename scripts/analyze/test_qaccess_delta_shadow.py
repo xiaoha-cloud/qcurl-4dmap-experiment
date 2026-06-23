@@ -287,6 +287,48 @@ class WorkerTests(unittest.TestCase):
                 (candidate.path_pred_candidate * candidate.media_activity_weight).sum(),
             )
 
+    def test_changed_path_priority_shadow_writes_runtime_artifact(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model, _ = write_model_fixture(root)
+            paths = write_request_fixture(root)
+            base = pd.read_csv(paths["samples.csv"]).iloc[0].to_dict()
+            rows = []
+            for path_id, endpoint, bw, sent_values in (
+                (1, "10.0.1.1:49264", 7_000_000, (100, 700)),
+                (3, "10.0.2.1:59496", 500_000, (100, 600)),
+            ):
+                for index, sent in enumerate(sent_values):
+                    row = dict(base)
+                    row.update({
+                        "path_id": path_id,
+                        "remote_endpoint": endpoint,
+                        "bw_bps": bw,
+                        "sender_bytes_total": sent,
+                        "timestamp_ms": index + 1,
+                    })
+                    rows.append(row)
+            pd.DataFrame(rows).to_csv(paths["samples.csv"], index=False)
+            ok = worker._process_request(
+                paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+                paths["response.json"], paths["state.json"], root / "archive",
+                root / "previous.json", paths["audit.csv"], "rf", "delta_bw_1s",
+                3.0, 100_000.0, 0.01, shadow=True, aggregate_multipath=True,
+                gate_mode="hybrid", min_relative_gain=0.03, fixed_gamma=None,
+                log_file=root / "worker.log", changed_path_priority_shadow=True,
+                changed_path_ids={3}, changed_path_gain_bps=100_000.0,
+                min_aggregate_gain_bps=0.0, max_other_path_loss_ratio=0.75,
+                max_other_path_loss_bps=200_000.0,
+            )
+            self.assertTrue(ok)
+            response = json.loads(paths["response.json"].read_text())
+            self.assertIn("changed_path_priority_shadow", response)
+            artifact = root / "archive" / "qaccess_changed_path_priority_test_run_100000_1.json"
+            self.assertTrue(artifact.is_file())
+            payload = json.loads(artifact.read_text())
+            self.assertIn("aggregate_decision", payload)
+            self.assertIn("changed_path_priority_decision", payload)
+
     def test_multipath_shadow_handles_one_eligible_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
