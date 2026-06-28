@@ -140,6 +140,16 @@ func TestQAccessBufferFullWithoutEligiblePath(t *testing.T) {
 	if _, err := os.Stat(requestPath); !os.IsNotExist(err) {
 		t.Fatalf("ineligible buffer should not create request, stat err=%v", err)
 	}
+	if size := uc.runtimeExporter.bufferSize(); size != 0 {
+		t.Fatalf("ineligible full buffer should reset for fresh samples, size=%d", size)
+	}
+	audit, err := ioutil.ReadFile(uc.phase2.triggerAuditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(audit), `"event":"buffer_reset_no_eligible_path"`) {
+		t.Fatalf("missing no-eligible reset audit marker: %s", audit)
+	}
 }
 
 func TestQAccessBufferGlobalSplitWritesAuditableRequest(t *testing.T) {

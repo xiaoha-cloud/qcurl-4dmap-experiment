@@ -681,6 +681,15 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	if uc.phase2.triggerOnBufferFull && snapshot.AtCapacity {
 		if !snapshot.HasSelectedPath {
 			uc.logBufferDecision(now, "buffer_full_no_eligible_path", snapshot, 0)
+			resetStatus := "ok"
+			if err := uc.runtimeExporter.resetBuffer(); err != nil {
+				resetStatus = "error"
+				utils.Infof("[%s] runtime global buffer reset after no eligible path failed: %v", uc.logPrefix(), err)
+			}
+			appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+				"timestamp_ms": now.UnixNano() / 1e6, "event": "buffer_reset_no_eligible_path",
+				"status": resetStatus, "sampling_resumed": resetStatus == "ok",
+			})
 			return
 		}
 		if uc.writeBufferFullTrigger(now, snapshot) {
