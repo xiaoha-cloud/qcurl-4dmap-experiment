@@ -109,6 +109,47 @@ def write_request_fixture(root: Path) -> dict[str, Path]:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_delay_and_loss_active_apply_are_blocked_before_deterioration(self):
+        self.assertFalse(worker._active_phase_allowed("delta_owd_1s", "PRE_DETERIORATION"))
+        self.assertFalse(worker._active_phase_allowed("loss_risk_1s", "PRE_DETERIORATION"))
+        self.assertTrue(worker._active_phase_allowed("delta_owd_1s", "DURING_DETERIORATION"))
+        self.assertTrue(worker._active_phase_allowed("delta_bw_1s", "PRE_DETERIORATION"))
+
+    def test_delay_objective_fields_use_milliseconds(self):
+        normalized = worker._normalize_objective_field_names({
+            "absolute_gain_bps": 0.2,
+            "score_gain_bps": 0.2,
+            "min_delta_gain_bps": 0.1,
+            "nested": {"aggregate_gain_bps": 0.3},
+        }, "delta_owd_1s")
+        self.assertEqual(normalized["objective_gain_ms"], 0.2)
+        self.assertEqual(normalized["min_objective_improvement_ms"], 0.1)
+        self.assertEqual(normalized["nested"]["aggregate_objective_gain_ms"], 0.3)
+        self.assertNotIn("absolute_gain_bps", normalized)
+
+    def test_delay_active_pre_deterioration_does_not_mutate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model, _ = write_model_fixture(root, target="delta_owd_1s")
+            paths = write_request_fixture(root)
+            request = json.loads(paths["request.json"].read_text())
+            request["experiment_elapsed_s"] = 10
+            paths["request.json"].write_text(json.dumps(request), encoding="utf-8")
+            before = paths["coeffs.json"].read_bytes()
+            worker._process_request(
+                paths["request.json"], paths["samples.csv"], model, paths["coeffs.json"],
+                paths["response.json"], paths["state.json"], root / "archive",
+                root / "previous.json", paths["audit.csv"], "rf", "delta_owd_1s",
+                3.0, 0.1, 0.01, shadow=False, aggregate_multipath=True,
+                gate_mode="absolute", min_relative_gain=0.03,
+            )
+            response = json.loads(paths["response.json"].read_text())
+            self.assertFalse(response["actual_applied"])
+            self.assertEqual(response["skip_reason"], "pre_deterioration_apply_disabled")
+            self.assertEqual(paths["coeffs.json"].read_bytes(), before)
+            self.assertIn("objective_gain_ms", response)
+            self.assertNotIn("absolute_gain_bps", response)
+
     def test_gain_gate_modes_and_zero_current(self):
         absolute = worker.evaluate_gain_gate(1_000_000, 1_400_000, gate_mode="absolute", min_delta_gain_bps=500_000, min_relative_gain=0.03)
         relative = worker.evaluate_gain_gate(1_000_000, 1_040_000, gate_mode="relative", min_delta_gain_bps=500_000, min_relative_gain=0.03)

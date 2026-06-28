@@ -230,6 +230,43 @@ func TestQAccessBufferResponseResumesAndAllowsSecondCycle(t *testing.T) {
 	}
 }
 
+func TestQAccessAppliedResponseForcesPerPathCoefficientReload(t *testing.T) {
+	uc, requestPath, responsePath := newTriggerTestController(t, 100, 1)
+	uc.Mode = ModeQAccessD
+	uc.phase2.coeffReload = true
+	uc.phase2.coeffReloadInterval = time.Hour
+	uc.phase2.coeffSmoothing = 1
+	uc.phase2.coeffJSONPath = filepath.Join(uc.phase2.stateDir, "coefficients.json")
+	setTriggerTestRows(uc, map[protocol.PathID]int64{1: 100})
+	now := time.Unix(100, 0)
+	uc.maybeTriggerCoefficientUpdate(now)
+	request := readTriggerTestRequest(t, requestPath)
+
+	doc := defaultQAccessCoeffsDocument()
+	doc.Paths["1"] = QAccessCoeffEntry{Alpha: 0.6, Beta: 0.2, Gamma: 0.3}
+	if err := writeJSONAtomic(uc.phase2.coeffJSONPath, doc); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONAtomic(responsePath, map[string]interface{}{
+		"request_id": request["request_id"], "status": "APPLIED_AGGREGATE",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	uc.maybeCheckUpdateResponse(now.Add(time.Second))
+	got := uc.getCoefficientsForPath(protocol.PathID(1))
+	if got.Alpha != 0.6 || got.Beta != 0.2 || got.Gamma != 0.3 {
+		t.Fatalf("forced reload got alpha=%v beta=%v gamma=%v", got.Alpha, got.Beta, got.Gamma)
+	}
+	audit, err := ioutil.ReadFile(uc.phase2.triggerAuditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(audit), `"event":"coefficients_reloaded_after_response"`) {
+		t.Fatalf("missing forced reload audit marker: %s", audit)
+	}
+}
+
 func TestQAccessNonOwnerCannotMutatePhase2State(t *testing.T) {
 	uc, requestPath, responsePath := newTriggerTestController(t, 3000, 1)
 	uc.phase2.owner = false
