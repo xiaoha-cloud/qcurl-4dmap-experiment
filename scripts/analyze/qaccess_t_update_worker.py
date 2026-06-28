@@ -796,6 +796,38 @@ def _request_classification(req: dict[str, Any]) -> str:
     return "POST_DETERIORATION"
 
 
+def _active_phase_allowed(target_mode: str, request_classification: str) -> bool:
+    return not (
+        target_mode in MINIMIZE_TARGETS
+        and request_classification == "PRE_DETERIORATION"
+    )
+
+
+def _normalize_objective_field_names(payload: Any, target_mode: str) -> Any:
+    suffix = {
+        "delta_owd_1s": "ms",
+        "delta_loss_1s": "loss_rate",
+        "loss_risk_1s": "bytes",
+    }.get(target_mode)
+    if suffix is None:
+        return payload
+    key_map = {
+        "absolute_gain_bps": f"objective_gain_{suffix}",
+        "score_gain_bps": f"objective_gain_{suffix}",
+        "min_delta_gain_bps": f"min_objective_improvement_{suffix}",
+        "aggregate_gain_bps": f"aggregate_objective_gain_{suffix}",
+        "gain_bps": f"objective_gain_{suffix}",
+    }
+    if isinstance(payload, dict):
+        return {
+            key_map.get(key, key): _normalize_objective_field_names(value, target_mode)
+            for key, value in payload.items()
+        }
+    if isinstance(payload, list):
+        return [_normalize_objective_field_names(value, target_mode) for value in payload]
+    return payload
+
+
 def _classify_media_paths(samples: pd.DataFrame, min_rows: int, min_sender_byte_delta: int) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     if samples.empty or "path_id" not in samples.columns:
@@ -887,6 +919,7 @@ def _process_multipath_request(
         cur_beta = float(req.get("current_beta", cur_beta) or cur_beta)
         cur_gamma = float(req.get("current_gamma", cur_gamma) or cur_gamma)
 
+    request_classification = _request_classification(req)
     base_response: dict[str, Any] = {
         "request_id": request_id,
         "timestamp_ms": int(time.time() * 1000),
@@ -899,7 +932,7 @@ def _process_multipath_request(
         "execution_mode": "shadow" if shadow else "active",
         "shadow": shadow,
         "shadow_mode": shadow,
-        "request_classification": _request_classification(req),
+        "request_classification": request_classification,
         "active_path_ids": [item["path_id"] for item in path_diagnostics],
         "eligible_path_ids": [item["path_id"] for item in eligible],
         "excluded_paths": [
@@ -1061,11 +1094,21 @@ def _process_multipath_request(
     owner_ok = owner_roles == ["server_downlink_sender"]
     proposed_differs = any(abs(weighted_stepped[name] - current) > 1e-9 for name, current in
                            (("alpha", cur_alpha), ("beta", cur_beta), ("gamma", cur_gamma)))
-    active_safety_ok = bool(not shadow and owner_ok and eligible and target_mode in ACTIVE_TARGET_MODES and proposed_differs)
+    phase_allowed = _active_phase_allowed(target_mode, request_classification)
+    active_safety_ok = bool(
+        not shadow
+        and owner_ok
+        and eligible
+        and target_mode in ACTIVE_TARGET_MODES
+        and proposed_differs
+        and phase_allowed
+    )
     actual_applied = bool(active_safety_ok and weighted_gate["would_apply"])
     active_skip_reason = ""
     if not shadow and not actual_applied:
-        if not owner_ok:
+        if not phase_allowed:
+            active_skip_reason = "pre_deterioration_apply_disabled"
+        elif not owner_ok:
             active_skip_reason = "owner_role_not_server_downlink_sender"
         elif target_mode not in ACTIVE_TARGET_MODES:
             active_skip_reason = "model_target_not_active_safe"
@@ -1250,11 +1293,16 @@ def _process_multipath_request(
                     "source": "qaccess_t_update_worker.py", "execution_mode": "active",
                     "aggregate_scoring": True, "aggregate_control_method": "traffic_weighted",
                     "request_id": request_id, "target_mode": target_mode, "gate_mode": gate_mode,
-                    "absolute_gain_bps": weighted_gate["absolute_gain_bps"],
+                    (
+                        "absolute_gain_bps"
+                        if target_mode == "delta_bw_1s"
+                        else f"objective_gain_{_score_unit(target_mode)}"
+                    ): weighted_gate["absolute_gain_bps"],
                     "relative_gain": weighted_gate["relative_gain"],
                     "previous_coeffs_backup": str(backup_path) if backup_path else "",
                 },
             )
+    response = _normalize_objective_field_names(response, target_mode)
     _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_per_path.csv", per_path_rows)
     _write_rows_csv(archive_dir / f"qaccess_candidate_scores_{safe}_aggregate.csv", aggregate_rows)
     atomic_write_json(archive_dir / f"qaccess_path_eligibility_{safe}.json", base_response["path_eligibility"])

@@ -352,6 +352,12 @@ func (uc *UtilityController) maybeReloadCoefficients(now time.Time) {
 	_ = oldFallback
 }
 
+func (uc *UtilityController) forceReloadCoefficients(now time.Time) {
+	uc.lastCoeffCheck = time.Time{}
+	uc.lastCoeffMtime = time.Time{}
+	uc.maybeReloadCoefficients(now)
+}
+
 func (uc *UtilityController) finalizeMonitorRoundThroughput() {
 	if uc.currentRoundTotalBwBps > 0 {
 		uc.roundBwHistory = append(uc.roundBwHistory, uc.currentRoundTotalBwBps)
@@ -597,6 +603,13 @@ func (uc *UtilityController) maybeCheckUpdateResponse(now time.Time) {
 		"timestamp_ms": now.UnixNano() / 1e6, "event": "response_consumed", "request_id": rid,
 		"status": status, "path_id": uint64(uc.inflightPathID), "global_buffer": uc.inflightGlobalBuffer,
 	})
+	if status == "APPLIED_AGGREGATE" || status == "APPLIED" {
+		uc.forceReloadCoefficients(now)
+		appendTriggerAudit(uc.phase2.triggerAuditPath, map[string]interface{}{
+			"timestamp_ms": now.UnixNano() / 1e6, "event": "coefficients_reloaded_after_response",
+			"request_id": rid, "status": status,
+		})
+	}
 
 	uc.updateInProgress = false
 	uc.inflightRequestID = ""
