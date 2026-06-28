@@ -157,7 +157,7 @@ type Config struct {
 	IPriority          bool
 
 	// 4D-MAP experiment / logging (client-oriented; safe zero value = qaccess_t)
-	// UtilityMode: "baseline"/"off" (no utility control), "qaccess_collect" (training CSV), "qaccess_t" (Q-ACCeSS-T runtime).
+	// UtilityMode: baseline/off, qaccess_collect, qaccess_t, qaccess_d, or qaccess_l.
 	UtilityMode         string
 	LogControlActions   bool // emit [control] lines on ACK/LOSS (verbose)
 	ExperimentRunID     string

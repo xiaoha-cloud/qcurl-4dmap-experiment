@@ -103,6 +103,8 @@ class WorkflowTests(unittest.TestCase):
             result = pd.concat([first, second])
             self.assertEqual(set(result.phase_label), {"PRE", "DURING", "POST"})
             self.assertTrue((result.delta_bw_1s == 1000).all())
+            self.assertTrue((result.delta_owd_1s == 1).all())
+            self.assertTrue((result.delta_loss_1s == 0).all())
             self.assertEqual(result.groupby(["run_id", "path_id"]).size().to_dict(),
                              {("one", 1): 3, ("one", 3): 3, ("two", 1): 3, ("two", 3): 3})
 
@@ -129,6 +131,9 @@ class WorkflowTests(unittest.TestCase):
         report = builder.model_metadata(frame, Path("input.csv"), Path("model.pkl"), {"R2": 0.5}, ["bw_bps"], "abc", True)
         self.assertEqual(report["endpoint_role_distribution"], {"server_downlink_sender": 2})
         self.assertEqual(len(report["coefficient_coverage"]), 2)
+        self.assertEqual(report["controller_variant"], "qaccess_t")
+        self.assertEqual(report["worker_target_mode"], "delta_bw_1s")
+        self.assertEqual(report["model_type"], "RandomForestRegressor")
         self.assertFalse(report["aggregate_active_ready"])
 
     @unittest.skipIf(trainer is None, "training dependencies are unavailable")

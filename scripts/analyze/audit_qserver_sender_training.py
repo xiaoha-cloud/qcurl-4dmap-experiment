@@ -9,13 +9,22 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+TARGET_SPECS = {
+    "delta_bw_1s": ("bw_bps", "future_bw_1s"),
+    "delta_owd_1s": ("owd_ms", "future_owd_1s"),
+    "delta_loss_1s": ("loss_rate", "future_loss_1s"),
+}
 
-def audit(path: Path, allow_partial: bool = False) -> list[str]:
+
+def audit(path: Path, allow_partial: bool = False, target: str = "delta_bw_1s") -> list[str]:
+    if target not in TARGET_SPECS:
+        return [f"unsupported target: {target}"]
+    source_column, future_column = TARGET_SPECS[target]
     df = pd.read_csv(path)
     failures: list[str] = []
     print(f"rows={len(df)} runs={df.run_id.nunique() if 'run_id' in df else 0}")
     required = {"endpoint_role", "producer_pid", "connection_id", "local_endpoint", "remote_endpoint",
-                "delta_bw_1s", "future_bw_1s", "bw_bps", "phase_label",
+                target, future_column, source_column, "phase_label",
                 "physical_path_label", "sender_byte_delta", "alpha", "beta", "gamma"}
     missing = sorted(required - set(df.columns))
     if missing:
@@ -37,10 +46,10 @@ def audit(path: Path, allow_partial: bool = False) -> list[str]:
         failures.append("Path B DURING samples absent")
     if not (pd.to_numeric(path_b.get("sender_byte_delta", 0), errors="coerce").fillna(0) > 0).any():
         failures.append("Path B has no active sender bytes")
-    expected = pd.to_numeric(df.future_bw_1s, errors="coerce") - pd.to_numeric(df.bw_bps, errors="coerce")
-    error = (expected - pd.to_numeric(df.delta_bw_1s, errors="coerce")).abs()
+    expected = pd.to_numeric(df[future_column], errors="coerce") - pd.to_numeric(df[source_column], errors="coerce")
+    error = (expected - pd.to_numeric(df[target], errors="coerce")).abs()
     if not bool((error.fillna(np.inf) < 1e-6).all()):
-        failures.append(f"delta_bw_1s inconsistent; max error={error.max()}")
+        failures.append(f"{target} inconsistent; max error={error.max()}")
     active = df[pd.to_numeric(df.sender_byte_delta, errors="coerce").fillna(0) > 0]
     if active.empty:
         failures.append("no active media path rows")
@@ -71,8 +80,9 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--allow-partial", action="store_true")
+    parser.add_argument("--target", choices=sorted(TARGET_SPECS), default="delta_bw_1s")
     args = parser.parse_args()
-    failures = audit(args.input, args.allow_partial)
+    failures = audit(args.input, args.allow_partial, args.target)
     for failure in failures:
         print(f"FAIL {failure}", file=sys.stderr)
     print(f"SUMMARY {'PASS' if not failures else 'FAIL'} failures={len(failures)}")

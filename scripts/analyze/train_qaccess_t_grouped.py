@@ -66,16 +66,20 @@ COEFF_COLS = ["alpha", "beta", "gamma"]
 TARGET_DELTA = "delta_bw_1s"
 TARGET_REL = "relative_delta_bw_1s"
 TARGET_LEGACY = "next_bw_bps"
+TARGET_OWD = "delta_owd_1s"
+TARGET_LOSS = "delta_loss_1s"
 
 MODEL_OUT = {
     TARGET_DELTA: "qaccess_t_model_delta_bw_1s.pkl",
     TARGET_REL: "qaccess_t_model_relative_delta_bw_1s.pkl",
+    TARGET_OWD: "qaccess_d_model_delta_owd_1s.pkl",
+    TARGET_LOSS: "qaccess_l_model_delta_loss_1s.pkl",
 }
 
 
 def _to_numeric_frame(df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
-    for col in FEATURES + [TARGET_DELTA, TARGET_REL, TARGET_LEGACY, "path_id", "time_s"]:
+    for col in FEATURES + [TARGET_DELTA, TARGET_REL, TARGET_LEGACY, TARGET_OWD, TARGET_LOSS, "path_id", "time_s"]:
         if col in work.columns:
             work[col] = pd.to_numeric(work[col], errors="coerce")
     for col in COEFF_COLS:
@@ -249,6 +253,7 @@ def candidate_score_separation(
     df: pd.DataFrame,
     model,
     *,
+    target: str = TARGET_DELTA,
     current_alpha: float,
     current_beta: float,
     current_gamma: float,
@@ -270,10 +275,12 @@ def candidate_score_separation(
         })
 
     preds = np.asarray([c["mean_pred"] for c in cand_preds], dtype=float)
-    best = max(cand_preds, key=lambda c: c["mean_pred"])
+    minimize = target in {TARGET_OWD, TARGET_LOSS}
+    best = min(cand_preds, key=lambda c: c["mean_pred"]) if minimize else max(cand_preds, key=lambda c: c["mean_pred"])
     spread_abs = float(np.max(preds) - np.min(preds))
     spread_pct_vs_current = (
-        (float(best["mean_pred"]) - cur_pred) / abs(cur_pred) * 100.0 if cur_pred != 0 else float("nan")
+        ((cur_pred - float(best["mean_pred"])) if minimize else (float(best["mean_pred"]) - cur_pred))
+        / abs(cur_pred) * 100.0 if cur_pred != 0 else float("nan")
     )
     spread_pct_vs_mean = (
         spread_abs / abs(float(np.mean(preds))) * 100.0 if np.mean(preds) != 0 else float("nan")
@@ -285,6 +292,7 @@ def candidate_score_separation(
         "current_gamma": current_gamma,
         "pred_current": cur_pred,
         "pred_best": float(best["mean_pred"]),
+        "optimization_direction": "minimize" if minimize else "maximize",
         "best_alpha": float(best["alpha"]),
         "best_beta": float(best["beta"]),
         "best_gamma": float(best["gamma"]),
@@ -370,7 +378,7 @@ def dataset_summary(df: pd.DataFrame) -> dict:
                 .sort_values(["run_id", "path_id"])
                 .to_dict(orient="records")
             )
-    for target in [TARGET_DELTA, TARGET_REL, TARGET_LEGACY]:
+    for target in [TARGET_DELTA, TARGET_REL, TARGET_LEGACY, TARGET_OWD, TARGET_LOSS]:
         if target in df.columns:
             s = pd.to_numeric(df[target], errors="coerce").dropna()
             if not s.empty:
@@ -441,6 +449,7 @@ def train_target(
     sep = candidate_score_separation(
         work,
         model,
+        target=target,
         current_alpha=0.6,
         current_beta=0.3,
         current_gamma=0.1,

@@ -83,7 +83,7 @@ func (m *monitor) setup() {
 }
 
 // utilityModeFromConfig maps Config.UtilityMode to Q-ACCeSS runtime modes.
-// Supported final modes: baseline/off, qaccess_collect, qaccess_t.
+// Supported final modes: baseline/off, qaccess_collect, qaccess_t, qaccess_d, qaccess_l.
 func utilityModeFromConfig(cfg *Config) UtilityMode {
 	if cfg == nil || cfg.UtilityMode == "" {
 		return ModeBaseline
@@ -95,6 +95,10 @@ func utilityModeFromConfig(cfg *Config) UtilityMode {
 		return ModeQAccessCollect
 	case "qaccess_t", "qaccess-t", "qaccesst":
 		return ModeQAccessT
+	case "qaccess_d", "qaccess-d", "qaccessd":
+		return ModeQAccessD
+	case "qaccess_l", "qaccess-l", "qaccessl":
+		return ModeQAccessL
 	case "qaccess_t_collect", "qaccess-t-collect":
 		utils.Infof("[qaccess_collect] qaccess_t_collect is deprecated; use qaccess_collect")
 		return ModeQAccessCollect
@@ -125,7 +129,7 @@ func (sch *scheduler) setup() {
 	mode := utilityModeFromConfig(sch.config)
 	if mode == ModeQAccessCollect {
 		sch.utilityController = NewUtilityController(mode, sch.config.ExperimentRunID)
-	} else if mode == ModeQAccessT && sch.config != nil && sch.config.Phase2Enabled && sch.config.Phase2Owner && sch.config.EndpointRole == Phase2OwnerRole && filepath.IsAbs(sch.config.Phase2StateDir) {
+	} else if isQAccessRuntimeMode(mode) && sch.config != nil && sch.config.Phase2Enabled && sch.config.Phase2Owner && sch.config.EndpointRole == Phase2OwnerRole && filepath.IsAbs(sch.config.Phase2StateDir) {
 		identity := Phase2SessionConfig{Enabled: true, Owner: true, EndpointRole: sch.config.EndpointRole, StateDir: sch.config.Phase2StateDir, RunID: sch.config.ExperimentRunID}
 		phase2 := loadQAccessPhase2ConfigForSession(identity, "")
 		sch.utilityController = newUtilityController(mode, identity.RunID, phase2)
@@ -174,7 +178,11 @@ func (sch *scheduler) configurePhase2(identity Phase2SessionConfig, connectionID
 		return fmt.Errorf("phase2 controller already configured for rtmp_session_id=%s", sch.phase2Identity.RTMPSessionID)
 	}
 	phase2 := loadQAccessPhase2ConfigForSession(identity, connectionID)
-	controller := newUtilityController(ModeQAccessT, identity.RunID, phase2)
+	mode := utilityModeFromConfig(sch.config)
+	if !isQAccessRuntimeMode(mode) {
+		return fmt.Errorf("phase2 utility mode rejected: %q", mode)
+	}
+	controller := newUtilityController(mode, identity.RunID, phase2)
 	if !controller.phase2MutationAllowed() {
 		return fmt.Errorf("phase2 mutation guard rejected owner identity")
 	}
@@ -2708,9 +2716,9 @@ func (m *monitor) monitorApplyUtility(pth *path) {
 	}
 
 	switch m.utilityController.Mode {
-	case ModeQAccessT:
-		utils.Infof("[qaccess_t] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
-			pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.GTotal,
+	case ModeQAccessT, ModeQAccessD, ModeQAccessL:
+		utils.Infof("[%s] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
+			m.utilityController.logPrefix(), pth.pathID, sig.Active, pm.BWbps/1e6, sig.NormG, sig.NormD, sig.NormL, sig.GTotal,
 			sig.Alpha, sig.Beta, sig.Gamma, sig.Utility, sig.Gain, sig.Backoff)
 	case ModeQAccessCollect:
 		utils.Infof("[qaccess_collect] path=%v active=%v bw=%.2fMbps G=%.4f D=%.4f L=%.4f GTotal=%.4f alpha=%.2f beta=%.2f gamma=%.2f U=%.4f gain=%.3f backoff=%.3f",
