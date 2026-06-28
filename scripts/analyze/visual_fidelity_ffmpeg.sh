@@ -21,8 +21,13 @@ COMMON_FILTER="[0:v]setpts=PTS-STARTPTS,format=yuv420p[ref];[1:v]setpts=PTS-STAR
 
 ffmpeg -hide_banner -y \
   -i "$ORIGINAL" -i "$RECEIVED" \
-  -filter_complex "${COMMON_FILTER};[ref][dist]ssim=${OUTDIR}/ssim.log;[ref][dist]psnr=${OUTDIR}/psnr.log" \
-  -f null - >"${OUTDIR}/ffmpeg_ssim_psnr.stdout.log" 2>"${OUTDIR}/ffmpeg_ssim_psnr.stderr.log"
+  -filter_complex "${COMMON_FILTER};[ref][dist]ssim=${OUTDIR}/ssim.log" \
+  -f null - >"${OUTDIR}/ffmpeg_ssim.stdout.log" 2>"${OUTDIR}/ffmpeg_ssim.stderr.log"
+
+ffmpeg -hide_banner -y \
+  -i "$ORIGINAL" -i "$RECEIVED" \
+  -filter_complex "${COMMON_FILTER};[ref][dist]psnr=${OUTDIR}/psnr.log" \
+  -f null - >"${OUTDIR}/ffmpeg_psnr.stdout.log" 2>"${OUTDIR}/ffmpeg_psnr.stderr.log"
 
 if ffmpeg -hide_banner -filters 2>/dev/null | grep -q 'libvmaf'; then
   ffmpeg -hide_banner -y \
