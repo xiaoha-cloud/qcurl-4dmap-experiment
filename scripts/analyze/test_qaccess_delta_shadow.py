@@ -270,6 +270,11 @@ class WorkerTests(unittest.TestCase):
         rows = [line.split() for line in profile.read_text().splitlines() if line and not line.startswith(("#", "IFACE="))]
         self.assertEqual(rows, [["0", "20ms", "0%"], ["90", "80ms", "0.05%"], ["150", "20ms", "0%"]])
 
+    def test_delay_profile_matches_training_phase_boundaries(self):
+        profile = REPO / "scripts/mininet/delay_profile.pathB_200s.env"
+        rows = [line.split() for line in profile.read_text().splitlines() if line and not line.startswith(("#", "IFACE="))]
+        self.assertEqual(rows, [["0", "20"], ["90", "80"], ["150", "20"]])
+
     def test_multipath_shadow_excludes_idle_and_aggregates(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
