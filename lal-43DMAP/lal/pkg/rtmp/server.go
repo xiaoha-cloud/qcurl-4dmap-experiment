@@ -9,15 +9,17 @@
 package rtmp
 
 import (
-	"net"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	//"encoding/binary"
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"os"
+
 	quic "github.com/lucas-clemente/quic-go"
 	log "github.com/q191201771/naza/pkg/nazalog"
 )
@@ -33,26 +35,27 @@ type ServerObserver interface {
 type Server struct {
 	observer ServerObserver
 	addr     string
-	lnau	net.Listener
-	lntcp       net.Listener
-	ln	quic.Listener
-	conn quic.Stream
+	lnau     net.Listener
+	lntcp    net.Listener
+	ln       quic.Listener
+	conn     quic.Stream
 	protocol string
-	hasau	bool
+	hasau    bool
 }
 
 func NewServer(observer ServerObserver, addr string, protocol string, hasau bool) *Server {
 	return &Server{
 		observer: observer,
 		addr:     addr,
-		protocol:	protocol,
-		hasau: hasau,
+		protocol: protocol,
+		hasau:    hasau,
 	}
 }
 
 func (server *Server) Listen() (err error) {
 	quicConfig := &quic.Config{
 		CreatePaths: true,
+		UtilityMode: os.Getenv("QACCESS_UTILITY_MODE"),
 	}
 
 	log.Infof("hasau=%v protocol=%s addr=%s", server.hasau, server.protocol, server.addr)
@@ -94,15 +97,14 @@ func (server *Server) Listen() (err error) {
 	return fmt.Errorf("unknown protocol: %s", server.protocol)
 }
 
-
 func (server *Server) ListenAU() (err error) {
 	//if ; err != nil {
-	if(server.protocol == "tcp"){
+	if server.protocol == "tcp" {
 		server.lnau, err = net.Listen("tcp", "0.0.0.0:1936")
-		log.Infof("start rtmp server listen. ln=%s	addr=%s  proto:%s AU", server.lnau,server.addr,server.protocol)
-	}else{
-		server.lntcp, err = net.Listen("tcp",server.addr)
-		log.Infof("start rtmp server listen. ln=%s	addr=%s  proto:%s AU", server.lntcp,server.addr,server.protocol)
+		log.Infof("start rtmp server listen. ln=%s	addr=%s  proto:%s AU", server.lnau, server.addr, server.protocol)
+	} else {
+		server.lntcp, err = net.Listen("tcp", server.addr)
+		log.Infof("start rtmp server listen. ln=%s	addr=%s  proto:%s AU", server.lntcp, server.addr, server.protocol)
 	}
 
 	return
@@ -116,19 +118,19 @@ func (server *Server) RunLoop() error {
 			}
 			go server.handleTCPConnectTCP(conn)
 		} else {
-			if server.ln == nil{
+			if server.ln == nil {
 				return fmt.Errorf("Server.ln is nil before Accept")
 			}
 
 			//sess, err := server.ln.Accept()
-			
+
 			log.Infof("[DEBUG] RunLoop about to call server.ln.Accept()")
 			fmt.Printf("[DEBUG] RunLoop about to call server.ln.Accept()\n")
 
 			sess, err := server.ln.Accept()
 			log.Infof("[DEBUG] server.ln.Accept returned. sess=%v err=%v", sess, err)
 			fmt.Printf("[DEBUG] server.ln.Accept returned. sess=%#v err=%v\n", sess, err)
-			
+
 			if err != nil {
 				return err
 			}
@@ -143,7 +145,7 @@ func (server *Server) RunLoop() error {
 			conn, err := sess.AcceptStream()
 			log.Infof("[DEBUG] sess.AcceptStream returned. conn=%v err=%v", conn, err)
 			fmt.Printf("[DEBUG] sess.AcceptStream returned. conn=%#v err=%v\n", conn, err)
-			
+
 			if err != nil {
 				return err
 			}
@@ -153,39 +155,38 @@ func (server *Server) RunLoop() error {
 	}
 }
 
-
 func (server *Server) RunLoopAU() error {
 	//for {
-		if(server.protocol == "tcp"){
-			conn, err := server.lnau.Accept()
-			if err != nil {
-				return err
-			}
-			go server.handleTCPConnectTCP(conn)
-			
-		}else{
-			conn, err := server.lntcp.Accept()
-			if err != nil {
-				return err
-			}
-			go server.handleTCPConnectTCP(conn)
-
+	if server.protocol == "tcp" {
+		conn, err := server.lnau.Accept()
+		if err != nil {
+			return err
 		}
-		
-		log.Infof("conn has been accpeted")
-		return nil
+		go server.handleTCPConnectTCP(conn)
+
+	} else {
+		conn, err := server.lntcp.Accept()
+		if err != nil {
+			return err
+		}
+		go server.handleTCPConnectTCP(conn)
+
+	}
+
+	log.Infof("conn has been accpeted")
+	return nil
 	//}
 }
 
 func (server *Server) Dispose() {
-	if server.ln == nil || server.lntcp == nil{
+	if server.ln == nil || server.lntcp == nil {
 		return
 	}
-	if server.protocol =="tcp"{
+	if server.protocol == "tcp" {
 		if err := server.lntcp.Close(); err != nil {
 			log.Error(err)
 		}
-	}else{
+	} else {
 		if err := server.ln.Close(); err != nil {
 			log.Error(err)
 		}
@@ -193,7 +194,7 @@ func (server *Server) Dispose() {
 
 }
 
-//func (server *Server) handleTCPConnect(conn net.Conn) {
+// func (server *Server) handleTCPConnect(conn net.Conn) {
 func (server *Server) handleTCPConnect(conn quic.Stream) {
 	//log.Infof("accept a rtmp connection. remoteAddr=%s", conn.RemoteAddr().String())
 	session := NewServerSession(server, conn)
