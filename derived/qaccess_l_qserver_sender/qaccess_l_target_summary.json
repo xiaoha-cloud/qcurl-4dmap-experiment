@@ -1,0 +1,29 @@
+{
+  "target": "loss_risk_1s",
+  "target_semantics": "per_path_sum_lost_retrans_bytes_within_next_1s",
+  "target_window_method": "next one-second aggregate bin",
+  "input_rows": 17982,
+  "rows": 17901,
+  "runs": 27,
+  "paths": 3,
+  "missing_future_rows_dropped": 81,
+  "target_mean": 277.34176861627844,
+  "target_std": 6526.945262966246,
+  "target_min": 0.0,
+  "target_max": 437824.0,
+  "target_zero_fraction": 0.9876543209876543,
+  "target_nonzero_fraction": 0.012345679012345678,
+  "correlations": {
+    "bw_bps": 0.019657182278523845,
+    "owd_ms": -0.013081377431259684,
+    "delay_gradient_ms": -0.002977901926497925,
+    "loss_rate": -0.012454457282203362,
+    "lost_bytes_delta": -0.001684215429195093,
+    "retrans_bytes_delta": null,
+    "alpha": -0.0008527100089242652,
+    "beta": -0.00494189188969487,
+    "gamma": 0.005270323351857323,
+    "gain": 0.015793736934802606,
+    "backoff": -0.015541638282084557
+  }
+}

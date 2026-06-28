@@ -1,0 +1,29 @@
+{
+  "target": "delta_owd_1s",
+  "target_semantics": "per_path_future_owd_1s_minus_current_owd",
+  "target_window_method": "nearest timestamp around t+1s",
+  "input_rows": 17982,
+  "rows": 17901,
+  "runs": 27,
+  "paths": 3,
+  "missing_future_rows_dropped": 81,
+  "target_mean": 0.5385772645070332,
+  "target_std": 5.84122126168227,
+  "target_min": -103.82728876187359,
+  "target_max": 117.61987847619045,
+  "target_zero_fraction": 0.38606781744036645,
+  "target_nonzero_fraction": 0.6139321825596336,
+  "correlations": {
+    "bw_bps": -0.004320880756648545,
+    "owd_ms": -0.27660448571342294,
+    "delay_gradient_ms": 0.6846777614492182,
+    "loss_rate": -0.018885799703117465,
+    "lost_bytes_delta": -0.004094634185437265,
+    "retrans_bytes_delta": null,
+    "alpha": 0.0016228456495850647,
+    "beta": 0.001002337639467121,
+    "gamma": -0.0010975905231779323,
+    "gain": 0.05305494705088992,
+    "backoff": -0.05298089121015895
+  }
+}
