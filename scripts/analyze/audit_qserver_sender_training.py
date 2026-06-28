@@ -13,6 +13,7 @@ TARGET_SPECS = {
     "delta_bw_1s": ("bw_bps", "future_bw_1s"),
     "delta_owd_1s": ("owd_ms", "future_owd_1s"),
     "delta_loss_1s": ("loss_rate", "future_loss_1s"),
+    "loss_risk_1s": ("loss_event_bytes", "future_loss_risk_1s"),
 }
 
 
@@ -46,7 +47,10 @@ def audit(path: Path, allow_partial: bool = False, target: str = "delta_bw_1s") 
         failures.append("Path B DURING samples absent")
     if not (pd.to_numeric(path_b.get("sender_byte_delta", 0), errors="coerce").fillna(0) > 0).any():
         failures.append("Path B has no active sender bytes")
-    expected = pd.to_numeric(df[future_column], errors="coerce") - pd.to_numeric(df[source_column], errors="coerce")
+    if target == "loss_risk_1s":
+        expected = pd.to_numeric(df[future_column], errors="coerce")
+    else:
+        expected = pd.to_numeric(df[future_column], errors="coerce") - pd.to_numeric(df[source_column], errors="coerce")
     error = (expected - pd.to_numeric(df[target], errors="coerce")).abs()
     if not bool((error.fillna(np.inf) < 1e-6).all()):
         failures.append(f"{target} inconsistent; max error={error.max()}")

@@ -24,6 +24,7 @@ def load(name: str, path: Path):
 runner = load("qserver_sweep", REPO / "scripts/mininet/run_qaccess_qserver_sender_sweep.py")
 builder = load("qserver_builder", REPO / "scripts/analyze/build_qserver_sender_training.py")
 auditor = load("qserver_auditor", REPO / "scripts/analyze/audit_qserver_sender_training.py")
+variant_builder = load("variant_builder", REPO / "scripts/analyze/build_qaccess_variant_target.py")
 sys.path.insert(0, str(REPO / "scripts/analyze"))
 try:
     trainer = load("qserver_trainer", REPO / "scripts/analyze/train_qaccess_qserver_sender.py")
@@ -135,6 +136,33 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(report["worker_target_mode"], "delta_bw_1s")
         self.assertEqual(report["model_type"], "RandomForestRegressor")
         self.assertFalse(report["aggregate_active_ready"])
+
+    def test_variant_target_summary_records_missing_future_rows(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = pd.concat([
+                builder.build_run(write_fixture(root, run_id="one", alpha=0.6)),
+                builder.build_run(write_fixture(root, run_id="two", alpha=0.7)),
+            ])
+            source = root / "aggregated.csv"
+            frame.to_csv(source, index=False)
+            output, summary = variant_builder.build_target(source, "delta_owd_1s")
+            self.assertEqual(len(output), len(frame) - 4)
+            self.assertEqual(summary["missing_future_rows_dropped"], 4)
+            self.assertEqual(summary["runs"], 2)
+            self.assertEqual(summary["paths"], 2)
+            self.assertEqual(summary["target_mean"], 1.0)
+
+    def test_loss_risk_target_uses_next_aggregated_second(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = builder.build_run(write_fixture(root))
+            frame["lost_bytes_delta"] = [0, 100, 0, 0, 200, 0]
+            source = root / "loss.csv"
+            frame.to_csv(source, index=False)
+            output, summary = variant_builder.build_target(source, "loss_risk_1s")
+            self.assertEqual(summary["missing_future_rows_dropped"], 2)
+            self.assertEqual(sorted(output.loss_risk_1s.tolist()), [0, 0, 100, 200])
 
     @unittest.skipIf(trainer is None, "training dependencies are unavailable")
     def test_training_excludes_idle_path_group_but_keeps_zero_windows_on_media_path(self):

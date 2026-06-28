@@ -75,13 +75,13 @@ FEATURES = [
     "backoff",
 ]
 
-TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s", "delta_owd_1s", "delta_loss_1s")
-MINIMIZE_TARGETS = {"delta_owd_1s", "delta_loss_1s"}
-ACTIVE_TARGET_MODES = {"delta_bw_1s", "delta_owd_1s", "delta_loss_1s"}
+TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s", "delta_owd_1s", "delta_loss_1s", "loss_risk_1s")
+MINIMIZE_TARGETS = {"delta_owd_1s", "delta_loss_1s", "loss_risk_1s"}
+ACTIVE_TARGET_MODES = {"delta_bw_1s", "delta_owd_1s", "delta_loss_1s", "loss_risk_1s"}
 VARIANT_TARGETS = {
     "qaccess_t": {"next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s"},
     "qaccess_d": {"delta_owd_1s"},
-    "qaccess_l": {"delta_loss_1s"},
+    "qaccess_l": {"delta_loss_1s", "loss_risk_1s"},
 }
 
 DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
@@ -228,7 +228,16 @@ def _score_unit(target_mode: str) -> str:
         "relative_delta_bw_1s": "ratio",
         "delta_owd_1s": "ms",
         "delta_loss_1s": "loss_rate",
+        "loss_risk_1s": "bytes",
     }[target_mode]
+
+
+def _objective_name(target_mode: str) -> str:
+    if target_mode == "delta_owd_1s":
+        return "delay_aware"
+    if target_mode in {"delta_loss_1s", "loss_risk_1s"}:
+        return "loss_aware"
+    return "throughput_aware"
 
 
 def _load_state(path: Path) -> dict:
@@ -549,6 +558,7 @@ def _metric_field(target_mode: str) -> str:
         "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
         "delta_owd_1s": "predicted_delta_owd_1s",
         "delta_loss_1s": "predicted_delta_loss_1s",
+        "loss_risk_1s": "predicted_loss_risk_1s",
     }[target_mode]
 
 
@@ -883,6 +893,7 @@ def _process_multipath_request(
         "run_id": str(req.get("run_id") or ""),
         "target_mode": target_mode,
         "controller_variant": str(req.get("controller_variant") or ""),
+        "objective": _objective_name(target_mode),
         "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
         "score_unit": _score_unit(target_mode),
         "execution_mode": "shadow" if shadow else "active",
@@ -1406,6 +1417,7 @@ def _process_request(
         "n_samples": n_samples,
         "run_id": run_id,
         "target_mode": target_mode,
+        "objective": _objective_name(target_mode),
         "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
         "score_unit": _score_unit(target_mode),
         "execution_mode": execution_mode,
@@ -1459,6 +1471,9 @@ def _process_request(
     elif target_mode == "delta_loss_1s":
         response["pred_current_delta_loss_rate"] = pred_current
         response["pred_best_delta_loss_rate"] = pred_best
+    elif target_mode == "loss_risk_1s":
+        response["pred_current_loss_risk_bytes"] = pred_current
+        response["pred_best_loss_risk_bytes"] = pred_best
 
     _assert_runtime_coeffs_path(coeffs_out)
 
@@ -1682,7 +1697,7 @@ def main() -> None:
         "--min-objective-improvement",
         type=float,
         default=0.0,
-        help="Minimum predicted reduction for delta_owd_1s or delta_loss_1s",
+        help="Minimum predicted reduction for delta_owd_1s, delta_loss_1s, or loss_risk_1s",
     )
     ap.add_argument("--gate-mode", choices=GATE_MODES, default="absolute")
     ap.add_argument(
@@ -1854,6 +1869,7 @@ def main() -> None:
             "verified_model_target": provenance["verified_model_target"],
             "requested_target_mode": args.target_mode,
             "controller_variant": args.controller_variant,
+            "objective": _objective_name(args.target_mode),
             "optimization_direction": "minimize" if args.target_mode in MINIMIZE_TARGETS else "maximize",
             "score_unit": _score_unit(args.target_mode),
             "compatibility_status": "compatible",
