@@ -637,7 +637,7 @@ def run_experiment(net, args):
     server_log_path = os.path.join(logs_dir, f"server_{run_id}.log")
     server_log = _open_log_file(server_log_path, save_logs)
     phase2_state_dir = os.path.abspath(os.environ.get("QACCESS_PHASE2_STATE_DIR", os.path.join(ROOT, "derived")))
-    server_phase2_enabled = um == "qaccess_t"
+    server_phase2_enabled = um in ("qaccess_t", "qaccess_d", "qaccess_l")
     server_cmd = (
         f"QACCESS_PHASE2_ENABLED={int(server_phase2_enabled)} "
         f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=server_listener "
