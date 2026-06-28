@@ -17,6 +17,11 @@ TARGET_SPECS = {
     "delta_bw_1s": ("bw_bps", "future_bw_1s", "per_path_future_bw_1s_minus_current_bw"),
     "delta_owd_1s": ("owd_ms", "future_owd_1s", "per_path_future_owd_1s_minus_current_owd"),
     "delta_loss_1s": ("loss_rate", "future_loss_1s", "per_path_future_loss_1s_minus_current_loss"),
+    "loss_risk_1s": (
+        "loss_event_bytes",
+        "future_loss_risk_1s",
+        "per_path_sum_lost_retrans_bytes_within_next_1s",
+    ),
 }
 
 
@@ -56,6 +61,11 @@ def model_metadata(
         "training_sessions": sorted(df.run_id.astype(str).unique().tolist()) if "run_id" in df else [],
         "created_at": datetime.now(timezone.utc).isoformat(),
         "model_type": "RandomForestRegressor",
+        "train_test_split": {
+            "strategy": "grouped holdout by run_id",
+            "test_size": 0.2,
+            "random_state": 42,
+        },
         "split_strategy": "GroupKFold by run_id; leave-one-coefficient-combination-out diagnostic",
         "model_path": str(model_path.resolve()), "model_out": str(model_path.resolve()), "metrics": result,
         "aggregate_active_ready": False, "aggregate_label_defined": False,
@@ -76,6 +86,8 @@ def add_future_delta_targets(
         work = group.sort_values("timestamp_ms").copy()
         timestamps = pd.to_numeric(work["timestamp_ms"], errors="coerce").to_numpy(dtype=float)
         for target, (source, future, _) in TARGET_SPECS.items():
+            if source not in work.columns:
+                continue
             values = pd.to_numeric(work[source], errors="coerce").to_numpy(dtype=float)
             future_values = np.full(len(work), np.nan)
             for index, timestamp in enumerate(timestamps):

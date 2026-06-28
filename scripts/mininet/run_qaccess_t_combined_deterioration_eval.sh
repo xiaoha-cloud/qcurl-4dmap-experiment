@@ -86,7 +86,7 @@ case "$GATE_MODE" in
   *) echo "[error] QACCESS_GATE_MODE must be absolute, relative, or hybrid, got: $GATE_MODE" >&2; exit 2 ;;
 esac
 case "$CONTROLLER_VARIANT:$WORKER_TARGET_MODE" in
-  qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_l:delta_loss_1s) ;;
+  qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_l:delta_loss_1s|qaccess_l:loss_risk_1s) ;;
   *)
   echo "[error] incompatible controller/target: $CONTROLLER_VARIANT / $WORKER_TARGET_MODE" >&2
   exit 2
@@ -155,6 +155,7 @@ check_configuration() {
   echo "[check] buffer=$BUFFER_SIZE"
   echo "[check] cooldown_ms=$COOLDOWN_MS"
   echo "[check] gate_bps=$GATE_BPS"
+  echo "[check] min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
   echo "[check] gate_mode=$GATE_MODE min_relative_gain=$MIN_RELATIVE_GAIN"
   [[ -x "$WORKER_PYTHON" ]] || { echo "[FAIL] worker Python is not executable: $WORKER_PYTHON" >&2; return 1; }
   "$WORKER_PYTHON" scripts/analyze/qaccess_t_update_worker.py \
@@ -519,14 +520,21 @@ meta = {
     'model_metadata_path': '$WORKER_MODEL_METADATA',
     'target_mode': '$WORKER_TARGET_MODE',
     'controller_variant': '$CONTROLLER_VARIANT',
+    'objective': {
+        'qaccess_t': 'throughput_aware',
+        'qaccess_d': 'delay_aware',
+        'qaccess_l': 'loss_aware',
+    }.get('$CONTROLLER_VARIANT', 'unknown'),
     'profile_kind': '$PROFILE_KIND',
     'target_semantics': {
         'delta_bw_1s': 'per_path_future_bw_1s_minus_current_bw',
         'delta_owd_1s': 'per_path_future_owd_1s_minus_current_owd',
         'delta_loss_1s': 'per_path_future_loss_1s_minus_current_loss',
+        'loss_risk_1s': 'per_path_sum_lost_retrans_bytes_within_next_1s',
     }.get('$WORKER_TARGET_MODE', ''),
     'gate_mode': '$GATE_MODE',
     'min_delta_gain_bps': float('$GATE_BPS'),
+    'min_objective_improvement': float('$MIN_OBJECTIVE_IMPROVEMENT'),
     'min_relative_gain': float('$MIN_RELATIVE_GAIN'),
     'execution_mode': '$EXECUTION_MODE',
     'worker_shadow': '$EXECUTION_MODE' == 'shadow',
