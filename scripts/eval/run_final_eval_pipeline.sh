@@ -384,7 +384,7 @@ refresh_root_audit_index() {
     echo "E. QoE summaries, visual fidelity, final tables, mappings, README files, and PNG plots are post-processing outputs."
     echo "F. Output packages are stored under $root/."
     echo "G. Strict aSSIM is not implemented; current visual fidelity is SSIM / PSNR / VMAF."
-    echo "H. p95/max frame gap and p95 stream delay are supporting metrics only."
+    echo "H. p95 stream delay, p95/max frame gap, delivery-gap count, and delivery-gap ratio are supporting diagnostics only and are not main QoE metrics."
     echo "I. Unified final evaluation script: scripts/eval/run_final_eval_pipeline.sh."
     echo ""
     echo "## Packages"

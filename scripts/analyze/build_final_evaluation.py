@@ -7,8 +7,8 @@ The final evaluation compares two utility modes over the same MPQUIC transport:
 * Q-ACCeSS-T: MPQUIC transport with utility/controller enabled.
 
 The primary QoE-style figures follow the 4D-MAP metric structure, but use the
-observable server-side proxies currently available in this project. Frame-gap
-p95/max values are retained as supporting metrics in the combined table only.
+observable server-side proxies currently available in this project. Stream-delay
+p95 and frame-gap p95/max values are diagnostics only, not final QoE metrics.
 """
 
 from __future__ import annotations
@@ -728,30 +728,6 @@ def plot_controller(profile: str, specs: list[LegSpec], out_dir: Path, out_path:
     plt.close(fig)
 
 
-def supporting_gap_plot(rows: list[dict[str, Any]], out_dir: Path) -> None:
-    ensure_plotting()
-    selected = [row for row in rows if parse_float(row.get("p95_frame_gap_ms")) is not None or parse_float(row.get("max_frame_gap_ms")) is not None]
-    if not selected:
-        save_no_data_plot(out_dir / "supporting_frame_gap_severity.png", "Supporting Frame Gap Severity", "No frame-gap severity data was found.")
-        return
-    labels = [f"{row['profile']}\n{row['utility_mode']}" for row in selected]
-    x = list(range(len(selected)))
-    p95 = [parse_float(row.get("p95_frame_gap_ms")) or 0.0 for row in selected]
-    max_gap = [parse_float(row.get("max_frame_gap_ms")) or 0.0 for row in selected]
-    width = 0.38
-    fig, ax = plt.subplots(figsize=(max(7, len(selected) * 1.3), 4.5))
-    ax.bar([i - width / 2 for i in x], p95, width=width, label="p95 frame gap")
-    ax.bar([i + width / 2 for i in x], max_gap, width=width, label="max frame gap")
-    ax.set_xticks(x, labels, rotation=20, ha="right")
-    ax.set_ylabel("Frame gap (ms)")
-    ax.set_title("Supporting Frame Gap Severity")
-    ax.grid(axis="y", alpha=0.25)
-    ax.legend()
-    fig.tight_layout()
-    fig.savefig(out_dir / "supporting_frame_gap_severity.png", dpi=180)
-    plt.close(fig)
-
-
 def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s: float | None) -> dict[str, Any]:
     avg_a, avg_b, util = path_utilisation(spec.leg_dir, common_end_s)
     visual = visual_summary(spec.leg_dir, out_dir)
@@ -765,7 +741,6 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "rebuffering_candidate_duration_ms": qoe.get("rebuffering_candidate_duration_ms", ""),
         "startup_latency_proxy_ms": qoe.get("startup_latency_proxy_ms", ""),
         "avg_stream_delay_proxy_ms": qoe.get("avg_stream_delay_proxy_ms", ""),
-        "p95_stream_delay_proxy_ms": qoe.get("p95_stream_delay_proxy_ms", ""),
         "visual_fidelity_metric_available": visual["visual_fidelity_metric_available"],
         "ssim": visual["ssim"],
         "psnr": visual["psnr"],
@@ -773,8 +748,6 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "ssim_avg": visual["ssim"],
         "psnr_avg": visual["psnr"],
         "vmaf_mean": visual["vmaf"],
-        "p95_frame_gap_ms": qoe.get("p95_frame_gap_ms", ""),
-        "max_frame_gap_ms": qoe.get("max_frame_gap_ms", ""),
         "average_throughput_mbps": fmt(average_throughput_mbps(spec.leg_dir, common_end_s)),
         "pathA_average_throughput_mbps": fmt(avg_a),
         "pathB_average_throughput_mbps": fmt(avg_b),
@@ -784,8 +757,6 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "gain_changed": control_value_changed(spec.leg_dir, spec.utility_mode, "gain"),
         "backoff_changed": control_value_changed(spec.leg_dir, spec.utility_mode, "backoff"),
         "gain_backoff_changed": gain_backoff_changed(spec.leg_dir, spec.utility_mode),
-        "delivery_gap_event_count": qoe.get("delivery_gap_event_count", ""),
-        "delivery_gap_ratio": qoe.get("delivery_gap_ratio", ""),
         "qoe_events_available": qoe.get("qoe_events_available", "no"),
         "received_flv_exists": visual["received_flv_exists"],
         "received_flv_path": visual["received_flv_path"],
@@ -793,6 +764,23 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "qoe_notes": qoe.get("qoe_notes", ""),
         "status": "ok" if qoe.get("qoe_events_available") == "yes" or visual["received_flv_exists"] == "yes" else "partial",
         "missing_inputs": qoe.get("qoe_notes", ""),
+    }
+
+
+def supporting_row(spec: LegSpec, qoe: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profile": spec.profile,
+        "run_session": spec.session.name,
+        "leg": spec.leg_dir.name,
+        "utility_mode": spec.utility_mode,
+        "p95_stream_delay_ms": qoe.get("p95_stream_delay_proxy_ms", ""),
+        "p95_frame_gap_ms": qoe.get("p95_frame_gap_ms", ""),
+        "max_frame_gap_ms": qoe.get("max_frame_gap_ms", ""),
+        "delivery_gap_event_count": qoe.get("delivery_gap_event_count", ""),
+        "delivery_gap_ratio": qoe.get("delivery_gap_ratio", ""),
+        "video_event_count": qoe.get("video_event_count", ""),
+        "qoe_events_available": qoe.get("qoe_events_available", "no"),
+        "notes": qoe.get("qoe_notes", ""),
     }
 
 
@@ -836,18 +824,20 @@ reported metrics are named as observable proxies:
   from `pusher_start` to the first server/puller video receive event. It is not
   player first-frame display latency.
 * `Average Stream Delay Proxy (Server-side)` is estimated from FLV timestamps,
-  send wall-clock alignment, and server-side receive wall-clock time. The p95
-  stream delay is kept in the summary table, but the average is the primary
-  stream-delay figure.
+  send wall-clock alignment, and server-side receive wall-clock time.
 * `Visual Fidelity (SSIM/PSNR/VMAF)` uses FFmpeg-derived visual metrics when
   received FLV files are available. Strict aSSIM is not reported unless a
   dedicated aSSIM formula is implemented.
 
 QoE summary figures, when generated, use utility mode/run type on the x-axis,
 not time. Time is used only for time-series figures such as throughput,
-delay/loss, and utility/gain/backoff. `p95_frame_gap_ms`, `max_frame_gap_ms`,
-and `p95_stream_delay_ms` are supporting gap-severity metrics and are not used
-as primary QoE figures.
+delay/loss, and utility/gain/backoff.
+
+The main QoE metrics follow the 4D-MAP structure: re-buffering time,
+start-up latency, stream delay, and visual fidelity. `p95_stream_delay_ms` is
+not used as a main metric because it is not part of the referenced 4D-MAP
+evaluation metrics. Any p95/max gap values are reported only in
+`supporting_metrics.csv` as diagnostics, not as primary QoE results.
 """
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "README_evaluation_logic.md").write_text(text, encoding="utf-8")
@@ -1033,7 +1023,7 @@ F. Outputs are stored under this directory: `{out_dir}`.
 
 G. Strict aSSIM is not implemented. Current visual fidelity output is SSIM / PSNR / VMAF. Approximate aSSIM should not be reported unless a separate formula is implemented and clearly labelled as a proxy.
 
-H. `p95_frame_gap_ms`, `max_frame_gap_ms`, and `p95_stream_delay_ms` are supporting metrics only. They are kept in summary tables/supporting charts and are not primary QoE plots.
+H. `p95_stream_delay_ms`, `p95_frame_gap_ms`, `max_frame_gap_ms`, delivery-gap counts, and delivery-gap ratios are supporting diagnostics only. They are written to `supporting_metrics.csv` and are not primary QoE table fields or primary QoE plots.
 
 I. A unified final evaluation script exists: `scripts/eval/run_final_eval_pipeline.sh`.
 
@@ -1076,6 +1066,7 @@ def build(args: argparse.Namespace) -> None:
 
     rows: list[dict[str, Any]] = []
     qoe_rows: list[dict[str, Any]] = []
+    supporting_rows: list[dict[str, Any]] = []
     transport_rows: list[dict[str, Any]] = []
     controller_rows: list[dict[str, Any]] = []
     visual_rows: list[dict[str, Any]] = []
@@ -1084,6 +1075,7 @@ def build(args: argparse.Namespace) -> None:
         qoe = qoe_summary_for_leg(spec.leg_dir, args.gap_threshold_ms)
         row = combined_row(spec, qoe, out_dir, common_windows.get(spec.profile))
         rows.append(row)
+        supporting_rows.append(supporting_row(spec, qoe))
         qoe_rows.append(
             {
                 "profile": row["profile"],
@@ -1091,9 +1083,10 @@ def build(args: argparse.Namespace) -> None:
                 "rebuffering_candidate_duration_ms": row["rebuffering_candidate_duration_ms"],
                 "startup_latency_proxy_ms": row["startup_latency_proxy_ms"],
                 "avg_stream_delay_proxy_ms": row["avg_stream_delay_proxy_ms"],
-                "p95_stream_delay_proxy_ms": row["p95_stream_delay_proxy_ms"],
-                "delivery_gap_event_count": row["delivery_gap_event_count"],
-                "delivery_gap_ratio": row["delivery_gap_ratio"],
+                "visual_fidelity_metric_available": row["visual_fidelity_metric_available"],
+                "ssim_avg": row["ssim_avg"],
+                "psnr_avg": row["psnr_avg"],
+                "vmaf_mean": row["vmaf_mean"],
                 "qoe_events_available": row["qoe_events_available"],
                 "qoe_notes": row["qoe_notes"],
             }
@@ -1153,8 +1146,6 @@ def build(args: argparse.Namespace) -> None:
         "ssim_avg",
         "psnr_avg",
         "vmaf_mean",
-        "p95_frame_gap_ms",
-        "max_frame_gap_ms",
         "average_throughput_mbps",
         "pathA_average_throughput_mbps",
         "pathB_average_throughput_mbps",
@@ -1164,19 +1155,15 @@ def build(args: argparse.Namespace) -> None:
         "gain_changed",
         "backoff_changed",
         "gain_backoff_changed",
-        "p95_stream_delay_ms",
-        "delivery_gap_event_count",
-        "delivery_gap_ratio",
         "qoe_events_available",
         "received_flv_exists",
         "common_window_end_s",
         "status",
         "missing_inputs",
     ]
-    for row in rows:
-        row["p95_stream_delay_ms"] = row.get("p95_stream_delay_proxy_ms", "")
     write_csv(out_dir / "final_eval_combined_table.csv", rows, combined_fields)
     write_csv(out_dir / "qoe_proxy_summary.csv", qoe_rows, list(qoe_rows[0].keys()))
+    write_csv(out_dir / "supporting_metrics.csv", supporting_rows, list(supporting_rows[0].keys()))
     write_csv(out_dir / "transport_summary.csv", transport_rows, list(transport_rows[0].keys()))
     write_csv(out_dir / "throughput_summary.csv", transport_rows, list(transport_rows[0].keys()))
     write_csv(out_dir / "controller_activation_summary.csv", controller_rows, list(controller_rows[0].keys()))
@@ -1252,7 +1239,6 @@ def build(args: argparse.Namespace) -> None:
                 plots_dir / plot_file("qoe_live", "stream_delay"),
             )
             visual_plot(rows, profile, plots_dir / plot_file("qoe_live", "visual"))
-            supporting_gap_plot(rows, plots_dir)
 
     print(f"[final-eval] wrote {out_dir}")
     print(f"[final-eval] combined table: {out_dir / 'final_eval_combined_table.csv'}")
