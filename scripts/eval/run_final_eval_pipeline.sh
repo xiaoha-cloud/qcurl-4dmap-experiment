@@ -1,16 +1,15 @@
 #!/usr/bin/env bash
-# Run or post-process the final Q-ACCeSS-T evaluation pipeline.
+# Run or post-process the Q-ACCeSS-T final evaluation pipeline.
 #
-# This script intentionally keeps the experiment runner separate from the final
-# evaluation builder. The paired Mininet runners collect logs and per-leg
-# diagnostics; this script adds QoE summaries, visual-fidelity metrics when
-# possible, final tables, plots, and an audit-friendly README.
+# This script is an orchestrator. Paired Mininet runners collect raw logs and
+# per-leg diagnostics; this script adds the selected post-processing package:
+# Fig.7 behavior, Fig.8 behavior, or final live-streaming QoE proxy.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 
-PROFILE="fig8_combined"
+PROFILE="qoe_live"
 SESSION=""
 FIG7_SESSION=""
 FIG8_SESSION=""
@@ -24,29 +23,27 @@ LAST_RUN_SESSION=""
 usage() {
   cat <<'EOF'
 usage:
-  # Post-process an existing Fig.8 session.
+  # Post-process an existing live-streaming QoE session.
   bash scripts/eval/run_final_eval_pipeline.sh \
     --session logs_exp/<session> \
-    --profile fig8_combined \
+    --profile qoe_live \
+    --postprocess-only
+
+  # Post-process Fig.8 delay/loss behavior from an existing session.
+  bash scripts/eval/run_final_eval_pipeline.sh \
+    --session logs_exp/<session> \
+    --profile fig8_behavior \
     --postprocess-only
 
   # Run one experiment and then post-process it.
   sudo env INPUT_FLV=/home/mininet/Videos/push_input.flv \
     bash scripts/eval/run_final_eval_pipeline.sh \
-      --profile fig8_combined \
-      --run-experiment
-
-  # Run Fig.8 and Fig.7, then build a combined final evaluation.
-  sudo env INPUT_FLV=/home/mininet/Videos/push_input.flv \
-    bash scripts/eval/run_final_eval_pipeline.sh \
-      --profile all \
+      --profile qoe_live \
       --run-experiment
 
 options:
-  --profile <fig8_combined|fig7_bandwidth|all>
+  --profile <fig7_behavior|fig8_behavior|qoe_live>
   --session <path>              Existing session for single-profile postprocess.
-  --fig7-session <path>         Existing Fig.7 session for --profile all.
-  --fig8-session <path>         Existing Fig.8 session for --profile all.
   --postprocess-only
   --run-experiment
   --output-root <path>          Default: derived/final_eval
@@ -75,7 +72,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 case "$PROFILE" in
-  fig8_combined|fig7_bandwidth|all) ;;
+  fig7_behavior|fig8_behavior|qoe_live) ;;
   *) echo "[final-eval] unsupported profile: $PROFILE" >&2; exit 2 ;;
 esac
 
@@ -95,29 +92,36 @@ require_file() {
 
 profile_to_runner() {
   case "$1" in
-    fig8_combined) printf '%s\n' "scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh" ;;
-    fig7_bandwidth) printf '%s\n' "scripts/mininet/run_qaccess_t_fig7_baseline_vs_dynamic_hybrid.sh" ;;
+    fig8_behavior|qoe_live) printf '%s\n' "scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh" ;;
+    fig7_behavior)
+      if [[ -f "scripts/mininet/run_qaccess_t_fig7_baseline_vs_dynamic_hybrid.sh" ]]; then
+        printf '%s\n' "scripts/mininet/run_qaccess_t_fig7_baseline_vs_dynamic_hybrid.sh"
+      else
+        echo "Fig.7-like paired runner not found" >&2
+        return 1
+      fi
+      ;;
   esac
 }
 
 profile_to_session_arg() {
   case "$1" in
-    fig8_combined) printf '%s\n' "--fig8-session" ;;
-    fig7_bandwidth) printf '%s\n' "--fig7-session" ;;
+    fig8_behavior|qoe_live) printf '%s\n' "--fig8-session" ;;
+    fig7_behavior) printf '%s\n' "--fig7-session" ;;
   esac
 }
 
 profile_to_session_glob() {
   case "$1" in
-    fig8_combined) printf '%s\n' "logs_exp/session_combined_deterioration_*" ;;
-    fig7_bandwidth) printf '%s\n' "logs_exp/session_fig7_capacity_hybrid_*" ;;
+    fig8_behavior|qoe_live) printf '%s\n' "logs_exp/session_combined_deterioration_*" ;;
+    fig7_behavior) printf '%s\n' "logs_exp/session_fig7_capacity_hybrid_*" ;;
   esac
 }
 
 profile_to_legs() {
   case "$1" in
-    fig8_combined) printf '%s\n' "combined_baseline combined_qaccess_t_dynamic" ;;
-    fig7_bandwidth) printf '%s\n' "fig7_baseline fig7_qaccess_t_dynamic" ;;
+    fig8_behavior|qoe_live) printf '%s\n' "combined_baseline combined_qaccess_t_dynamic" ;;
+    fig7_behavior) printf '%s\n' "fig7_baseline fig7_qaccess_t_dynamic" ;;
   esac
 }
 
@@ -218,11 +222,7 @@ prepare_output_dir() {
 package_name_for() {
   local profile="$1"
   local session="$2"
-  case "$profile" in
-    fig8_combined) printf 'fig8_%s\n' "$(basename "$session")" ;;
-    fig7_bandwidth) printf 'fig7_%s\n' "$(basename "$session")" ;;
-    *) printf '%s\n' "$(basename "$session")" ;;
-  esac
+  printf '%s_%s\n' "$profile" "$(basename "$session")"
 }
 
 collect_missing_for_session() {
@@ -245,9 +245,9 @@ collect_missing_for_session() {
     [[ -s "$leg_dir/leg_status.json" ]] || missing+=("$leg/leg_status.json")
     compgen -G "$leg_dir/tc_deterioration.log" >/dev/null || compgen -G "$leg_dir/logs/tc_deterioration_*.log" >/dev/null || missing+=("$leg/tc_deterioration_log")
   done
-  if [[ "$profile" == "fig8_combined" ]]; then
+  if [[ "$profile" == "fig8_behavior" || "$profile" == "qoe_live" ]]; then
     [[ -s "$session/combined_qaccess_t_dynamic/control_law_diagnostics.csv" ]] || missing+=("combined_qaccess_t_dynamic/control_law_diagnostics.csv")
-  elif [[ "$profile" == "fig7_bandwidth" ]]; then
+  elif [[ "$profile" == "fig7_behavior" ]]; then
     [[ -s "$session/fig7_qaccess_t_dynamic/control_law_diagnostics.csv" ]] || missing+=("fig7_qaccess_t_dynamic/control_law_diagnostics.csv")
   fi
   if [[ "${#missing[@]}" -gt 0 ]]; then
@@ -301,11 +301,11 @@ run_visual_for_session() {
   local out_dir="$3"
   local baseline qaccess
   case "$profile" in
-    fig8_combined)
+    fig8_behavior|qoe_live)
       baseline="combined_baseline"
       qaccess="combined_qaccess_t_dynamic"
       ;;
-    fig7_bandwidth)
+    fig7_behavior)
       baseline="fig7_baseline"
       qaccess="fig7_qaccess_t_dynamic"
       ;;
@@ -313,8 +313,8 @@ run_visual_for_session() {
       return 0
       ;;
   esac
-  run_visual_for_leg "$session/$baseline" "$out_dir/visual/baseline"
-  run_visual_for_leg "$session/$qaccess" "$out_dir/visual/qaccess"
+  run_visual_for_leg "$session/$baseline" "$out_dir/visual/$baseline"
+  run_visual_for_leg "$session/$qaccess" "$out_dir/visual/$qaccess"
 }
 
 build_tables_and_plots() {
@@ -324,6 +324,7 @@ build_tables_and_plots() {
   echo "[final-eval] final tables and plots -> $out_dir"
   python3 scripts/analyze/build_final_evaluation.py \
     "${args[@]}" \
+    --package-profile "$PROFILE" \
     --output "$out_dir" \
     --gap-threshold-ms "$GAP_THRESHOLD_MS"
 }
@@ -405,10 +406,14 @@ postprocess_single() {
   out_dir="$(prepare_output_dir "$session_name")"
   missing_text="$(collect_missing_for_session "$profile" "$session" | sed '/^$/d' || true)"
 
-  if ! run_qoe_summary "$session" "$out_dir"; then
-    missing_text="${missing_text}"$'\n'"qoe_summary_generation_failed"
+  if [[ "$profile" == "qoe_live" ]]; then
+    if ! run_qoe_summary "$session" "$out_dir"; then
+      missing_text="${missing_text}"$'\n'"qoe_summary_generation_failed"
+    fi
+    run_visual_for_session "$profile" "$session" "$out_dir"
+  else
+    echo "[final-eval] $profile is a behavior package; skipping QoE summary and visual fidelity main charts"
   fi
-  run_visual_for_session "$profile" "$session" "$out_dir"
   session_arg="$(profile_to_session_arg "$profile")"
   build_tables_and_plots "$out_dir" "$session_arg" "$session"
 
@@ -418,37 +423,32 @@ postprocess_single() {
   print_summary "$session" "$out_dir" "$missing_text"
 }
 
-postprocess_all() {
-  local fig7="$1"
-  local fig8="$2"
-  [[ -d "$fig7" ]] || { echo "[final-eval] Fig.7 session not found: $fig7" >&2; exit 1; }
-  [[ -d "$fig8" ]] || { echo "[final-eval] Fig.8 session not found: $fig8" >&2; exit 1; }
-  echo "[final-eval] building separate Fig.8 package"
-  postprocess_single fig8_combined "$fig8"
-  echo "[final-eval] building separate Fig.7 package"
-  postprocess_single fig7_bandwidth "$fig7"
-}
-
 print_summary() {
   local session_text="$1"
   local out_dir="$2"
   local missing_text="$3"
   echo ""
-  echo "A. 使用的 session: $session_text"
-  echo "B. baseline leg 是否完整: $([[ -z "$missing_text" || "$missing_text" != *baseline* ]] && echo yes || echo partial)"
-  echo "C. Q-ACCeSS-T leg 是否完整: $([[ -z "$missing_text" || "$missing_text" != *qaccess* ]] && echo yes || echo partial)"
-  echo "D. QoE summary 是否生成: $([[ -f "$out_dir/qoe_summary.csv" || -f "$out_dir/qoe_fig8/qoe_summary.csv" ]] && echo yes || echo partial)"
-  echo "E. throughput summary 是否生成: $([[ -f "$out_dir/transport_summary.csv" ]] && echo yes || echo no)"
-  echo "F. visual fidelity 是否生成: $([[ -f "$out_dir/visual_quality_summary.csv" ]] && echo "see visual_quality_summary.csv" || echo no)"
-  echo "G. final table 路径: $out_dir/final_eval_combined_table.csv"
-  echo "H. plots 路径: $out_dir/plots"
-  echo "I. README 路径: $out_dir/README_evaluation_logic.md"
-  echo "J. 缺失项和注意事项:"
+  echo "A. 使用的 profile: $PROFILE"
+  echo "B. 使用的 session: $session_text"
+  echo "C. baseline leg 是否完整: $([[ -z "$missing_text" || "$missing_text" != *baseline* ]] && echo yes || echo partial)"
+  echo "D. Q-ACCeSS-T leg 是否完整: $([[ -z "$missing_text" || "$missing_text" != *qaccess* ]] && echo yes || echo partial)"
+  echo "E. 生成的 plots:"
+  if compgen -G "$out_dir/plots/*.png" >/dev/null; then
+    ls "$out_dir"/plots/*.png | sed 's/^/   - /'
+  else
+    echo "   - none"
+  fi
+  echo "F. 生成的 tables:"
+  ls "$out_dir"/*.csv 2>/dev/null | sed 's/^/   - /' || echo "   - none"
+  echo "G. QoE summary 是否生成: $([[ -f "$out_dir/qoe_summary.csv" ]] && echo yes || echo no)"
+  echo "H. visual fidelity 是否生成: $([[ -d "$out_dir/visual" && -n "$(find "$out_dir/visual" -type f 2>/dev/null | head -1)" ]] && echo yes || echo no)"
+  echo "I. 缺失项:"
   if [[ -n "$missing_text" ]]; then
     printf '%s\n' "$missing_text" | sed 's/^/   - /'
   else
     echo "   - none detected"
   fi
+  echo "J. 输出目录: $out_dir"
 }
 
 preflight_common
@@ -459,27 +459,13 @@ if [[ "$MODE" == "run" ]]; then
     exit 1
   fi
   preflight_run
-  if [[ "$PROFILE" == "all" ]]; then
-    run_one_profile fig8_combined
-    FIG8_SESSION="$LAST_RUN_SESSION"
-    run_one_profile fig7_bandwidth
-    FIG7_SESSION="$LAST_RUN_SESSION"
-    postprocess_all "$FIG7_SESSION" "$FIG8_SESSION"
-  else
-    run_one_profile "$PROFILE"
-    SESSION="$LAST_RUN_SESSION"
-    postprocess_single "$PROFILE" "$SESSION"
-  fi
+  run_one_profile "$PROFILE"
+  SESSION="$LAST_RUN_SESSION"
+  postprocess_single "$PROFILE" "$SESSION"
 else
-  if [[ "$PROFILE" == "all" ]]; then
-    [[ -n "$FIG8_SESSION" ]] || FIG8_SESSION="$(latest_or_fail "$(profile_to_session_glob fig8_combined)")"
-    [[ -n "$FIG7_SESSION" ]] || FIG7_SESSION="$(latest_or_fail "$(profile_to_session_glob fig7_bandwidth)")"
-    postprocess_all "$FIG7_SESSION" "$FIG8_SESSION"
-  else
-    if [[ -z "$SESSION" ]]; then
-      SESSION="$(latest_or_fail "$(profile_to_session_glob "$PROFILE")")"
-      echo "[final-eval] --session omitted; using latest: $SESSION"
-    fi
-    postprocess_single "$PROFILE" "$SESSION"
+  if [[ -z "$SESSION" ]]; then
+    SESSION="$(latest_or_fail "$(profile_to_session_glob "$PROFILE")")"
+    echo "[final-eval] --session omitted; using latest: $SESSION"
   fi
+  postprocess_single "$PROFILE" "$SESSION"
 fi

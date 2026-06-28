@@ -53,6 +53,12 @@ RUN_LABELS = {
     "on": "Q-ACCeSS-T\nutility on",
 }
 
+PACKAGE_PROFILE_LABELS = {
+    "fig7_behavior": "Fig.7 behavior",
+    "fig8_behavior": "Fig.8 behavior",
+    "qoe_live": "Live-streaming QoE proxy",
+}
+
 
 @dataclass(frozen=True)
 class LegSpec:
@@ -370,7 +376,14 @@ def visual_summary(leg_dir: Path, out_dir: Path) -> dict[str, Any]:
     flv = received_flv(leg_dir)
     leg_name = leg_dir.name.lower()
     visual_alias = "baseline" if "baseline" in leg_name else "qaccess"
-    metrics = parse_visual_metrics([leg_dir, out_dir / "visual" / visual_alias, out_dir / visual_alias])
+    metrics = parse_visual_metrics(
+        [
+            leg_dir,
+            out_dir / "visual" / leg_dir.name,
+            out_dir / "visual" / visual_alias,
+            out_dir / visual_alias,
+        ]
+    )
     available = [name.upper() for name in ("ssim", "psnr", "vmaf") if name in metrics]
     return {
         "received_flv_exists": "yes" if flv else "no",
@@ -431,7 +444,28 @@ def save_no_data_plot(path: Path, title: str, message: str) -> None:
 
 
 def plot_file(profile: str, key: str) -> str:
-    if profile == "Fig.7-like":
+    if profile == "fig7_behavior":
+        names = {
+            "throughput": "fig7_1_throughput_over_time.png",
+            "per_path": "fig7_2_per_path_throughput_over_time.png",
+            "profile": "fig7_3_bandwidth_or_capacity_profile.png",
+            "controller": "fig7_4_utility_gain_backoff_over_time.png",
+        }
+    elif profile == "fig8_behavior":
+        names = {
+            "throughput": "fig8_1_throughput_over_time.png",
+            "delay_loss": "fig8_2_delay_loss_over_time.png",
+            "controller": "fig8_3_utility_penalty_backoff_over_time.png",
+            "per_path": "fig8_4_per_path_throughput_over_time.png",
+        }
+    elif profile == "qoe_live":
+        names = {
+            "rebuffering": "qoe_1_rebuffering_candidate_duration.png",
+            "startup": "qoe_2_startup_latency_proxy.png",
+            "stream_delay": "qoe_3_average_stream_delay_proxy.png",
+            "visual": "qoe_4_visual_fidelity.png",
+        }
+    elif profile == "Fig.7-like":
         names = {
             "throughput": "fig7_1_throughput_over_time.png",
             "rebuffering": "fig7_2_rebuffering_candidate_duration.png",
@@ -480,6 +514,69 @@ def plot_throughput(profile: str, specs: list[LegSpec], out_dir: Path, out_path:
     ax.set_ylabel("Throughput (Mbps)")
     ax.grid(True, alpha=0.25)
     ax.legend()
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def plot_per_path_throughput(profile: str, specs: list[LegSpec], out_path: Path) -> None:
+    ensure_plotting()
+    fig, axes = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+    plotted = False
+    session = None
+    for spec in specs:
+        if spec.profile != profile:
+            continue
+        session = spec.session
+        for stem, style in (("pathA", "-"), ("pathB", "--")):
+            series = read_throughput_series(spec.leg_dir, stem)
+            if not series:
+                continue
+            plotted = True
+            ax = axes[0] if spec.utility_mode == "off" else axes[1]
+            ax.plot(
+                [t for t, _ in series],
+                [y for _, y in series],
+                linestyle=style,
+                label=f"{spec.label} {stem}",
+            )
+    if not plotted:
+        save_no_data_plot(out_path, f"{profile} Per-path Throughput Timeline", "No per-path throughput CSV was found.")
+        return
+    for ax in axes:
+        ax.set_ylabel("Throughput (Mbps)")
+        ax.grid(True, alpha=0.25)
+        ax.legend()
+        for t, label in profile_step_times(session or specs[0].session, profile):
+            ax.axvline(t, color="0.35", linestyle="--", linewidth=1)
+            if ax is axes[0]:
+                ax.text(t, ax.get_ylim()[1], label, rotation=90, va="top", ha="right", fontsize=8, color="0.25")
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(f"{profile} Per-path Throughput Timeline")
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180)
+    plt.close(fig)
+
+
+def plot_profile_markers(profile: str, specs: list[LegSpec], out_path: Path) -> None:
+    ensure_plotting()
+    session = next((spec.session for spec in specs if spec.profile == profile), None)
+    if session is None:
+        save_no_data_plot(out_path, f"{profile} Network Profile", "No selected session was found.")
+        return
+    steps = profile_step_times(session, profile)
+    if not steps:
+        save_no_data_plot(out_path, f"{profile} Network Profile", "No profile step markers were found.")
+        return
+    fig, ax = plt.subplots(figsize=(8, 2.8))
+    ax.hlines(1, 0, max(t for t, _ in steps) + 30, color="0.75")
+    for t, label in steps:
+        ax.axvline(t, color="#1f77b4", linestyle="--", linewidth=1.5)
+        ax.text(t, 1.05, label, rotation=90, va="bottom", ha="right", fontsize=9)
+    ax.set_ylim(0.8, 1.45)
+    ax.set_yticks([])
+    ax.set_xlabel("Time (s)")
+    ax.set_title(f"{profile} Bandwidth/Capacity Profile Markers")
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)
@@ -673,6 +770,9 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "ssim": visual["ssim"],
         "psnr": visual["psnr"],
         "vmaf": visual["vmaf"],
+        "ssim_avg": visual["ssim"],
+        "psnr_avg": visual["psnr"],
+        "vmaf_mean": visual["vmaf"],
         "p95_frame_gap_ms": qoe.get("p95_frame_gap_ms", ""),
         "max_frame_gap_ms": qoe.get("max_frame_gap_ms", ""),
         "average_throughput_mbps": fmt(average_throughput_mbps(spec.leg_dir, common_end_s)),
@@ -691,11 +791,31 @@ def combined_row(spec: LegSpec, qoe: dict[str, Any], out_dir: Path, common_end_s
         "received_flv_path": visual["received_flv_path"],
         "common_window_end_s": fmt(common_end_s),
         "qoe_notes": qoe.get("qoe_notes", ""),
+        "status": "ok" if qoe.get("qoe_events_available") == "yes" or visual["received_flv_exists"] == "yes" else "partial",
+        "missing_inputs": qoe.get("qoe_notes", ""),
     }
 
 
-def write_readme(out_dir: Path) -> None:
-    text = """# Final evaluation logic
+def write_readme(out_dir: Path, package_profile: str) -> None:
+    if package_profile == "fig7_behavior":
+        profile_text = """This profile validates bandwidth/capacity adaptation.
+It is not the main QoE evaluation. Figures are time-series for throughput,
+path usage, and controller behaviour."""
+    elif package_profile == "fig8_behavior":
+        profile_text = """This profile validates delay/loss deterioration adaptation.
+It is not the main QoE evaluation. Figures are time-series for throughput,
+delay/loss, retransmission, and controller behaviour."""
+    else:
+        profile_text = """This profile is the final live-streaming QoE proxy evaluation.
+Both baseline and Q-ACCeSS-T use MPQUIC transport. The experimental variable is
+utility mode: off vs on."""
+    text = f"""# Evaluation logic
+
+## Package profile
+
+`{package_profile}`: {profile_text}
+
+## Core comparison
 
 This evaluation is a controlled emulation comparison. Both variants use MPQUIC
 as the transport. The experiment variable is the utility mode:
@@ -723,10 +843,11 @@ reported metrics are named as observable proxies:
   received FLV files are available. Strict aSSIM is not reported unless a
   dedicated aSSIM formula is implemented.
 
-QoE summary figures use utility mode/run type on the x-axis, not time. Time is
-used only for time-series figures such as throughput, delay/loss, and
-utility/gain/backoff. `p95_frame_gap_ms` and `max_frame_gap_ms` are supporting
-gap-severity metrics and are not used as primary QoE figures.
+QoE summary figures, when generated, use utility mode/run type on the x-axis,
+not time. Time is used only for time-series figures such as throughput,
+delay/loss, and utility/gain/backoff. `p95_frame_gap_ms`, `max_frame_gap_ms`,
+and `p95_stream_delay_ms` are supporting gap-severity metrics and are not used
+as primary QoE figures.
 """
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "README_evaluation_logic.md").write_text(text, encoding="utf-8")
@@ -757,7 +878,7 @@ def file_exists_for_both_legs(specs: list[LegSpec], profile: str, patterns: list
     return (not missing, "; ".join(missing))
 
 
-def build_figure_mapping(specs: list[LegSpec], out_dir: Path) -> list[dict[str, Any]]:
+def build_figure_mapping(specs: list[LegSpec], out_dir: Path, package_profile: str) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
 
     def add(profile: str, figure: str, required: str, columns: str, produced_by: str, output_name: str, patterns: list[str]) -> None:
@@ -775,70 +896,52 @@ def build_figure_mapping(specs: list[LegSpec], out_dir: Path) -> list[dict[str, 
             }
         )
 
-    if profile_has_data(specs, "Fig.7-like"):
+    if package_profile == "fig7_behavior" and profile_has_data(specs, "Fig.7-like"):
         add(
             "Fig.7-like",
             "Fig7-1 Throughput over time",
             "throughput_all_down.csv",
             "elapsed_s, throughput_mbps",
             "scripts/mininet/mp_topo.py -> scripts/analyze/pcap_throughput.py",
-            plot_file("Fig.7-like", "throughput"),
+            plot_file("fig7_behavior", "throughput"),
             ["throughput_all_down.csv"],
         )
         add(
             "Fig.7-like",
-            "Fig7-2 Re-buffering candidate duration",
-            "qoe/qoe_events_*.csv; qoe_summary.csv",
-            "total_rebuffering_duration_ms renamed to rebuffering_candidate_duration_ms",
-            "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.7-like", "rebuffering"),
-            ["qoe/qoe_events_*.csv"],
+            "Fig7-2 Per-path throughput over time",
+            "throughput_pathA_down.csv; throughput_pathB_down.csv",
+            "elapsed_s, throughput_mbps",
+            "scripts/mininet/mp_topo.py -> scripts/analyze/pcap_throughput.py",
+            plot_file("fig7_behavior", "per_path"),
+            ["throughput_pathA_down.csv", "throughput_pathB_down.csv"],
         )
         add(
             "Fig.7-like",
-            "Fig7-3 Start-up latency proxy",
-            "qoe/qoe_events_*.csv; qoe_summary.csv",
-            "startup_latency_ms",
-            "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.7-like", "startup"),
-            ["qoe/qoe_events_*.csv"],
+            "Fig7-3 Bandwidth/capacity profile markers",
+            "experiment_metadata.json; profile env file",
+            "profile step timestamps",
+            "scripts/mininet/run_qaccess_t_fig7_baseline_vs_dynamic_hybrid.sh",
+            plot_file("fig7_behavior", "profile"),
+            ["tc_deterioration.log"],
         )
         add(
             "Fig.7-like",
-            "Fig7-4 Average stream delay proxy",
-            "qoe/qoe_events_*.csv; qoe_summary.csv",
-            "avg_stream_delay_ms",
-            "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.7-like", "stream_delay"),
-            ["qoe/qoe_events_*.csv"],
-        )
-        add(
-            "Fig.7-like",
-            "Fig7-5 Visual fidelity",
-            "output_*.flv; visual/*/(ssim.log, psnr.log, vmaf.json)",
-            "SSIM All; PSNR average; VMAF mean",
-            "scripts/analyze/visual_fidelity_ffmpeg.sh",
-            plot_file("Fig.7-like", "visual"),
-            ["output_*.flv"],
-        )
-        add(
-            "Fig.7-like",
-            "Fig7-6 Utility / gain timeline",
+            "Fig7-4 Utility / gain / backoff over time",
             "control_law_diagnostics.csv",
             "elapsed_s, throughput_reward_term_mean, gain_applied_mean, retention_applied_mean",
             "scripts/analyze/finalize_control_law_leg.py",
-            plot_file("Fig.7-like", "controller"),
+            plot_file("fig7_behavior", "controller"),
             ["control_law_diagnostics.csv"],
         )
 
-    if profile_has_data(specs, "Fig.8-like"):
+    if package_profile == "fig8_behavior" and profile_has_data(specs, "Fig.8-like"):
         add(
             "Fig.8-like",
             "Fig8-1 Throughput over time",
             "throughput_all_down.csv",
             "elapsed_s, throughput_mbps",
             "scripts/mininet/mp_topo.py -> scripts/analyze/pcap_throughput.py",
-            plot_file("Fig.8-like", "throughput"),
+            plot_file("fig8_behavior", "throughput"),
             ["throughput_all_down.csv"],
         )
         add(
@@ -847,7 +950,7 @@ def build_figure_mapping(specs: list[LegSpec], out_dir: Path) -> list[dict[str, 
             "control_law_diagnostics.csv",
             "elapsed_s, owd_ms_mean, loss_rate_mean, retrans_bytes_delta_sum",
             "scripts/analyze/finalize_control_law_leg.py",
-            plot_file("Fig.8-like", "delay_loss"),
+            plot_file("fig8_behavior", "delay_loss"),
             ["control_law_diagnostics.csv"],
         )
         add(
@@ -856,43 +959,54 @@ def build_figure_mapping(specs: list[LegSpec], out_dir: Path) -> list[dict[str, 
             "control_law_diagnostics.csv",
             "elapsed_s, throughput_reward_term_mean, loss_penalty_term_mean, delay_penalty_term_mean, gain_applied_mean, retention_applied_mean",
             "scripts/analyze/finalize_control_law_leg.py",
-            plot_file("Fig.8-like", "controller"),
+            plot_file("fig8_behavior", "controller"),
             ["control_law_diagnostics.csv"],
         )
         add(
             "Fig.8-like",
-            "Fig8-4 Re-buffering candidate duration",
+            "Fig8-4 Per-path throughput over time",
+            "throughput_pathA_down.csv; throughput_pathB_down.csv",
+            "elapsed_s, throughput_mbps",
+            "scripts/mininet/mp_topo.py -> scripts/analyze/pcap_throughput.py",
+            plot_file("fig8_behavior", "per_path"),
+            ["throughput_pathA_down.csv", "throughput_pathB_down.csv"],
+        )
+
+    if package_profile == "qoe_live" and profile_has_data(specs, "Fig.8-like"):
+        add(
+            "Fig.8-like",
+            "QoE-1 Re-buffering candidate duration",
             "qoe/qoe_events_*.csv; qoe_summary.csv",
             "total_rebuffering_duration_ms renamed to rebuffering_candidate_duration_ms",
             "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.8-like", "rebuffering"),
+            plot_file("qoe_live", "rebuffering"),
             ["qoe/qoe_events_*.csv"],
         )
         add(
             "Fig.8-like",
-            "Fig8-5 Start-up latency proxy",
+            "QoE-2 Start-up latency proxy",
             "qoe/qoe_events_*.csv; qoe_summary.csv",
             "startup_latency_ms",
             "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.8-like", "startup"),
+            plot_file("qoe_live", "startup"),
             ["qoe/qoe_events_*.csv"],
         )
         add(
             "Fig.8-like",
-            "Fig8-6 Average stream delay proxy",
+            "QoE-3 Average stream delay proxy",
             "qoe/qoe_events_*.csv; qoe_summary.csv",
             "avg_stream_delay_ms",
             "scripts/analyze/qoe_from_events.py",
-            plot_file("Fig.8-like", "stream_delay"),
+            plot_file("qoe_live", "stream_delay"),
             ["qoe/qoe_events_*.csv"],
         )
         add(
             "Fig.8-like",
-            "Fig8-7 Visual fidelity",
+            "QoE-4 Visual fidelity",
             "output_*.flv; visual/*/(ssim.log, psnr.log, vmaf.json)",
             "SSIM All; PSNR average; VMAF mean",
             "scripts/analyze/visual_fidelity_ffmpeg.sh",
-            plot_file("Fig.8-like", "visual"),
+            plot_file("qoe_live", "visual"),
             ["output_*.flv"],
         )
     return rows
@@ -943,13 +1057,14 @@ def build(args: argparse.Namespace) -> None:
     plots_dir = out_dir / "plots"
     out_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+    package_profile = args.package_profile
 
     if args.fig7_session or args.fig8_session:
         fig7_session = Path(args.fig7_session) if args.fig7_session else None
         fig8_session = Path(args.fig8_session) if args.fig8_session else None
     else:
-        fig7_session = latest_session("session_fig7_capacity_hybrid_*")
-        fig8_session = latest_session("session_combined_deterioration_*")
+        fig7_session = latest_session("session_fig7_capacity_hybrid_*") if package_profile == "fig7_behavior" else None
+        fig8_session = latest_session("session_combined_deterioration_*") if package_profile in {"fig8_behavior", "qoe_live"} else None
     specs = build_leg_specs(fig7_session, fig8_session)
     if not specs:
         raise SystemExit("No usable Fig.7/Fig.8 legs were found.")
@@ -1014,6 +1129,9 @@ def build(args: argparse.Namespace) -> None:
                 "ssim": row["ssim"],
                 "psnr": row["psnr"],
                 "vmaf": row["vmaf"],
+                "ssim_avg": row["ssim_avg"],
+                "psnr_avg": row["psnr_avg"],
+                "vmaf_mean": row["vmaf_mean"],
                 "received_flv_path": row["received_flv_path"],
             }
         )
@@ -1032,6 +1150,9 @@ def build(args: argparse.Namespace) -> None:
         "ssim",
         "psnr",
         "vmaf",
+        "ssim_avg",
+        "psnr_avg",
+        "vmaf_mean",
         "p95_frame_gap_ms",
         "max_frame_gap_ms",
         "average_throughput_mbps",
@@ -1043,21 +1164,24 @@ def build(args: argparse.Namespace) -> None:
         "gain_changed",
         "backoff_changed",
         "gain_backoff_changed",
-        "p95_stream_delay_proxy_ms",
+        "p95_stream_delay_ms",
         "delivery_gap_event_count",
         "delivery_gap_ratio",
         "qoe_events_available",
         "received_flv_exists",
         "common_window_end_s",
-        "qoe_notes",
+        "status",
+        "missing_inputs",
     ]
+    for row in rows:
+        row["p95_stream_delay_ms"] = row.get("p95_stream_delay_proxy_ms", "")
     write_csv(out_dir / "final_eval_combined_table.csv", rows, combined_fields)
     write_csv(out_dir / "qoe_proxy_summary.csv", qoe_rows, list(qoe_rows[0].keys()))
     write_csv(out_dir / "transport_summary.csv", transport_rows, list(transport_rows[0].keys()))
     write_csv(out_dir / "throughput_summary.csv", transport_rows, list(transport_rows[0].keys()))
     write_csv(out_dir / "controller_activation_summary.csv", controller_rows, list(controller_rows[0].keys()))
     write_csv(out_dir / "visual_quality_summary.csv", visual_rows, list(visual_rows[0].keys()))
-    write_readme(out_dir)
+    write_readme(out_dir, package_profile)
 
     run_inventory = [
         {
@@ -1071,7 +1195,7 @@ def build(args: argparse.Namespace) -> None:
         for spec in specs
     ]
     write_csv(out_dir / "run_inventory.csv", run_inventory, list(run_inventory[0].keys()))
-    mapping_rows = build_figure_mapping(specs, out_dir)
+    mapping_rows = build_figure_mapping(specs, out_dir, package_profile)
     write_csv(
         out_dir / "figure_data_mapping.csv",
         mapping_rows,
@@ -1089,37 +1213,46 @@ def build(args: argparse.Namespace) -> None:
     write_audit_report(out_dir, specs, mapping_rows)
 
     if not args.no_plots:
-        for profile in sorted({spec.profile for spec in specs}):
-            plot_throughput(profile, specs, plots_dir, plots_dir / plot_file(profile, "throughput"))
+        if package_profile == "fig7_behavior":
+            profile = "Fig.7-like"
+            plot_throughput(profile, specs, plots_dir, plots_dir / plot_file("fig7_behavior", "throughput"))
+            plot_per_path_throughput(profile, specs, plots_dir / plot_file("fig7_behavior", "per_path"))
+            plot_profile_markers(profile, specs, plots_dir / plot_file("fig7_behavior", "profile"))
+            plot_controller(profile, specs, plots_dir, plots_dir / plot_file("fig7_behavior", "controller"))
+        elif package_profile == "fig8_behavior":
+            profile = "Fig.8-like"
+            plot_throughput(profile, specs, plots_dir, plots_dir / plot_file("fig8_behavior", "throughput"))
+            plot_delay_loss(profile, specs, plots_dir, plots_dir / plot_file("fig8_behavior", "delay_loss"))
+            plot_controller(profile, specs, plots_dir, plots_dir / plot_file("fig8_behavior", "controller"))
+            plot_per_path_throughput(profile, specs, plots_dir / plot_file("fig8_behavior", "per_path"))
+        elif package_profile == "qoe_live":
+            profile = "Fig.8-like"
             bar_plot(
                 rows,
                 profile,
                 "rebuffering_candidate_duration_ms",
-                f"{profile} Re-buffering Candidate Duration (Server-side Proxy)",
+                "Re-buffering Candidate Duration (Server-side Proxy)",
                 "Server-side delivery-gap excess (ms)",
-                plots_dir / plot_file(profile, "rebuffering"),
+                plots_dir / plot_file("qoe_live", "rebuffering"),
             )
             bar_plot(
                 rows,
                 profile,
                 "startup_latency_proxy_ms",
-                f"{profile} Start-up Latency Proxy (Pusher to Server First Video Receive)",
+                "Start-up Latency Proxy",
                 "Latency proxy (ms)",
-                plots_dir / plot_file(profile, "startup"),
+                plots_dir / plot_file("qoe_live", "startup"),
             )
             bar_plot(
                 rows,
                 profile,
                 "avg_stream_delay_proxy_ms",
-                f"{profile} Average Stream Delay Proxy (Server-side)",
+                "Average Stream Delay Proxy (Server-side)",
                 "Average stream delay proxy (ms)",
-                plots_dir / plot_file(profile, "stream_delay"),
+                plots_dir / plot_file("qoe_live", "stream_delay"),
             )
-            visual_plot(rows, profile, plots_dir / plot_file(profile, "visual"))
-            plot_controller(profile, specs, plots_dir, plots_dir / plot_file(profile, "controller"))
-            if profile == "Fig.8-like":
-                plot_delay_loss(profile, specs, plots_dir, plots_dir / plot_file(profile, "delay_loss"))
-        supporting_gap_plot(rows, plots_dir)
+            visual_plot(rows, profile, plots_dir / plot_file("qoe_live", "visual"))
+            supporting_gap_plot(rows, plots_dir)
 
     print(f"[final-eval] wrote {out_dir}")
     print(f"[final-eval] combined table: {out_dir / 'final_eval_combined_table.csv'}")
@@ -1128,6 +1261,12 @@ def build(args: argparse.Namespace) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build final Q-ACCeSS-T evaluation tables and figures.")
+    parser.add_argument(
+        "--package-profile",
+        choices=["fig7_behavior", "fig8_behavior", "qoe_live"],
+        default="qoe_live",
+        help="Controls which final evaluation package and plot set is generated.",
+    )
     parser.add_argument("--fig7-session", help="Path to a Fig.7-like session directory.")
     parser.add_argument("--fig8-session", help="Path to a Fig.8-like combined deterioration session directory.")
     parser.add_argument("--output", default=str(REPO_ROOT / "derived" / "final_eval"), help="Output directory.")
