@@ -641,6 +641,7 @@ def run_experiment(net, args):
     server_cmd = (
         f"QACCESS_PHASE2_ENABLED={int(server_phase2_enabled)} "
         f"QACCESS_PHASE2_OWNER=0 QACCESS_ENDPOINT_ROLE=server_listener "
+        f"QACCESS_UTILITY_MODE={shlex.quote(um)} "
         f"QACCESS_PHASE2_STATE_DIR={shlex.quote(phase2_state_dir)} "
         f"QACCESS_EXPERIMENT_RUN_ID={shlex.quote(run_id)} {qoe_env_for('server')} {env_prefix} "
         f"{server_bin} -protocol=quic -au=false"
