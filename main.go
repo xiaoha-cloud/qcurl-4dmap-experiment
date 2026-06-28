@@ -25,7 +25,7 @@ func main() {
 		buffer      = flag.Int("buffer", 102400, "buffer size in byte")
 		rtmpType    = flag.Bool("type", false, "whether to pull or publish,true is pull")
 		skip        = flag.Bool("skip", true, "whether a client verifies the server's certificate chain and host name")
-		utilityMode = flag.String("utility-mode", "qaccess_t", "Q-ACCeSS utility mode: baseline/off, qaccess_collect, or qaccess_t")
+		utilityMode = flag.String("utility-mode", "qaccess_t", "Q-ACCeSS utility mode: baseline/off, qaccess_collect, qaccess_t, qaccess_d, or qaccess_l")
 		logControl  = flag.Bool("log-control", false, "emit [control] lines on ACK/LOSS (cwnd before/after); very verbose")
 		runID       = flag.String("run-id", "", "experiment run id for [meta] (default: $RUN_ID)")
 		expInput    = flag.String("experiment-input", "", "input file label for [meta] (default: -file value)")

@@ -21,6 +21,12 @@ const (
 	// ModeQAccessT: Q-ACCeSS-T — RFR-optimized (alpha,beta,gamma) at runtime (JSON from Python).
 	ModeQAccessT UtilityMode = "qaccess_t"
 
+	// ModeQAccessD: delay-aware runtime model selecting the shared Q-ACCeSS coefficients.
+	ModeQAccessD UtilityMode = "qaccess_d"
+
+	// ModeQAccessL: loss-aware runtime model selecting the shared Q-ACCeSS coefficients.
+	ModeQAccessL UtilityMode = "qaccess_l"
+
 	// ModeQAccessCollect: generic Q-ACCeSS data collection (probes alpha/beta/gamma, exports CSV).
 	ModeQAccessCollect UtilityMode = "qaccess_collect"
 )
@@ -134,6 +140,17 @@ func NewUtilityController(mode UtilityMode, runID string) *UtilityController {
 	return newUtilityController(mode, runID, loadQAccessPhase2Config())
 }
 
+func isQAccessRuntimeMode(mode UtilityMode) bool {
+	return mode == ModeQAccessT || mode == ModeQAccessD || mode == ModeQAccessL
+}
+
+func (uc *UtilityController) logPrefix() string {
+	if uc == nil || !isQAccessRuntimeMode(uc.Mode) {
+		return "qaccess"
+	}
+	return string(uc.Mode)
+}
+
 func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Config) *UtilityController {
 	uc := &UtilityController{
 		Mode:            mode,
@@ -148,25 +165,25 @@ func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Co
 		prevAppliedGain: make(map[protocol.PathID]float64),
 	}
 	switch mode {
-	case ModeQAccessT:
+	case ModeQAccessT, ModeQAccessD, ModeQAccessL:
 		uc.phase2 = phase2
 		jsonPath := uc.phase2.coeffJSONPath
 		// Non-owners keep the same startup control coefficients, but never reload
 		// or mutate Phase 2 runtime state after initialization.
 		uc.reloadCoefficientsFromDisk()
 		c := uc.getCoefficients()
-		utils.Infof("[qaccess_t_owner] pid=%d endpoint_role=%s phase2_owner=%t mutation_allowed=%t runtime_export=%t trigger_update=%t run_id=%s",
-			os.Getpid(), uc.phase2.endpointRole, uc.phase2.owner, uc.phase2MutationAllowed(),
+		utils.Infof("[%s_owner] pid=%d endpoint_role=%s phase2_owner=%t mutation_allowed=%t runtime_export=%t trigger_update=%t run_id=%s",
+			uc.logPrefix(), os.Getpid(), uc.phase2.endpointRole, uc.phase2.owner, uc.phase2MutationAllowed(),
 			uc.phase2.runtimeExport && uc.phase2.owner, uc.phase2.triggerUpdate && uc.phase2.owner, runID)
-		utils.Infof("[qaccess_t] coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s json=%s control_law=%s",
-			c.Alpha, c.Beta, c.Gamma, c.Source, jsonPath, uc.controlLawMode)
+		utils.Infof("[%s] coefficients alpha=%.2f beta=%.2f gamma=%.2f source=%s json=%s control_law=%s",
+			uc.logPrefix(), c.Alpha, c.Beta, c.Gamma, c.Source, jsonPath, uc.controlLawMode)
 		if uc.phase2.runtimeExport && uc.phase2MutationAllowed() {
 			uc.runtimeExporter = newQAccessSampleExporter(
 				uc.phase2.runtimeSamples, runID, uc.phase2.runtimeBufferMax,
 			)
 			if err := uc.runtimeExporter.ensureOpen(); err != nil {
-				utils.Infof("[qaccess_t] runtime sample export open failed path=%s err=%v",
-					uc.phase2.runtimeSamples, err)
+				utils.Infof("[%s] runtime sample export open failed path=%s err=%v",
+					uc.logPrefix(), uc.phase2.runtimeSamples, err)
 			}
 		}
 	case ModeQAccessCollect:
@@ -187,7 +204,7 @@ func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.getC
 // BeginMonitorRound resets per-tick state (call once per scheduler monitor cycle).
 func (uc *UtilityController) BeginMonitorRound() {
 	now := time.Now()
-	if uc.Mode == ModeQAccessT {
+	if isQAccessRuntimeMode(uc.Mode) {
 		if uc.phase2MutationAllowed() {
 			uc.finalizeMonitorRoundThroughput()
 			uc.maybeReloadCoefficients(now)
@@ -305,7 +322,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 
 	active := PathMetricsActive(pm)
 
-	if uc.Mode == ModeQAccessT {
+	if isQAccessRuntimeMode(uc.Mode) {
 		uc.noteActivePathThroughput(pm)
 	}
 
@@ -333,13 +350,13 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 	var diag ControlLawDiagnostics
 
 	switch uc.Mode {
-	case ModeQAccessT, ModeQAccessCollect:
+	case ModeQAccessT, ModeQAccessD, ModeQAccessL, ModeQAccessCollect:
 		if uc.Mode == ModeQAccessCollect {
 			alpha, beta, gamma = uc.collectCoefficients()
 		}
 		if active {
 			u = qaccessUtility(gTotal, normD, normL, alpha, beta, gamma)
-			if uc.Mode == ModeQAccessT {
+			if isQAccessRuntimeMode(uc.Mode) {
 				gain, backoff, diag = uc.qaccessGainBackoffForPath(pm.PathID, gTotal, normD, normL, alpha, beta, gamma)
 			} else {
 				gain, backoff = uc.qaccessGainBackoff(gTotal, normD, normL, alpha, beta, gamma)
@@ -391,7 +408,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		row["phase2_state_dir"] = uc.phase2.stateDir
 		row["sender_bytes_total"] = strconv.FormatUint(pm.SenderBytesTotal, 10)
 		if err := uc.runtimeExporter.recordPending(row, pm.PathID, pm.BWbps); err != nil {
-			utils.Infof("[qaccess_t] runtime sample export error path=%v: %v", pm.PathID, err)
+			utils.Infof("[%s] runtime sample export error path=%v: %v", uc.logPrefix(), pm.PathID, err)
 		}
 	}
 

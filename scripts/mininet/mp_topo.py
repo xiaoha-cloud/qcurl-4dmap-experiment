@@ -978,7 +978,7 @@ def main():
     )
     parser.add_argument(
         "--utility-mode", default="qaccess_t",
-        help="Q-ACCeSS -utility-mode: baseline/off, qaccess_collect, or qaccess_t",
+        help="Q-ACCeSS -utility-mode: baseline/off, qaccess_collect, qaccess_t, qaccess_d, or qaccess_l",
     )
     parser.add_argument(
         "--log-control", action="store_true",

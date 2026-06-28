@@ -18,6 +18,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = REPO / "derived/qaccess_t_qserver_sender/sweeps"
 PROFILE = REPO / "scripts/mininet/combined_deterioration_profile_90_150.env"
+PROFILE_OPTIONS = {
+    "combined": ("--dynamic-deterioration-profile", PROFILE),
+    "delay": ("--dynamic-delay-profile", REPO / "scripts/mininet/delay_profile.pathB_200s.env"),
+    "loss": ("--dynamic-loss-profile", REPO / "scripts/mininet/loss_profile.pathB_200s.env"),
+}
 GRID = tuple(itertools.product((0.6, 0.7, 0.8), (0.1, 0.2, 0.3), (0.1, 0.2, 0.3)))
 SMOKE = ((0.6, 0.3, 0.1), (0.7, 0.3, 0.2))
 
@@ -88,6 +93,9 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--timeout", type=int, default=220)
     parser.add_argument("--input-flv", type=Path, default=Path("/home/mininet/Videos/push_input.flv"))
+    parser.add_argument("--profile-kind", choices=sorted(PROFILE_OPTIONS), default="combined")
+    parser.add_argument("--profile", type=Path)
+    parser.add_argument("--scenario", choices=("fig7", "fig8"))
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0 and not args.check_only:
@@ -97,8 +105,11 @@ def main() -> None:
     tuples = list(SMOKE if args.smoke else (parse_tuples_file(args.tuples_file) if args.tuples_file else GRID))
     if not args.input_flv.is_file():
         parser.error(f"missing input media: {args.input_flv}")
-    if not PROFILE.is_file():
-        parser.error(f"missing deterioration profile: {PROFILE}")
+    profile_flag, default_profile = PROFILE_OPTIONS[args.profile_kind]
+    profile = (args.profile or default_profile).resolve()
+    scenario = args.scenario or ("fig8" if args.profile_kind == "combined" else "fig7")
+    if not profile.is_file():
+        parser.error(f"missing deterioration profile: {profile}")
     print(f"[qserver-sweep] tuples={len(tuples)} complete_grid={set(tuples) == set(GRID)} shadow_only=true")
     if args.check_only:
         for values in tuples:
@@ -128,9 +139,9 @@ def main() -> None:
             "KEEP_PCAP": "0", "SAVE_OUTPUT_FLV": "0",
         })
         cmd = [sys.executable, str(REPO / "scripts/mininet/mp_topo.py"), "--run-exp",
-               "--scenario", "fig8", "--utility-mode", "qaccess_t", "--timeout", str(args.timeout),
+               "--scenario", scenario, "--utility-mode", "qaccess_t", "--timeout", str(args.timeout),
                "--log-parent", str(session), "--run-label", name,
-               "--dynamic-deterioration-profile", str(PROFILE), "--input-flv", str(args.input_flv),
+               profile_flag, str(profile), "--input-flv", str(args.input_flv),
                "--disable-logs"]
         print(f"[qserver-sweep] {index}/{len(tuples)} {name}", flush=True)
         subprocess.run(cmd, cwd=REPO, env=env, check=True)
@@ -156,7 +167,9 @@ def main() -> None:
             "alpha": values[0], "beta": values[1], "gamma": values[2], "run_id": run_id,
             "endpoint_role": "server_downlink_sender", "owner_pid": owner.get("pid"),
             "phase2_owner": True, "phase2_state_dir": str(state_dir), "execution_mode": "fixed_shadow_collection",
-            "active_updates_enabled": False, "worker_used": False, "deterioration_profile": str(PROFILE),
+            "active_updates_enabled": False, "worker_used": False, "deterioration_profile": str(profile),
+            "profile_kind": args.profile_kind,
+            "scenario": scenario,
             "deterioration_start_s": 90, "deterioration_end_s": 150,
             "impaired_interface": "h2-eth1", "intended_physical_path": "Path B / 10.0.2.x",
             "physical_path_mapping": {"10.0.1.x": "Path A", "10.0.2.x": "Path B"},

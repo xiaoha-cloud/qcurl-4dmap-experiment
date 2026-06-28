@@ -33,6 +33,8 @@ RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
 FINALIZE="$ROOT/scripts/mininet/finalize_experiment_leg.sh"
 PHASE2_STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived}"
 SCENARIO="${SCENARIO:-fig8}"
+CONTROLLER_VARIANT="${QACCESS_CONTROLLER_VARIANT:-qaccess_t}"
+PROFILE_KIND="${QACCESS_PROFILE_KIND:-combined}"
 DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile_90_150.env}"
 TIMEOUT="${TIMEOUT:-220}"
 POST_UPDATE_OBSERVE_SEC="${QACCESS_POST_UPDATE_OBSERVE_SEC:-15}"
@@ -52,6 +54,10 @@ COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}"
 GATE_BPS="${QACCESS_GATE_BPS:-${QACCESS_MIN_DELTA_GAIN_BPS:-500000}}"
 GATE_MODE="${QACCESS_GATE_MODE:-absolute}"
 MIN_RELATIVE_GAIN="${QACCESS_MIN_RELATIVE_GAIN:-0.03}"
+MIN_OBJECTIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_IMPROVEMENT:-0}"
+SESSION_KIND="${QACCESS_SESSION_KIND:-combined_deterioration}"
+BASELINE_LABEL="${QACCESS_BASELINE_LABEL:-combined_baseline}"
+DYNAMIC_LABEL="${QACCESS_DYNAMIC_LABEL:-combined_${CONTROLLER_VARIANT}_dynamic}"
 
 resolve_repo_path() {
   local path="$1"
@@ -79,10 +85,17 @@ case "$GATE_MODE" in
   absolute|relative|hybrid) ;;
   *) echo "[error] QACCESS_GATE_MODE must be absolute, relative, or hybrid, got: $GATE_MODE" >&2; exit 2 ;;
 esac
-if [[ "$WORKER_TARGET_MODE" != "delta_bw_1s" ]]; then
-  echo "[error] this diagnostic runner requires target mode delta_bw_1s" >&2
+case "$CONTROLLER_VARIANT:$WORKER_TARGET_MODE" in
+  qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_l:delta_loss_1s) ;;
+  *)
+  echo "[error] incompatible controller/target: $CONTROLLER_VARIANT / $WORKER_TARGET_MODE" >&2
   exit 2
-fi
+  ;;
+esac
+case "$PROFILE_KIND" in
+  combined|delay|loss) ;;
+  *) echo "[error] QACCESS_PROFILE_KIND must be combined, delay, or loss" >&2; exit 2 ;;
+esac
 
 export KEEP_PCAP="${KEEP_PCAP:-0}"
 export SAVE_OUTPUT_FLV="${SAVE_OUTPUT_FLV:-0}"
@@ -97,6 +110,7 @@ WORKER_CMD=(
   --model "$WORKER_MODEL"
   --model-metadata "$WORKER_MODEL_METADATA"
   --target-mode "$WORKER_TARGET_MODE"
+  --controller-variant "$CONTROLLER_VARIANT"
   --request "$PHASE2_STATE_DIR/qaccess_update_request.json"
   --runtime-samples "$PHASE2_STATE_DIR/qaccess_runtime_samples.csv"
   --coeffs-out "$PHASE2_STATE_DIR/qaccess_t_runtime_coefficients.json"
@@ -105,6 +119,7 @@ WORKER_CMD=(
   --archive-dir "$PHASE2_STATE_DIR/qaccess_processed_buffers"
   --audit-csv "$PHASE2_STATE_DIR/qaccess_update_audit.csv"
   --min-delta-gain-bps "$GATE_BPS"
+  --min-objective-improvement "$MIN_OBJECTIVE_IMPROVEMENT"
   --gate-mode "$GATE_MODE"
   --min-relative-gain "$MIN_RELATIVE_GAIN"
   --min-sender-byte-delta "$MIN_SENDER_BYTE_DELTA"
@@ -118,14 +133,8 @@ WORKER_READY_TIMEOUT="${QACCESS_WORKER_READY_TIMEOUT:-30}"
 
 validate_profile() {
   [[ -f "$DETERIORATION_PROFILE" ]] || { echo "[error] missing deterioration profile: $DETERIORATION_PROFILE" >&2; return 1; }
-  awk '
-    $1 == "IFACE=h2-eth1" { iface=1 }
-    $1 == "0" && $2 == "20ms" && $3 == "0%" { first=1 }
-    $1 == "90" && $2 == "80ms" && $3 == "0.05%" { second=1 }
-    $1 == "150" && $2 == "20ms" && $3 == "0%" { third=1 }
-    END { exit !(iface && first && second && third) }
-  ' "$DETERIORATION_PROFILE" || {
-    echo "[error] profile does not contain the required 0/90/150 second schedule: $DETERIORATION_PROFILE" >&2
+  grep -q '^IFACE=h2-eth1$' "$DETERIORATION_PROFILE" || {
+    echo "[error] profile must target h2-eth1: $DETERIORATION_PROFILE" >&2
     return 1
   }
 }
@@ -138,6 +147,8 @@ check_configuration() {
   [[ -f "$WORKER_MODEL" ]] || { echo "[FAIL] model is missing: $WORKER_MODEL" >&2; return 1; }
   echo "[check] model_exists=true"
   echo "[check] requested_target_mode=$WORKER_TARGET_MODE"
+  echo "[check] controller_variant=$CONTROLLER_VARIANT"
+  echo "[check] profile_kind=$PROFILE_KIND"
   echo "[check] deterioration_profile=$DETERIORATION_PROFILE"
   validate_profile
   echo "[check] execution_mode=$EXECUTION_MODE"
@@ -150,6 +161,7 @@ check_configuration() {
     --model "$WORKER_MODEL" \
     --model-metadata "$WORKER_MODEL_METADATA" \
     --target-mode "$WORKER_TARGET_MODE" \
+    --controller-variant "$CONTROLLER_VARIANT" \
     --validate-model-only
   echo "[PASS] configuration is compatible; no Mininet, TC or runtime state was started"
 }
@@ -173,7 +185,7 @@ cd "$ROOT"
 mkdir -p derived logs_exp
 chmod +x scripts/mininet/tc_deterioration_steps.sh scripts/mininet/finalize_experiment_leg.sh 2>/dev/null || true
 
-SESSION_DIR="logs_exp/session_combined_deterioration_$(date +%Y%m%d_%H%M%S)"
+SESSION_DIR="logs_exp/session_${SESSION_KIND}_$(date +%Y%m%d_%H%M%S)"
 mkdir -p "$SESSION_DIR"
 echo "$SESSION_DIR" > "logs_exp/.last_session"
 SESSION_START="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -254,6 +266,7 @@ PY
     --model "$WORKER_MODEL" \
     --model-metadata "$WORKER_MODEL_METADATA" \
     --target-mode "$WORKER_TARGET_MODE" \
+    --controller-variant "$CONTROLLER_VARIANT" \
     --validate-model-only >>"$process_log" 2>&1
 }
 
@@ -369,8 +382,12 @@ run_one() {
   local -a cmd=(
     python3 "$MP" --run-exp --scenario "$SCENARIO" --utility-mode "$um"
     --timeout "$run_timeout" --log-parent "$SESSION_DIR" --run-label "$label"
-    --dynamic-deterioration-profile "$DETERIORATION_PROFILE"
   )
+  case "$PROFILE_KIND" in
+    combined) cmd+=(--dynamic-deterioration-profile "$DETERIORATION_PROFILE") ;;
+    delay) cmd+=(--dynamic-delay-profile "$DETERIORATION_PROFILE") ;;
+    loss) cmd+=(--dynamic-loss-profile "$DETERIORATION_PROFILE") ;;
+  esac
   [[ "$SAVE_VERBOSE_LOGS" == "1" ]] || cmd+=(--disable-logs)
   [[ -n "$INPUT_FLV" ]] && cmd+=(--input-flv "$INPUT_FLV")
   [[ "$LOG_CONTROL" == "1" ]] && cmd+=(--log-control)
@@ -392,11 +409,11 @@ preflight_worker_python "$(worker_process_log_file)"
 
 echo "[combined_deterioration] baseline leg (same deterioration profile, no qaccess, no worker)"
 QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
-run_one baseline combined_baseline "$TIMEOUT"
+run_one baseline "$BASELINE_LABEL" "$TIMEOUT"
 
 echo "[combined_deterioration] reset runtime + initialize coefficients from initial"
 QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
-COEFFS_BEFORE="$SESSION_DIR/combined_qaccess_t_dynamic_coeffs_before.json"
+COEFFS_BEFORE="$SESSION_DIR/${DYNAMIC_LABEL}_coeffs_before.json"
 cp "$RUNTIME_COEFFS" "$COEFFS_BEFORE"
 echo "[combined_deterioration] runtime coefficients BEFORE dynamic leg:"
 cat "$COEFFS_BEFORE"
@@ -407,7 +424,7 @@ start_worker
 if [[ "$EXECUTION_MODE" == "active" ]]; then
   echo "[combined_deterioration] active aggregate safety checks enabled; traffic-weighted aggregate controls updates"
 fi
-echo "[combined_deterioration] dynamic leg: qaccess_t + delta_bw_1s worker ($EXECUTION_MODE, gate_mode=$GATE_MODE absolute=${GATE_BPS}bps relative=$MIN_RELATIVE_GAIN)"
+echo "[combined_deterioration] dynamic leg: $CONTROLLER_VARIANT + $WORKER_TARGET_MODE worker ($EXECUTION_MODE, gate_mode=$GATE_MODE objective_threshold=$MIN_OBJECTIVE_IMPROVEMENT)"
 echo "[combined_deterioration] worker model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
 echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
 ACTIVE_DYNAMIC_TIMEOUT="$TIMEOUT"
@@ -415,7 +432,7 @@ if [[ "$EXECUTION_MODE" == "active" ]]; then
   ACTIVE_DYNAMIC_TIMEOUT=$((TIMEOUT + POST_UPDATE_OBSERVE_SEC))
   echo "[combined_deterioration] active post-update observe window=${POST_UPDATE_OBSERVE_SEC}s dynamic_timeout=${ACTIVE_DYNAMIC_TIMEOUT}s"
 fi
-run_one qaccess_t combined_qaccess_t_dynamic "$ACTIVE_DYNAMIC_TIMEOUT" \
+run_one "$CONTROLLER_VARIANT" "$DYNAMIC_LABEL" "$ACTIVE_DYNAMIC_TIMEOUT" \
   QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" \
   QACCESS_COEFFS_JSON="$RUNTIME_COEFFS" \
   QACCESS_COEFF_RELOAD=1 \
@@ -457,7 +474,7 @@ if [[ -f "$PHASE2_STATE_DIR/qaccess_owner_audit.jsonl" ]]; then
   cp "$PHASE2_STATE_DIR/qaccess_owner_audit.jsonl" "$SESSION_DIR/qaccess_owner_audit.jsonl"
 fi
 
-COEFFS_AFTER="$SESSION_DIR/combined_qaccess_t_dynamic_coeffs_after.json"
+COEFFS_AFTER="$SESSION_DIR/${DYNAMIC_LABEL}_coeffs_after.json"
 cp "$RUNTIME_COEFFS" "$COEFFS_AFTER"
 echo ""
 echo "[combined_deterioration] runtime coefficients AFTER dynamic leg:"
@@ -501,6 +518,13 @@ meta = {
     'model_path': '$WORKER_MODEL',
     'model_metadata_path': '$WORKER_MODEL_METADATA',
     'target_mode': '$WORKER_TARGET_MODE',
+    'controller_variant': '$CONTROLLER_VARIANT',
+    'profile_kind': '$PROFILE_KIND',
+    'target_semantics': {
+        'delta_bw_1s': 'per_path_future_bw_1s_minus_current_bw',
+        'delta_owd_1s': 'per_path_future_owd_1s_minus_current_owd',
+        'delta_loss_1s': 'per_path_future_loss_1s_minus_current_loss',
+    }.get('$WORKER_TARGET_MODE', ''),
     'gate_mode': '$GATE_MODE',
     'min_delta_gain_bps': float('$GATE_BPS'),
     'min_relative_gain': float('$MIN_RELATIVE_GAIN'),
@@ -517,7 +541,7 @@ meta = {
     'SAVE_OUTPUT_FLV': int('$SAVE_OUTPUT_FLV'),
     'legs': {},
 }
-for leg_name in ('combined_baseline', 'combined_qaccess_t_dynamic'):
+for leg_name in ('$BASELINE_LABEL', '$DYNAMIC_LABEL'):
     status_path = session / leg_name / 'leg_status.json'
     if status_path.is_file():
         meta['legs'][leg_name] = json.loads(status_path.read_text())
@@ -527,8 +551,8 @@ print('[combined_deterioration] wrote', session / 'experiment_metadata.json')
 
 echo ""
 echo "[combined_deterioration] session: $ROOT/$SESSION_DIR"
-echo "[combined_deterioration] baseline:  $SESSION_DIR/combined_baseline"
-echo "[combined_deterioration] dynamic:   $SESSION_DIR/combined_qaccess_t_dynamic"
+echo "[combined_deterioration] baseline:  $SESSION_DIR/$BASELINE_LABEL"
+echo "[combined_deterioration] dynamic:   $SESSION_DIR/$DYNAMIC_LABEL"
 echo "[combined_deterioration] worker log: $SESSION_DIR/worker.log"
 echo "[combined_deterioration] worker process log: $SESSION_DIR/worker_process.log"
 echo "[combined_deterioration] worker ready marker: $SESSION_DIR/worker_ready.json"

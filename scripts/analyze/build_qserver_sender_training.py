@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -12,6 +13,11 @@ import pandas as pd
 MEAN = ["bw_bps", "owd_ms", "delay_gradient_ms", "loss_rate", "cwnd_bytes", "inflight_bytes", "cwnd_room", "utility", "gain", "backoff"]
 SUM = ["lost_bytes_delta", "retrans_bytes_delta"]
 IDENTITY = ["endpoint_role", "producer_pid", "connection_id", "local_endpoint", "remote_endpoint"]
+TARGET_SPECS = {
+    "delta_bw_1s": ("bw_bps", "future_bw_1s", "per_path_future_bw_1s_minus_current_bw"),
+    "delta_owd_1s": ("owd_ms", "future_owd_1s", "per_path_future_owd_1s_minus_current_owd"),
+    "delta_loss_1s": ("loss_rate", "future_loss_1s", "per_path_future_loss_1s_minus_current_loss"),
+}
 
 
 def physical_path(endpoint: str) -> str:
@@ -22,19 +28,72 @@ def physical_path(endpoint: str) -> str:
     return "unknown"
 
 
-def model_metadata(df: pd.DataFrame, input_path: Path, model_path: Path, result: dict,
-                   feature_list: list[str], git_commit: str, partial: bool) -> dict:
+def model_metadata(
+    df: pd.DataFrame,
+    input_path: Path,
+    model_path: Path,
+    result: dict,
+    feature_list: list[str],
+    git_commit: str,
+    partial: bool,
+    *,
+    controller_variant: str = "qaccess_t",
+    target: str = "delta_bw_1s",
+) -> dict:
+    if target not in TARGET_SPECS:
+        raise ValueError(f"unsupported target {target!r}")
+    _, _, semantics = TARGET_SPECS[target]
     return {
         "schema_version": 1, "input_csv": str(input_path.resolve()), "rows": len(df), "n_samples": len(df),
         "endpoint_role_distribution": df.endpoint_role.value_counts().to_dict(),
         "coefficient_coverage": df.groupby(["alpha", "beta", "gamma"]).size().rename("rows").reset_index().to_dict("records"),
-        "feature_list": feature_list, "target": "delta_bw_1s",
-        "target_semantics": "per_path_future_bw_1s_minus_current_bw",
+        "controller_variant": controller_variant,
+        "worker_target_mode": target,
+        "feature_columns": feature_list,
+        "feature_list": feature_list,
+        "target": target,
+        "target_semantics": semantics,
+        "training_sessions": sorted(df.run_id.astype(str).unique().tolist()) if "run_id" in df else [],
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model_type": "RandomForestRegressor",
         "split_strategy": "GroupKFold by run_id; leave-one-coefficient-combination-out diagnostic",
         "model_path": str(model_path.resolve()), "model_out": str(model_path.resolve()), "metrics": result,
         "aggregate_active_ready": False, "aggregate_label_defined": False,
         "git_commit": git_commit, "partial_training_data": partial,
     }
+
+
+def add_future_delta_targets(
+    frame: pd.DataFrame,
+    group_columns: list[str],
+    *,
+    horizon_ms: int = 1000,
+    tolerance_ms: int = 500,
+) -> pd.DataFrame:
+    """Attach nearest per-path future values without crossing run/connection groups."""
+    pieces: list[pd.DataFrame] = []
+    for _, group in frame.groupby(group_columns, sort=False, dropna=False):
+        work = group.sort_values("timestamp_ms").copy()
+        timestamps = pd.to_numeric(work["timestamp_ms"], errors="coerce").to_numpy(dtype=float)
+        for target, (source, future, _) in TARGET_SPECS.items():
+            values = pd.to_numeric(work[source], errors="coerce").to_numpy(dtype=float)
+            future_values = np.full(len(work), np.nan)
+            for index, timestamp in enumerate(timestamps):
+                if not np.isfinite(timestamp):
+                    continue
+                wanted = timestamp + horizon_ms
+                pos = int(np.searchsorted(timestamps, wanted, side="left"))
+                candidates = [candidate for candidate in (pos - 1, pos) if candidate > index and candidate < len(work)]
+                if not candidates:
+                    continue
+                nearest = min(candidates, key=lambda candidate: abs(timestamps[candidate] - wanted))
+                if abs(timestamps[nearest] - wanted) <= tolerance_ms:
+                    future_values[index] = values[nearest]
+            work[future] = future_values
+            work[target] = work[future] - pd.to_numeric(work[source], errors="coerce")
+        work["relative_delta_bw_1s"] = work["delta_bw_1s"] / work["bw_bps"].clip(lower=1)
+        pieces.append(work)
+    return pd.concat(pieces, ignore_index=True) if pieces else frame.copy()
 
 
 def build_run(metadata_path: Path) -> pd.DataFrame:
@@ -69,9 +128,7 @@ def build_run(metadata_path: Path) -> pd.DataFrame:
     out = out.sort_values(label_group + ["time_s"])
     out["sender_byte_delta"] = out.groupby(label_group, sort=False).sender_bytes_total.diff().clip(lower=0).fillna(0)
     out["interval_sender_bytes"] = out.sender_byte_delta
-    out["future_bw_1s"] = out.groupby(label_group, sort=False).bw_bps.shift(-1)
-    out["delta_bw_1s"] = out.future_bw_1s - out.bw_bps
-    out["relative_delta_bw_1s"] = out.delta_bw_1s / out.bw_bps.clip(lower=1)
+    out = add_future_delta_targets(out, label_group)
     return out.dropna(subset=["future_bw_1s"]).reset_index(drop=True)
 
 

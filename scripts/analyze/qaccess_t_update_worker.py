@@ -75,7 +75,14 @@ FEATURES = [
     "backoff",
 ]
 
-TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s")
+TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s", "delta_owd_1s", "delta_loss_1s")
+MINIMIZE_TARGETS = {"delta_owd_1s", "delta_loss_1s"}
+ACTIVE_TARGET_MODES = {"delta_bw_1s", "delta_owd_1s", "delta_loss_1s"}
+VARIANT_TARGETS = {
+    "qaccess_t": {"next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s"},
+    "qaccess_d": {"delta_owd_1s"},
+    "qaccess_l": {"delta_loss_1s"},
+}
 
 DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
 DEFAULT_MIN_DELTA_GAIN_BPS = 500_000.0
@@ -171,6 +178,7 @@ def _load_model_provenance(model_path: Path, metadata_path: Path, model) -> dict
 
     return {
         "model_target": target,
+        "controller_variant": str(metadata.get("controller_variant") or ""),
         "model_training_rows": training_rows,
         "model_features": feature_names,
         "model_metadata": str(metadata_path.resolve()),
@@ -203,6 +211,24 @@ def validate_model_configuration(model_path: Path, metadata_path: Path, requeste
         "requested_target_mode": requested_target,
         "model_target_compatible": True,
     }
+
+
+def _optimization_score(target_mode: str, prediction: float) -> float:
+    return -float(prediction) if target_mode in MINIMIZE_TARGETS else float(prediction)
+
+
+def _objective_improvement(target_mode: str, current: float, candidate: float) -> float:
+    return _optimization_score(target_mode, candidate) - _optimization_score(target_mode, current)
+
+
+def _score_unit(target_mode: str) -> str:
+    return {
+        "next_bw_bps": "bps",
+        "delta_bw_1s": "bps",
+        "relative_delta_bw_1s": "ratio",
+        "delta_owd_1s": "ms",
+        "delta_loss_1s": "loss_rate",
+    }[target_mode]
 
 
 def _load_state(path: Path) -> dict:
@@ -317,11 +343,13 @@ def _score_all_candidates(
     cur_beta: float,
     cur_gamma: float,
     fixed_gamma: float | None,
+    target_mode: str = "delta_bw_1s",
 ) -> tuple[list[dict[str, Any]], float, float, float, float, float]:
     pred_current = _mean_prediction(samples, model, cur_alpha, cur_beta, cur_gamma)
     candidates: list[dict[str, Any]] = []
     best_alpha, best_beta, best_gamma = cur_alpha, cur_beta, cur_gamma
     best_pred = pred_current
+    best_score = _optimization_score(target_mode, pred_current)
 
     for alpha, beta, gamma in _candidate_triples(fixed_gamma):
         mean_pred = _mean_prediction(samples, model, alpha, beta, gamma)
@@ -330,14 +358,16 @@ def _score_all_candidates(
             "beta": beta,
             "gamma": gamma,
             "mean_prediction": mean_pred,
+            "optimization_score": _optimization_score(target_mode, mean_pred),
             "is_current": (
                 abs(alpha - cur_alpha) < 1e-9
                 and abs(beta - cur_beta) < 1e-9
                 and abs(gamma - cur_gamma) < 1e-9
             ),
         })
-        if mean_pred > best_pred:
+        if _optimization_score(target_mode, mean_pred) > best_score:
             best_pred = mean_pred
+            best_score = _optimization_score(target_mode, mean_pred)
             best_alpha, best_beta, best_gamma = alpha, beta, gamma
 
     for row in candidates:
@@ -517,6 +547,8 @@ def _metric_field(target_mode: str) -> str:
         "next_bw_bps": "predicted_next_bw_bps",
         "delta_bw_1s": "predicted_delta_bw_1s",
         "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
+        "delta_owd_1s": "predicted_delta_owd_1s",
+        "delta_loss_1s": "predicted_delta_loss_1s",
     }[target_mode]
 
 
@@ -566,6 +598,18 @@ def _evaluate_gate(
             f"required_gain={min_relative_delta_gain:.4f}",
         )
 
+    if target_mode in MINIMIZE_TARGETS:
+        improvement = pred_current - pred_best
+        ok = pred_best < pred_current and improvement >= min_delta_gain_bps
+        return (
+            ok,
+            f"{target_mode}_reduction",
+            "objective_reduction_gate",
+            min_delta_gain_bps,
+            improvement,
+            f"required_reduction={min_delta_gain_bps:g}",
+        )
+
     raise ValueError(f"unsupported target_mode: {target_mode}")
 
 
@@ -610,7 +654,10 @@ def _write_candidate_scores_csv(
     path_id: int,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["path_id", "alpha", "beta", "gamma", "mean_prediction", "is_current", "is_best", "target_mode"]
+    fieldnames = [
+        "path_id", "alpha", "beta", "gamma", "mean_prediction",
+        "optimization_score", "is_current", "is_best", "target_mode",
+    ]
     with out_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
@@ -621,6 +668,7 @@ def _write_candidate_scores_csv(
                 "beta": row["beta"],
                 "gamma": row["gamma"],
                 "mean_prediction": row["mean_prediction"],
+                "optimization_score": row.get("optimization_score", row["mean_prediction"]),
                 "is_current": int(bool(row["is_current"])),
                 "is_best": int(bool(row["is_best"])),
                 "target_mode": target_mode,
@@ -834,6 +882,9 @@ def _process_multipath_request(
         "timestamp_ms": int(time.time() * 1000),
         "run_id": str(req.get("run_id") or ""),
         "target_mode": target_mode,
+        "controller_variant": str(req.get("controller_variant") or ""),
+        "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
+        "score_unit": _score_unit(target_mode),
         "execution_mode": "shadow" if shadow else "active",
         "shadow": shadow,
         "shadow_mode": shadow,
@@ -872,8 +923,9 @@ def _process_multipath_request(
             item["samples"], model,
             cur_alpha=cur_alpha, cur_beta=cur_beta, cur_gamma=cur_gamma,
             fixed_gamma=fixed_gamma,
+            target_mode=target_mode,
         )
-        best = max(candidates, key=lambda row: row["mean_prediction"])
+        best = max(candidates, key=lambda row: row["optimization_score"])
         scored_paths.append({**item, "candidates": candidates, "pred_current": pred_current, "pred_best": best["mean_prediction"]})
 
     total_delta = sum(item["sender_byte_delta"] for item in scored_paths)
@@ -893,7 +945,7 @@ def _process_multipath_request(
     for item in scored_paths:
         ranked = sorted(
             item["candidates"],
-            key=lambda row: (-float(row["mean_prediction"]), not bool(row["is_current"]), row["alpha"], row["beta"], row["gamma"]),
+            key=lambda row: (-float(row["optimization_score"]), not bool(row["is_current"]), row["alpha"], row["beta"], row["gamma"]),
         )
         path_rank_maps[item["path_id"]] = {
             (float(row["alpha"]), float(row["beta"]), float(row["gamma"])): rank
@@ -904,16 +956,21 @@ def _process_multipath_request(
     for index, triple in enumerate(_candidate_triples(fixed_gamma)):
         alpha, beta, gamma = triple
         predictions = [float(item["candidates"][index]["mean_prediction"]) for item in scored_paths]
+        optimization_scores = [_optimization_score(target_mode, prediction) for prediction in predictions]
         weights = [item["sender_byte_delta"] / total_delta for item in scored_paths]
         equal_prediction = float(np.mean(predictions))
         weighted_prediction = float(sum(pred * weight for pred, weight in zip(predictions, weights)))
+        equal_score = float(np.mean(optimization_scores))
+        weighted_score = float(sum(score * weight for score, weight in zip(optimization_scores, weights)))
         is_current = abs(alpha-cur_alpha) < 1e-9 and abs(beta-cur_beta) < 1e-9 and abs(gamma-cur_gamma) < 1e-9
         aggregate_rows.append({
             "request_id": request_id, "alpha": alpha, "beta": beta, "gamma": gamma,
-            "equal_weight_score": equal_prediction,
-            "byte_weighted_score": weighted_prediction,
-            "equal_weight_gain": equal_prediction,
-            "byte_weighted_gain": weighted_prediction,
+            "equal_weight_prediction": equal_prediction,
+            "byte_weighted_prediction": weighted_prediction,
+            "equal_weight_score": equal_score,
+            "byte_weighted_score": weighted_score,
+            "equal_weight_gain": equal_score,
+            "byte_weighted_gain": weighted_score,
             "is_current_tuple": int(is_current),
             "eligible_path_count": len(scored_paths),
             "eligible_path_ids": ",".join(str(item["path_id"]) for item in scored_paths),
@@ -926,7 +983,8 @@ def _process_multipath_request(
                 "row_count": item["rows"], "sender_byte_delta": item["sender_byte_delta"],
                 "is_current_tuple": int(is_current), "path_pred_current": item["pred_current"],
                 "path_pred_candidate": prediction, "mean_prediction": prediction,
-                "path_score_gain": prediction-item["pred_current"],
+                "optimization_score": _optimization_score(target_mode, prediction),
+                "path_score_gain": _objective_improvement(target_mode, item["pred_current"], prediction),
                 "candidate_rank_within_path": path_rank_maps[item["path_id"]][(alpha, beta, gamma)],
                 "media_activity_weight": weight,
             }
@@ -939,9 +997,9 @@ def _process_multipath_request(
                 "weight": float(weight),
                 "current_score": float(item["pred_current"]),
                 "candidate_score": float(prediction),
-                "gain_bps": float(prediction-item["pred_current"]),
-                "weighted_gain_bps": float(weight * (prediction-item["pred_current"])),
-                "effect": "helps" if prediction-item["pred_current"] > 0 else ("hurts" if prediction-item["pred_current"] < 0 else "neutral"),
+                "gain_bps": _objective_improvement(target_mode, item["pred_current"], prediction),
+                "weighted_gain_bps": float(weight * _objective_improvement(target_mode, item["pred_current"], prediction)),
+                "effect": "helps" if _objective_improvement(target_mode, item["pred_current"], prediction) > 0 else ("hurts" if _objective_improvement(target_mode, item["pred_current"], prediction) < 0 else "neutral"),
                 "is_changed_path": int(item["path_id"]) in changed_path_ids,
             })
 
@@ -992,14 +1050,14 @@ def _process_multipath_request(
     owner_ok = owner_roles == ["server_downlink_sender"]
     proposed_differs = any(abs(weighted_stepped[name] - current) > 1e-9 for name, current in
                            (("alpha", cur_alpha), ("beta", cur_beta), ("gamma", cur_gamma)))
-    active_safety_ok = bool(not shadow and owner_ok and eligible and target_mode == "delta_bw_1s" and proposed_differs)
+    active_safety_ok = bool(not shadow and owner_ok and eligible and target_mode in ACTIVE_TARGET_MODES and proposed_differs)
     actual_applied = bool(active_safety_ok and weighted_gate["would_apply"])
     active_skip_reason = ""
     if not shadow and not actual_applied:
         if not owner_ok:
             active_skip_reason = "owner_role_not_server_downlink_sender"
-        elif target_mode != "delta_bw_1s":
-            active_skip_reason = "model_target_not_delta_bw_1s"
+        elif target_mode not in ACTIVE_TARGET_MODES:
+            active_skip_reason = "model_target_not_active_safe"
         elif not proposed_differs:
             active_skip_reason = "proposed_coefficients_unchanged"
         elif not weighted_gate["would_apply"]:
@@ -1082,7 +1140,12 @@ def _process_multipath_request(
         "path_weights": normalized_weights,
         "per_path_current_predictions": {str(item["path_id"]): item["pred_current"] for item in scored_paths},
         "per_path_best_predictions": {str(item["path_id"]): item["pred_best"] for item in scored_paths},
-        "per_path_best_gains": {str(item["path_id"]): item["pred_best"]-item["pred_current"] for item in scored_paths},
+        "per_path_best_gains": {
+            str(item["path_id"]): _objective_improvement(target_mode, item["pred_current"], item["pred_best"])
+            for item in scored_paths
+        },
+        "equal_weight_current_prediction": current_row["equal_weight_prediction"],
+        "equal_weight_best_prediction": equal_best["equal_weight_prediction"],
         "equal_weight_current": current_row["equal_weight_score"],
         "equal_weight_best": equal_best["equal_weight_score"],
         "equal_weight_gain": equal_gate["absolute_gain_bps"],
@@ -1093,6 +1156,8 @@ def _process_multipath_request(
         "equal_weight_proposed_stepped_coefficients": equal_stepped,
         "traffic_weighted_current": current_row["byte_weighted_score"],
         "traffic_weighted_best": weighted_best["byte_weighted_score"],
+        "traffic_weighted_current_prediction": current_row["byte_weighted_prediction"],
+        "traffic_weighted_best_prediction": weighted_best["byte_weighted_prediction"],
         "traffic_weighted_gain": weighted_gate["absolute_gain_bps"],
         "traffic_weighted_gate": weighted_gate,
         "traffic_weighted": aggregate_gate_report(weighted_gate, weighted_raw, weighted_stepped),
@@ -1295,11 +1360,12 @@ def _process_request(
         cur_beta=cur_beta,
         cur_gamma=cur_gamma,
         fixed_gamma=fixed_gamma,
+        target_mode=target_mode,
     )
     non_current_candidates = [row for row in candidates if not row["is_current"]]
-    best_non_current = max(non_current_candidates, key=lambda row: row["mean_prediction"])
+    best_non_current = max(non_current_candidates, key=lambda row: row["optimization_score"])
     unique_prediction_count = len({float(row["mean_prediction"]) for row in candidates})
-    best_non_current_gain = float(best_non_current["mean_prediction"] - pred_current)
+    best_non_current_gain = _objective_improvement(target_mode, pred_current, best_non_current["mean_prediction"])
 
     improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
         target_mode,
@@ -1325,7 +1391,7 @@ def _process_request(
 
     ts_ms = int(time.time() * 1000)
     metric_field = _metric_field(target_mode)
-    score_gain = pred_best - pred_current
+    score_gain = _objective_improvement(target_mode, pred_current, pred_best)
     run_id = str(req.get("run_id") or "")
     reason = str(req.get("reason") or "")
     n_samples = int(len(samples))
@@ -1340,6 +1406,8 @@ def _process_request(
         "n_samples": n_samples,
         "run_id": run_id,
         "target_mode": target_mode,
+        "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
+        "score_unit": _score_unit(target_mode),
         "execution_mode": execution_mode,
         "shadow": shadow,
         "shadow_mode": shadow,
@@ -1385,6 +1453,12 @@ def _process_request(
     if target_mode == "delta_bw_1s":
         response["pred_current_delta_bps"] = pred_current
         response["pred_best_delta_bps"] = pred_best
+    elif target_mode == "delta_owd_1s":
+        response["pred_current_delta_owd_ms"] = pred_current
+        response["pred_best_delta_owd_ms"] = pred_best
+    elif target_mode == "delta_loss_1s":
+        response["pred_current_delta_loss_rate"] = pred_current
+        response["pred_best_delta_loss_rate"] = pred_best
 
     _assert_runtime_coeffs_path(coeffs_out)
 
@@ -1584,6 +1658,7 @@ def main() -> None:
     ap.add_argument("--archive-dir", type=Path, default=DEFAULT_ARCHIVE_DIR)
     ap.add_argument("--audit-csv", type=Path, default=DEFAULT_AUDIT_CSV)
     ap.add_argument("--mode", choices=["rf"], default="rf")
+    ap.add_argument("--controller-variant", choices=sorted(VARIANT_TARGETS), default="qaccess_t")
     ap.add_argument("--poll-interval", type=float, default=5.0)
     ap.add_argument(
         "--target-mode",
@@ -1602,6 +1677,12 @@ def main() -> None:
         type=float,
         default=DEFAULT_MIN_DELTA_GAIN_BPS,
         help="Minimum pred_best - pred_current (bps) for delta_bw_1s gate (default: 500000)",
+    )
+    ap.add_argument(
+        "--min-objective-improvement",
+        type=float,
+        default=0.0,
+        help="Minimum predicted reduction for delta_owd_1s or delta_loss_1s",
     )
     ap.add_argument("--gate-mode", choices=GATE_MODES, default="absolute")
     ap.add_argument(
@@ -1701,6 +1782,10 @@ def main() -> None:
         help="Write a JSON readiness marker after startup validation succeeds",
     )
     args = ap.parse_args()
+    if args.target_mode not in VARIANT_TARGETS[args.controller_variant]:
+        ap.error(
+            f"controller variant {args.controller_variant} is incompatible with target {args.target_mode}"
+        )
 
     shadow = bool(args.shadow_per_subflow or args.dry_run)
     fixed_gamma = args.fixed_gamma
@@ -1712,7 +1797,11 @@ def main() -> None:
         else (
             f"min_delta_gain_bps={args.min_delta_gain_bps}"
             if args.target_mode == "delta_bw_1s"
-            else f"min_relative_delta_gain={args.min_relative_delta_gain}"
+            else (
+                f"min_objective_improvement={args.min_objective_improvement}"
+                if args.target_mode in MINIMIZE_TARGETS
+                else f"min_relative_delta_gain={args.min_relative_delta_gain}"
+            )
         )
     )
     if args.target_mode == "delta_bw_1s":
@@ -1723,6 +1812,12 @@ def main() -> None:
     model_path = args.model.resolve()
     metadata_path = args.model_metadata.resolve()
     provenance = validate_model_configuration(model_path, metadata_path, args.target_mode)
+    recorded_variant = str(provenance.get("controller_variant") or "")
+    if recorded_variant and recorded_variant != args.controller_variant:
+        ap.error(
+            f"model controller_variant={recorded_variant!r} does not match "
+            f"--controller-variant={args.controller_variant!r}"
+        )
     if args.validate_model_only:
         print(json.dumps(provenance, sort_keys=True))
         return
@@ -1758,6 +1853,9 @@ def main() -> None:
             "model_target": provenance["model_target"],
             "verified_model_target": provenance["verified_model_target"],
             "requested_target_mode": args.target_mode,
+            "controller_variant": args.controller_variant,
+            "optimization_direction": "minimize" if args.target_mode in MINIMIZE_TARGETS else "maximize",
+            "score_unit": _score_unit(args.target_mode),
             "compatibility_status": "compatible",
             "model_target_compatible": provenance["model_target_compatible"],
             "model_training_rows": provenance["model_training_rows"],
@@ -1803,7 +1901,7 @@ def main() -> None:
             args.mode,
             args.target_mode,
             args.min_improvement_pct,
-            args.min_delta_gain_bps,
+            args.min_objective_improvement if args.target_mode in MINIMIZE_TARGETS else args.min_delta_gain_bps,
             args.min_relative_delta_gain,
             shadow=shadow,
             aggregate_multipath=args.aggregate_multipath,

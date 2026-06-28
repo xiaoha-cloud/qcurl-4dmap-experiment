@@ -32,18 +32,18 @@ EVAL_WINDOWS = [
     ("150-200", 150.0, 200.0),
 ]
 
-PRESETS: dict[str, dict[str, str]] = {
+PRESETS: dict[str, dict[str, object]] = {
     "delay": {
         "title": "Delay-only (primary: delay/RTT/recovery)",
         "baseline_dir": "delay_baseline",
-        "dynamic_dir": "delay_qaccess_dynamic",
+        "dynamic_dirs": ("delay_qaccess_d_dynamic", "delay_qaccess_dynamic"),
         "out_subdir": "delay_only_compare",
         "file_prefix": "delay",
     },
     "loss": {
         "title": "Loss-only (primary: loss/retrans/recovery)",
         "baseline_dir": "loss_baseline",
-        "dynamic_dir": "loss_qaccess_dynamic",
+        "dynamic_dirs": ("loss_qaccess_l_dynamic", "loss_qaccess_dynamic"),
         "out_subdir": "loss_only_compare",
         "file_prefix": "loss",
     },
@@ -363,9 +363,13 @@ def main() -> None:
     out = (args.out or (_REPO / "derived" / cfg["out_subdir"] / session.name)).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
+    dynamic_dir = next(
+        (session / name for name in cfg["dynamic_dirs"] if (session / name).is_dir()),
+        session / cfg["dynamic_dirs"][0],
+    )
     runs = {
         "baseline": session / cfg["baseline_dir"],
-        "qaccess_dynamic": session / cfg["dynamic_dir"],
+        str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic"): dynamic_dir,
     }
 
     all_windows: list[pd.DataFrame] = []
