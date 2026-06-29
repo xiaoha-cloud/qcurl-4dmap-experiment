@@ -113,5 +113,5 @@ def update_path_coeffs_locked(
     }
     if metadata:
         doc.update({k: v for k, v in metadata.items() if k not in ("paths", "default", "version")})
-    doc["source"] = "qaccess_t_update_worker.py"
+    doc["source"] = "qaccess_update_worker.py"
     atomic_write_json(path, doc)

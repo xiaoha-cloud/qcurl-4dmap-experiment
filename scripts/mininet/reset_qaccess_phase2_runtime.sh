@@ -73,6 +73,33 @@ for f in qaccess_runtime_samples.csv qaccess_update_request.json qaccess_update_
 done
 
 cp "$INITIAL" "$RUNTIME"
+python3 - "$RUNTIME" "${QACCESS_WORKER_TARGET_MODE:-delta_bw_1s}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+target_mode = sys.argv[2]
+metric_by_target = {
+    "delta_bw_1s": "predicted_delta_bw_bps",
+    "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
+    "delta_owd_1s": "predicted_delta_owd_ms",
+    "delta_loss_1s": "predicted_delta_loss_rate",
+    "loss_risk_1s": "predicted_loss_risk_bytes",
+}
+unit_by_target = {
+    "delta_bw_1s": "bps",
+    "relative_delta_bw_1s": "ratio",
+    "delta_owd_1s": "ms",
+    "delta_loss_1s": "loss_rate",
+    "loss_risk_1s": "bytes",
+}
+doc = json.loads(path.read_text(encoding="utf-8"))
+doc["target_mode"] = target_mode
+doc["metric"] = metric_by_target.get(target_mode, doc.get("metric", "unknown"))
+doc["objective_unit"] = unit_by_target.get(target_mode, "")
+path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+PY
 chmod 0666 "$RUNTIME" 2>/dev/null || true
 echo "[reset] copied initial -> runtime coefficients"
 echo "  initial: $INITIAL"

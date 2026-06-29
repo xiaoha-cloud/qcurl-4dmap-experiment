@@ -335,8 +335,17 @@ import json, sys
 p = sys.argv[1]
 try:
     c = json.load(open(p))
-    print('alpha={} beta={} gamma={} source={}'.format(
-        c.get('alpha'), c.get('beta'), c.get('gamma'), c.get('source', '')))
+    default = c.get('default') or {}
+    alpha = c.get('alpha', default.get('alpha'))
+    beta = c.get('beta', default.get('beta'))
+    gamma = c.get('gamma', default.get('gamma'))
+    paths = c.get('paths') or {}
+    suffix = ''
+    if paths:
+        rendered = ','.join('{}={}/{}/{}'.format(k, v.get('alpha'), v.get('beta'), v.get('gamma')) for k, v in sorted(paths.items()))
+        suffix = ' paths=[' + rendered + ']'
+    print('alpha={} beta={} gamma={} source={} metric={} target_mode={}{}'.format(
+        alpha, beta, gamma, c.get('source', ''), c.get('metric', ''), c.get('target_mode', ''), suffix))
 except Exception as e:
     print('(unreadable: {})'.format(e))
 " "$1"
@@ -466,7 +475,8 @@ if source.is_file():
             continue
         events.append({key: row.get(key) for key in (
             "timestamp_ms", "request_id", "request_classification", "status", "gate_mode",
-            "absolute_gain_bps", "relative_gain", "would_apply_under_gate", "actual_applied",
+            "absolute_gain_bps", "objective_gain_ms", "objective_gain_bytes", "relative_gain",
+            "would_apply_under_gate", "actual_applied",
             "current_coefficients", "traffic_weighted_proposed_candidate",
             "traffic_weighted_proposed_stepped_coefficients", "applied_coefficients",
         )})
@@ -490,8 +500,20 @@ CHANGED=$(python3 -c "
 import json
 b=json.load(open('$COEFFS_BEFORE'))
 a=json.load(open('$COEFFS_AFTER'))
-keys=('alpha','beta','gamma')
-print('yes' if any(abs(float(b.get(k,0))-float(a.get(k,0)))>1e-9 for k in keys) else 'no')
+def norm(doc):
+    keep = {}
+    default = doc.get('default') or {}
+    keep['default'] = {
+        'alpha': doc.get('alpha', default.get('alpha')),
+        'beta': doc.get('beta', default.get('beta')),
+        'gamma': doc.get('gamma', default.get('gamma')),
+    }
+    keep['paths'] = {
+        str(k): {'alpha': v.get('alpha'), 'beta': v.get('beta'), 'gamma': v.get('gamma')}
+        for k, v in sorted((doc.get('paths') or {}).items())
+    }
+    return keep
+print('yes' if norm(b) != norm(a) else 'no')
 ")
 echo "[combined_deterioration] coefficients changed during dynamic leg: $CHANGED"
 

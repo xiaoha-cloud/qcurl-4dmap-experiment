@@ -131,11 +131,15 @@ func LoadQAccessCoeffsDocument(path string) (QAccessCoeffsDocument, error) {
 func ResolveCoefficientsForPath(doc QAccessCoeffsDocument, pathID protocol.PathID) QAccessCoefficients {
 	normalizeCoeffsDocument(&doc)
 	key := strconv.FormatUint(uint64(pathID), 10)
+	metric := doc.Metric
+	if metric == "" {
+		metric = "unknown"
+	}
 	if e, ok := doc.Paths[key]; ok && validCoeffEntry(e.Alpha, e.Beta, e.Gamma) {
-		return QAccessCoefficients{Alpha: e.Alpha, Beta: e.Beta, Gamma: e.Gamma, Source: "per_path", Metric: "predicted_next_bw_bps"}
+		return QAccessCoefficients{Alpha: e.Alpha, Beta: e.Beta, Gamma: e.Gamma, Source: "per_path", Metric: metric}
 	}
 	if validCoeffEntry(doc.Default.Alpha, doc.Default.Beta, doc.Default.Gamma) {
-		return QAccessCoefficients{Alpha: doc.Default.Alpha, Beta: doc.Default.Beta, Gamma: doc.Default.Gamma, Source: "default", Metric: "predicted_next_bw_bps"}
+		return QAccessCoefficients{Alpha: doc.Default.Alpha, Beta: doc.Default.Beta, Gamma: doc.Default.Gamma, Source: "default", Metric: metric}
 	}
 	if doc.Version != qaccessCoeffsVersion {
 		if e, ok := entryFromMapping(doc.Alpha, doc.Beta, doc.Gamma); ok {

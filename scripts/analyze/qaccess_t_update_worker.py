@@ -554,11 +554,11 @@ def _improvement_pct(pred_current: float, pred_best: float) -> float:
 def _metric_field(target_mode: str) -> str:
     return {
         "next_bw_bps": "predicted_next_bw_bps",
-        "delta_bw_1s": "predicted_delta_bw_1s",
+        "delta_bw_1s": "predicted_delta_bw_bps",
         "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
-        "delta_owd_1s": "predicted_delta_owd_1s",
-        "delta_loss_1s": "predicted_delta_loss_1s",
-        "loss_risk_1s": "predicted_loss_risk_1s",
+        "delta_owd_1s": "predicted_delta_owd_ms",
+        "delta_loss_1s": "predicted_delta_loss_rate",
+        "loss_risk_1s": "predicted_loss_risk_bytes",
     }[target_mode]
 
 
@@ -1290,7 +1290,7 @@ def _process_multipath_request(
                 coeffs_out, update_path_id,
                 alpha=weighted_stepped["alpha"], beta=weighted_stepped["beta"], gamma=weighted_stepped["gamma"],
                 metadata={
-                    "source": "qaccess_t_update_worker.py", "execution_mode": "active",
+                    "source": "qaccess_update_worker.py", "execution_mode": "active",
                     "aggregate_scoring": True, "aggregate_control_method": "traffic_weighted",
                     "request_id": request_id, "target_mode": target_mode, "gate_mode": gate_mode,
                     (
@@ -1570,7 +1570,7 @@ def _process_request(
     if active_update:
         backup_path = _save_coeffs_backup(coeffs_out, archive_dir, request_id, prev_coeffs_out)
         metadata = {
-            "source": "qaccess_t_update_worker.py",
+            "source": "qaccess_update_worker.py",
             "metric": metric_field,
             metric_field: pred_best,
             "target_mode": target_mode,

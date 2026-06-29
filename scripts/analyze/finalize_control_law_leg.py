@@ -590,7 +590,7 @@ def finalize_leg(
     raw_retained = (repo / "derived" / "qaccess_runtime_samples.csv").is_file() or (
         leg_dir / "qaccess_runtime_samples_full.csv.gz"
     ).is_file()
-    experiment_completed = pcap_retained
+    experiment_completed = throughput_ok
     postprocess_ok = throughput_ok
 
     summary = {
