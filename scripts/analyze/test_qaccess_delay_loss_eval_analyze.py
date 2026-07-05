@@ -47,6 +47,23 @@ class DelayLossEvaluationTest(unittest.TestCase):
         share = result[result.metric == "path_b_share_pct_mean"].iloc[0]
         self.assertAlmostEqual(share["change_percentage_points"], -10.0)
 
+    def test_loss_timeseries_selects_runtime_path_b(self):
+        samples = pd.DataFrame([
+            {
+                "path_id": 1, "remote_endpoint": "10.0.1.1:5000",
+                "time_s": 1.2, "loss_rate": 0.0,
+            },
+            {
+                "path_id": 3, "remote_endpoint": "10.0.2.1:5001",
+                "time_s": 1.2, "loss_rate": 0.05,
+            },
+        ])
+        result = evaluation._per_second_loss(
+            pd.DataFrame(), pd.DataFrame(), samples, "loss_qaccess_l",
+        )
+        self.assertEqual(result["method"].tolist(), ["loss_qaccess_l"])
+        self.assertAlmostEqual(result["sample_loss_rate_mean"].iloc[0], 0.05)
+
 
 if __name__ == "__main__":
     unittest.main()

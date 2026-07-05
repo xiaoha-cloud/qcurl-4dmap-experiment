@@ -51,7 +51,7 @@ PRESETS: dict[str, dict[str, object]] = {
         "dynamic_dirs": ("loss_qaccess_l_dynamic", "loss_qaccess_dynamic"),
         "out_subdir": "loss_only_compare",
         "file_prefix": "loss",
-        "recovery_start_s": 100.0,
+        "recovery_start_s": 150.0,
     },
 }
 
@@ -252,6 +252,7 @@ def _recovery_time_s(
     ref_hi: float,
     recover_after: float = 100.0,
     tol_frac: float = 0.15,
+    absolute_tol: float = 0.0,
     stable_sec: int = 10,
 ) -> float:
     if series.empty or vcol not in series.columns:
@@ -260,12 +261,12 @@ def _recovery_time_s(
     if ref.empty:
         return float("nan")
     target = float(ref[vcol].mean())
-    if not math.isfinite(target) or target <= 0:
+    if not math.isfinite(target) or target < 0:
         return float("nan")
     post = series[series[tcol] >= recover_after].sort_values(tcol)
     if post.empty:
         return float("nan")
-    thresh = target * (1.0 + tol_frac)
+    thresh = max(target * (1.0 + tol_frac), absolute_tol)
     streak = 0
     for _, row in post.iterrows():
         val = float(row[vcol])
@@ -320,6 +321,63 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
     return result[columns].sort_values("time_s").reset_index(drop=True)
 
 
+def _per_second_loss(
+    util: pd.DataFrame,
+    mon: pd.DataFrame,
+    samples: pd.DataFrame,
+    method: str,
+) -> pd.DataFrame:
+    columns = [
+        "method", "time_s", "utility_loss_mean", "monitor_loss_mean",
+        "sample_loss_rate_mean", "lost_bytes_delta_sum", "retrans_bytes_delta_sum",
+    ]
+    pieces: list[pd.DataFrame] = []
+    for frame, value_col, output_col, path_col in (
+        (util, "loss", "utility_loss_mean", "path"),
+        (mon, "loss", "monitor_loss_mean", "path"),
+        (samples, "loss_rate", "sample_loss_rate_mean", "path_id"),
+    ):
+        if frame.empty or value_col not in frame.columns:
+            continue
+        work = frame.rename(columns={"t": "time_s"}) if "t" in frame.columns else frame.copy()
+        work = _path_b_rows(work, path_col=path_col)
+        if work.empty or "time_s" not in work.columns:
+            continue
+        work = work.copy()
+        work["time_s"] = pd.to_numeric(work["time_s"], errors="coerce").floordiv(1)
+        pieces.append(
+            work.groupby("time_s", as_index=False)[value_col]
+            .mean()
+            .rename(columns={value_col: output_col})
+        )
+    if not samples.empty and "time_s" in samples.columns:
+        work = _path_b_rows(samples, path_col="path_id").copy()
+        if not work.empty:
+            work["time_s"] = pd.to_numeric(work["time_s"], errors="coerce").floordiv(1)
+            sum_cols = [
+                column for column in ("lost_bytes_delta", "retrans_bytes_delta")
+                if column in work.columns
+            ]
+            if sum_cols:
+                summed = work.groupby("time_s", as_index=False)[sum_cols].sum()
+                summed = summed.rename(columns={
+                    "lost_bytes_delta": "lost_bytes_delta_sum",
+                    "retrans_bytes_delta": "retrans_bytes_delta_sum",
+                })
+                pieces.append(summed)
+
+    if not pieces:
+        return pd.DataFrame(columns=columns)
+    result = pieces[0]
+    for piece in pieces[1:]:
+        result = result.merge(piece, on="time_s", how="outer")
+    result.insert(0, "method", method)
+    for column in columns:
+        if column not in result.columns:
+            result[column] = float("nan")
+    return result[columns].sort_values("time_s").reset_index(drop=True)
+
+
 def _pct_change(baseline: float, dynamic: float, higher_is_better: bool) -> float:
     if not math.isfinite(baseline) or not math.isfinite(dynamic) or baseline == 0:
         return float("nan")
@@ -334,6 +392,12 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
         "rtt_ms_mean": False,
         "rtt_ms_p95": False,
         "jitter_ms_mean": False,
+        "utility_loss_mean": False,
+        "monitor_loss_mean": False,
+        "sample_loss_rate_mean": False,
+        "retrans_bytes_delta_sum": False,
+        "lost_bytes_delta_sum": False,
+        "loss_event_fraction": False,
         "secondary_total_quic_wire_mbps_mean": True,
         "secondary_path_a_quic_wire_mbps_mean": True,
         "secondary_path_b_quic_wire_mbps_mean": True,
@@ -375,11 +439,11 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
 
 def _plot_timeseries(
     throughput: pd.DataFrame,
-    delay: pd.DataFrame,
+    quality: pd.DataFrame,
     out: Path,
     prefix: str,
 ) -> None:
-    if throughput.empty and delay.empty:
+    if throughput.empty and quality.empty:
         return
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
@@ -403,21 +467,35 @@ def _plot_timeseries(
     axes[1].grid(alpha=0.25)
     axes[1].legend(ncol=2, fontsize=8)
 
-    if not delay.empty and delay["owd_ms_mean"].notna().any():
-        for method, group in delay.groupby("method"):
-            axes[2].plot(group["time_s"], group["owd_ms_mean"], label=method, linewidth=1.5)
-        axes[2].set_ylabel("Path B OWD (ms)")
+    quality_column = ""
+    quality_label = ""
+    if prefix == "delay" and "owd_ms_mean" in quality.columns:
+        quality_column, quality_label = "owd_ms_mean", "Path B OWD (ms)"
+    else:
+        for candidate, label in (
+            ("utility_loss_mean", "Path B utility loss"),
+            ("monitor_loss_mean", "Path B monitor loss"),
+            ("sample_loss_rate_mean", "Path B runtime loss rate"),
+        ):
+            if candidate in quality.columns and quality[candidate].notna().any():
+                quality_column, quality_label = candidate, label
+                break
+
+    if quality_column and quality[quality_column].notna().any():
+        for method, group in quality.groupby("method"):
+            axes[2].plot(group["time_s"], group[quality_column], label=method, linewidth=1.5)
+        axes[2].set_ylabel(quality_label)
         axes[2].legend()
     else:
-        axes[2].text(0.5, 0.5, "No OWD samples found", ha="center", va="center",
+        axes[2].text(0.5, 0.5, "No quality samples found", ha="center", va="center",
                      transform=axes[2].transAxes)
-        axes[2].set_ylabel("Path B OWD (ms)")
+        axes[2].set_ylabel("Path B quality metric")
     axes[2].set_xlabel("Time (s)")
     axes[2].grid(alpha=0.25)
     for axis in axes:
-        axis.axvspan(90, 150 if prefix == "delay" else 100, color="tab:red", alpha=0.08)
+        axis.axvspan(90, 150, color="tab:red", alpha=0.08)
     fig.tight_layout()
-    fig.savefig(out / f"{prefix}_throughput_delay_over_time.png", dpi=180)
+    fig.savefig(out / f"{prefix}_throughput_quality_over_time.png", dpi=180)
     plt.close(fig)
 
 
@@ -508,7 +586,11 @@ def analyze_run(
     if not wire.empty:
         wire = wire.copy()
         wire.insert(0, "method", method)
-    delay_timeseries = _per_second_delay(util, mon, method)
+    quality_timeseries = (
+        _per_second_delay(util, mon, method)
+        if preset == "delay"
+        else _per_second_loss(util, mon, samples, method)
+    )
 
     recovery: dict[str, float] = {}
     if preset == "delay":
@@ -529,7 +611,7 @@ def analyze_run(
             sb = _path_b_rows(samples, path_col="path_id")
             recovery["recovery_time_s_loss_rate"] = _recovery_time_s(
                 sb, tcol="time_s", vcol="loss_rate", ref_lo=50.0, ref_hi=90.0,
-                recover_after=recovery_start_s,
+                recover_after=recovery_start_s, absolute_tol=1e-6,
             )
         share_series = wire if not wire.empty else pd.DataFrame()
         if not share_series.empty:
@@ -559,7 +641,7 @@ def analyze_run(
             **metrics,
         })
 
-    return pd.DataFrame(rows), recovery, wire, delay_timeseries
+    return pd.DataFrame(rows), recovery, wire, quality_timeseries
 
 
 def main() -> None:
@@ -592,21 +674,21 @@ def main() -> None:
 
     all_windows: list[pd.DataFrame] = []
     all_wire: list[pd.DataFrame] = []
-    all_delay: list[pd.DataFrame] = []
+    all_quality: list[pd.DataFrame] = []
     recovery_rows: list[dict] = []
     for method, rdir in runs.items():
         if not rdir.is_dir():
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
-        df, rec, wire, delay = analyze_run(
+        df, rec, wire, quality = analyze_run(
             rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
         )
         if not df.empty:
             all_windows.append(df)
         if not wire.empty:
             all_wire.append(wire)
-        if not delay.empty:
-            all_delay.append(delay)
+        if not quality.empty:
+            all_quality.append(quality)
         recovery_rows.append({"method": method, "run_dir": str(rdir), **rec})
 
     if not all_windows:
@@ -616,13 +698,14 @@ def main() -> None:
     prefix = cfg["file_prefix"]
     df_win = pd.concat(all_windows, ignore_index=True)
     df_wire = pd.concat(all_wire, ignore_index=True) if all_wire else pd.DataFrame()
-    df_delay = pd.concat(all_delay, ignore_index=True) if all_delay else pd.DataFrame()
+    df_quality = pd.concat(all_quality, ignore_index=True) if all_quality else pd.DataFrame()
     df_win.to_csv(out / f"{prefix}_primary_metrics_windows.csv", index=False)
     pd.DataFrame(recovery_rows).to_csv(out / f"{prefix}_recovery_times.csv", index=False)
     if not df_wire.empty:
         df_wire.to_csv(out / f"{prefix}_throughput_timeseries.csv", index=False)
-    if not df_delay.empty:
-        df_delay.to_csv(out / f"{prefix}_delay_timeseries.csv", index=False)
+    if not df_quality.empty:
+        quality_name = "delay" if args.preset == "delay" else "loss"
+        df_quality.to_csv(out / f"{prefix}_{quality_name}_timeseries.csv", index=False)
 
     # Secondary throughput table (explicitly labeled).
     sec_cols = [
@@ -633,7 +716,7 @@ def main() -> None:
     dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
-    _plot_timeseries(df_wire, df_delay, out, prefix)
+    _plot_timeseries(df_wire, df_quality, out, prefix)
 
     metadata_path = session / "experiment_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
@@ -645,7 +728,7 @@ def main() -> None:
     print(f"Recovery times:  {out / f'{prefix}_recovery_times.csv'}")
     print(f"Secondary TP:    {out / f'{prefix}_secondary_throughput_windows.csv'}")
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
-    print(f"Time-series plot:{out / f'{prefix}_throughput_delay_over_time.png'}")
+    print(f"Time-series plot:{out / f'{prefix}_throughput_quality_over_time.png'}")
     print(f"\nWorker execution mode recorded by runner: {execution_mode}")
     print("Evaluation is read-only and does not start or stop the worker.")
     print(df_win.to_string(index=False, float_format="%.3f"))
