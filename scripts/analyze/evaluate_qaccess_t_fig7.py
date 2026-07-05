@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Evaluate a Fig.7 Q-ACCeSS-T session from pcap traffic.
+Evaluate a Fig.7 Q-ACCeSS-T session from pcap QUIC traffic.
 
 Input session layout:
   session/
@@ -10,8 +10,8 @@ Input session layout:
     fig7_qaccess_t/pcaps/pathB_h1_*.pcap
 
 This script intentionally does not read controller logs or pull-log fallback data.
-By default it evaluates downlink-only traffic. Use --traffic-scope all-udp to
-match the older notebook-style "all UDP in each path pcap" view.
+The project uses an old MPQUIC stack, and Wireshark does not need to decode QUIC
+for this evaluation. QUIC packets are selected as UDP packets in each path pcap.
 """
 
 from __future__ import annotations
@@ -30,12 +30,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-DOWNLINK_FILTERS = {
-    "pathA": "udp && ip.src == 10.0.1.2 && ip.dst == 10.0.1.1",
-    "pathB": "udp && ip.src == 10.0.2.2 && ip.dst == 10.0.2.1",
-}
-
-ALL_UDP_FILTERS = {
+QUIC_FILTERS = {
     "pathA": "udp",
     "pathB": "udp",
 }
@@ -48,22 +43,12 @@ RUNS = {
 DEFAULT_WINDOWS = [(0.0, 50.0), (50.0, 100.0), (100.0, 200.0)]
 
 
-def filters_for_scope(scope: str) -> dict[str, str]:
-    if scope == "downlink":
-        return DOWNLINK_FILTERS
-    if scope == "all-udp":
-        return ALL_UDP_FILTERS
-    raise ValueError(f"unsupported traffic scope: {scope}")
+def traffic_label() -> str:
+    return "quic"
 
 
-def scope_label(scope: str) -> str:
-    return "downlink" if scope == "downlink" else "all_udp"
-
-
-def scope_description(scope: str) -> str:
-    if scope == "downlink":
-        return "pcap UDP downlink only"
-    return "pcap all UDP packets per path capture"
+def traffic_description() -> str:
+    return "pcap QUIC-over-UDP packets per path capture"
 
 
 @dataclass
@@ -337,7 +322,6 @@ def save_figures(
     fig_dir: Path,
     total_by_mode: dict[str, list[dict]],
     summary_rows: list[dict],
-    traffic_scope: str,
 ) -> None:
     fig_dir.mkdir(parents=True, exist_ok=True)
     plt = import_pyplot(fig_dir.parent)
@@ -347,7 +331,7 @@ def save_figures(
 
     base = total_by_mode["baseline"]
     qacc = total_by_mode["qaccess_t"]
-    ylabel = f"{scope_description(traffic_scope)} throughput Mbps"
+    ylabel = f"{traffic_description()} throughput Mbps"
 
     plt.figure(figsize=(12, 5))
     plt.plot(col(base, "time_s"), col(base, "total_mbps"), label="baseline total", linewidth=2)
@@ -410,7 +394,7 @@ def save_figures(
     plt.bar([i + width / 2 for i in x], qaccess_vals, width, label="qaccess_t")
     plt.xticks(x, labels)
     plt.xlabel("window")
-    plt.ylabel(f"mean {scope_description(traffic_scope)} throughput Mbps")
+    plt.ylabel(f"mean {traffic_description()} throughput Mbps")
     plt.legend()
     plt.tight_layout()
     plt.savefig(fig_dir / "window_mean_throughput.png", dpi=150)
@@ -440,7 +424,6 @@ def write_summary(
     summary_dir: Path,
     session: Path,
     out_dir: Path,
-    traffic_scope: str,
     filters: dict[str, str],
     pcap_used: dict[str, dict[str, str]],
     windows: list[tuple[float, float]],
@@ -464,7 +447,7 @@ def write_summary(
                 "",
                 f"- input session: `{session}`",
                 f"- output directory: `{out_dir}`",
-                f"- traffic scope: `{traffic_scope}` ({scope_description(traffic_scope)})",
+                f"- traffic: `quic` ({traffic_description()})",
                 f"- windows: `{window_text}`",
                 "",
                 "## Tshark Filters",
@@ -491,7 +474,7 @@ def write_summary(
     result = {
         "session": str(session),
         "out_dir": str(out_dir),
-        "traffic_scope": traffic_scope,
+        "traffic": "quic",
         "windows": [{"start_s": lo, "end_s": hi} for lo, hi in windows],
         "tshark_filters": filters,
         "pcap_files": pcap_used,
@@ -506,10 +489,9 @@ def evaluate(args: argparse.Namespace) -> Path:
     if not session.is_dir():
         raise FileNotFoundError(f"session directory not found: {session}")
 
-    traffic_scope = args.traffic_scope
-    filters = filters_for_scope(traffic_scope)
-    label = scope_label(traffic_scope)
-    default_out_name = "eval_fig7_qaccess_t" if traffic_scope == "downlink" else f"eval_fig7_qaccess_t_{label}"
+    filters = QUIC_FILTERS
+    label = traffic_label()
+    default_out_name = "eval_fig7_qaccess_t_quic"
     out_dir = args.out_dir.resolve() if args.out_dir else session / default_out_name
     csv_dir = out_dir / "csv"
     fig_dir = out_dir / "figures"
@@ -544,14 +526,14 @@ def evaluate(args: argparse.Namespace) -> Path:
         pcap_b = find_one_pcap(run_dir, "pathB_h1_*.pcap")
         pcap_used[mode] = {"pathA": str(pcap_a), "pathB": str(pcap_b)}
 
-        log(f"[eval] reading {mode} pcaps traffic_scope={traffic_scope}")
+        log(f"[eval] reading {mode} pcaps traffic=quic")
         packets_by_path = {
             "pathA": read_filtered_packets(pcap_a, filters["pathA"], args.tshark_bin, commands_log),
             "pathB": read_filtered_packets(pcap_b, filters["pathB"], args.tshark_bin, commands_log),
         }
         all_packets = [pkt for packets in packets_by_path.values() for pkt in packets]
         if not all_packets:
-            raise RuntimeError(f"no packets found for {mode} with traffic_scope={traffic_scope}")
+            raise RuntimeError(f"no QUIC-over-UDP packets found for {mode}")
         t0 = min(ts for ts, _ in all_packets)
 
         bins_by_path: dict[str, dict[int, int]] = {}
@@ -564,7 +546,7 @@ def evaluate(args: argparse.Namespace) -> Path:
             if bins:
                 max_idx = max(max_idx, max(bins))
             if packet_count == 0:
-                warnings.append(f"{mode} {path_name} has no packets after {traffic_scope} filter")
+                warnings.append(f"{mode} {path_name} has no QUIC-over-UDP packets")
 
         for path_name, pcap in [("pathA", pcap_a), ("pathB", pcap_b)]:
             rows = rows_from_bins(bins_by_path[path_name], max_idx, args.bin_size)
@@ -648,31 +630,25 @@ def evaluate(args: argparse.Namespace) -> Path:
     ]
     write_csv(csv_dir / "window_summary.csv", summaries, summary_fields)
     write_csv(csv_dir / "comparison_summary.csv", comparisons, comparison_fields)
-    save_figures(fig_dir, total_by_mode, summaries, traffic_scope)
-    write_summary(summary_dir, session, out_dir, traffic_scope, filters, pcap_used, windows, comparisons, warnings)
+    save_figures(fig_dir, total_by_mode, summaries)
+    write_summary(summary_dir, session, out_dir, filters, pcap_used, windows, comparisons, warnings)
 
     log(f"[eval] output directory: {out_dir}")
     return out_dir
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Evaluate Q-ACCeSS-T Fig.7 pcap throughput")
+    ap = argparse.ArgumentParser(description="Evaluate Q-ACCeSS-T Fig.7 pcap QUIC throughput")
     ap.add_argument("--session", type=Path, required=True, help="session_qaccess_t_* directory")
     ap.add_argument(
         "--out-dir",
         type=Path,
         default=None,
-        help="default: <session>/eval_fig7_qaccess_t for downlink, <session>/eval_fig7_qaccess_t_all_udp for all-udp",
+        help="default: <session>/eval_fig7_qaccess_t_quic",
     )
     ap.add_argument("--bin-size", type=float, default=1.0)
     ap.add_argument("--windows", default="0:50,50:100,100:200")
     ap.add_argument("--tshark-bin", default="tshark")
-    ap.add_argument(
-        "--traffic-scope",
-        choices=["downlink", "all-udp"],
-        default="downlink",
-        help="downlink uses server-to-client IP filters; all-udp counts all UDP packets in each path pcap",
-    )
     args = ap.parse_args()
 
     if args.bin_size <= 0:
