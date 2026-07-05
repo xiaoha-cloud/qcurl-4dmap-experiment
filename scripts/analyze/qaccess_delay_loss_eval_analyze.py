@@ -64,33 +64,35 @@ def _p95(s: pd.Series) -> float:
 
 def _pcap_bytes_by_second(pcap: Path, global_t0: float) -> dict[int, int]:
     cmd = [
-        "tshark", "-n", "-r", str(pcap),
+        "tshark", "-n", "-r", "-",
         "-T", "fields", "-E", "separator=,",
         "-e", "frame.time_epoch", "-e", "frame.len",
     ]
-    proc = subprocess.Popen(
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    assert proc.stdout is not None
     bins: dict[int, int] = {}
-    for line in proc.stdout:
-        if not line.strip():
-            continue
-        parts = line.split(",", 1)
-        if len(parts) < 2:
-            continue
-        try:
-            t, n = float(parts[0]), int(float(parts[1]))
-        except ValueError:
-            continue
-        si = int(math.floor(t - global_t0))
-        if si >= 0:
-            bins[si] = bins.get(si, 0) + n
-    stderr = proc.stderr.read() if proc.stderr is not None else ""
-    returncode = proc.wait()
+    with pcap.open("rb") as capture:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=capture,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if not line.strip():
+                continue
+            parts = line.split(",", 1)
+            if len(parts) < 2:
+                continue
+            try:
+                t, n = float(parts[0]), int(float(parts[1]))
+            except ValueError:
+                continue
+            si = int(math.floor(t - global_t0))
+            if si >= 0:
+                bins[si] = bins.get(si, 0) + n
+        stderr = proc.stderr.read() if proc.stderr is not None else ""
+        returncode = proc.wait()
     if returncode != 0:
         raise RuntimeError(
             f"tshark failed for {pcap} (exit={returncode}): {stderr.strip()[:1000]}"
@@ -99,15 +101,17 @@ def _pcap_bytes_by_second(pcap: Path, global_t0: float) -> dict[int, int]:
 
 
 def _first_pcap_epoch(pcap: Path) -> float | None:
-    proc = subprocess.run(
-        [
-            "tshark", "-n", "-r", str(pcap), "-c", "1",
-            "-T", "fields", "-e", "frame.time_epoch",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    with pcap.open("rb") as capture:
+        proc = subprocess.run(
+            [
+                "tshark", "-n", "-r", "-", "-c", "1",
+                "-T", "fields", "-e", "frame.time_epoch",
+            ],
+            stdin=capture,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
     if proc.returncode != 0:
         raise RuntimeError(
             f"tshark failed to read first packet from {pcap} "
