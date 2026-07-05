@@ -414,12 +414,15 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
                 continue
             baseline = float(baseline_row[metric])
             dynamic = float(dynamic_row[metric])
+            change = dynamic - baseline
             rows.append({
                 "window": window,
                 "metric": metric,
                 "baseline": baseline,
                 "qaccess": dynamic,
                 "improvement_pct": _pct_change(baseline, dynamic, higher_is_better),
+                "absolute_change": change,
+                "improvement_absolute": change if higher_is_better else -change,
                 "better_when": "higher" if higher_is_better else "lower",
             })
         if "path_b_share_pct_mean" in df_win.columns:

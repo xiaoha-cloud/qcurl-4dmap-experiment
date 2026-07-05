@@ -44,6 +44,11 @@ class DelayLossEvaluationTest(unittest.TestCase):
         self.assertAlmostEqual(
             improvements["secondary_total_quic_wire_mbps_mean"], 20.0,
         )
+        absolute = result.set_index("metric")["improvement_absolute"]
+        self.assertAlmostEqual(absolute["owd_ms_mean"], 20.0)
+        self.assertAlmostEqual(
+            absolute["secondary_total_quic_wire_mbps_mean"], 2.0,
+        )
         share = result[result.metric == "path_b_share_pct_mean"].iloc[0]
         self.assertAlmostEqual(share["change_percentage_points"], -10.0)
 
