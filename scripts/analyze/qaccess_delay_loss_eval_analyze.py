@@ -155,25 +155,36 @@ def load_wire_timeseries(run_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _find_pull(run_dir: Path) -> Path | None:
+def _metric_log_candidates(run_dir: Path) -> list[Path]:
     logs = run_dir / "logs"
-    hits = sorted(logs.glob("pull_*.log")) if logs.is_dir() else []
-    if hits:
-        return hits[-1]
-    hits = sorted(run_dir.glob("**/pull_*.log"))
-    return hits[-1] if hits else None
+    patterns = ("pull_*.log", "server_*.log", "combined_*.log")
+    hits: list[Path] = []
+    for pattern in patterns:
+        hits.extend(sorted(logs.glob(pattern)) if logs.is_dir() else [])
+    if not hits:
+        for pattern in patterns:
+            hits.extend(sorted(run_dir.glob(f"**/{pattern}")))
+    return list(dict.fromkeys(hits))
 
 
 def load_pull_frames(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
-    pull = _find_pull(run_dir)
-    if pull is None:
+    candidates = _metric_log_candidates(run_dir)
+    if not candidates:
         return pd.DataFrame(), pd.DataFrame()
     try:
         from parse_logs import load_pull_log  # type: ignore
     except ImportError:
         return pd.DataFrame(), pd.DataFrame()
-    df_util, df_mon = load_pull_log(pull, label=run_dir.name)
-    return df_util if df_util is not None else pd.DataFrame(), df_mon if df_mon is not None else pd.DataFrame()
+    best_util, best_mon = pd.DataFrame(), pd.DataFrame()
+    best_score = -1
+    for candidate in candidates:
+        df_util, df_mon = load_pull_log(candidate, label=run_dir.name)
+        util = df_util if df_util is not None else pd.DataFrame()
+        mon = df_mon if df_mon is not None else pd.DataFrame()
+        score = len(util) + len(mon)
+        if score > best_score:
+            best_util, best_mon, best_score = util, mon, score
+    return best_util, best_mon
 
 
 def load_runtime_samples(run_dir: Path) -> pd.DataFrame:
