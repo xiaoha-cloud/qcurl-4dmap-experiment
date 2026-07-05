@@ -15,6 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MP="$ROOT/scripts/mininet/mp_topo.py"
 WORKER="$ROOT/scripts/analyze/qaccess_t_update_worker.py"
+TRAIN="$ROOT/scripts/analyze/train_qaccess_t.py"
 EVAL="$ROOT/scripts/analyze/evaluate_qaccess_t_fig7.py"
 
 SCENARIO="${SCENARIO:-fig7_lowcap}"
@@ -29,7 +30,9 @@ EVAL_PYTHON="${EVAL_PYTHON:-$PYTHON}"
 
 POLL_INTERVAL="${POLL_INTERVAL:-5}"
 RECENT_ROWS="${RECENT_ROWS:-5000}"
-CLEAR_COEFFS="${CLEAR_COEFFS:-0}"
+CLEAR_COEFFS="${CLEAR_COEFFS:-1}"
+RETRAIN_MODEL="${RETRAIN_MODEL:-1}"
+TRAINING_CSV="${TRAINING_CSV:-}"
 WORKER_LOG="${WORKER_LOG:-0}"
 WINDOWS="${WINDOWS:-0:50,50:100,100:200}"
 CAPACITY_PHASES="${CAPACITY_PHASES:-0:50:phase_1_10mbps,50:100:phase_2_15mbps,100:200:phase_3_5mbps,200::post_200s_5mbps}"
@@ -43,9 +46,9 @@ cd "$ROOT"
 mkdir -p derived logs_exp
 
 required=(
-  "derived/qaccess_t_model.pkl"
   "$MP"
   "$WORKER"
+  "$TRAIN"
   "$EVAL"
   "$BW_PROFILE"
 )
@@ -56,17 +59,48 @@ for path in "${required[@]}"; do
   fi
 done
 
-echo "[lowcap] cleaning runtime state (keeping trained model)"
+echo "[lowcap] cleaning runtime and online ML state"
 rm -f \
   derived/qaccess_runtime_samples.csv \
   derived/qaccess_update_request.json \
-  derived/qaccess_update_response.json
+  derived/qaccess_update_response.json \
+  derived/qaccess_t_runtime_coefficients.json \
+  derived/qaccess_worker_state.json
 
 if [[ "$CLEAR_COEFFS" == "1" ]]; then
-  echo "[lowcap] CLEAR_COEFFS=1, removing derived/qaccess_t_best_coefficients.json"
+  echo "[lowcap] removing previous optimized coefficients"
   rm -f derived/qaccess_t_best_coefficients.json
 else
-  echo "[lowcap] keeping derived/qaccess_t_best_coefficients.json if present"
+  echo "[lowcap] warning: keeping previous optimized coefficients"
+fi
+
+if [[ "$RETRAIN_MODEL" == "1" ]]; then
+  if [[ -z "$TRAINING_CSV" ]]; then
+    if [[ -f derived/qaccess_training_samples_clean.csv ]]; then
+      TRAINING_CSV="derived/qaccess_training_samples_clean.csv"
+    else
+      TRAINING_CSV="derived/qaccess_training_samples.csv"
+    fi
+  fi
+  if [[ ! -f "$TRAINING_CSV" ]]; then
+    echo "[error] missing training CSV for clean model rebuild: $TRAINING_CSV" >&2
+    exit 1
+  fi
+  echo "[lowcap] rebuilding model with current sklearn from $TRAINING_CSV"
+  rm -f \
+    derived/qaccess_t_model.pkl \
+    derived/qaccess_t_validation_metrics.json \
+    derived/qaccess_t_feature_importance.csv
+  "$WORKER_PYTHON" "$TRAIN" \
+    --input "$TRAINING_CSV" \
+    --model-out derived/qaccess_t_model.pkl \
+    --metrics-out derived/qaccess_t_validation_metrics.json \
+    --importance-out derived/qaccess_t_feature_importance.csv
+elif [[ ! -f derived/qaccess_t_model.pkl ]]; then
+  echo "[error] missing derived/qaccess_t_model.pkl and RETRAIN_MODEL=0" >&2
+  exit 1
+else
+  echo "[lowcap] warning: reusing existing model because RETRAIN_MODEL=0"
 fi
 
 SESSION_DIR="logs_exp/session_qaccess_t_lowcap_$(date +%Y%m%d_%H%M%S)"
