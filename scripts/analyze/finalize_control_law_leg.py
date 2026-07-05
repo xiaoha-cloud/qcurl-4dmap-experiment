@@ -456,6 +456,7 @@ def _cleanup_leg_dir(
     throughput_ok: bool,
     keep_pcap: bool,
     save_flv: bool,
+    keep_logs: bool,
 ) -> list[str]:
     if not throughput_ok:
         return sorted(str(p.relative_to(leg_dir)) for p in leg_dir.rglob("*") if p.is_file())
@@ -466,7 +467,7 @@ def _cleanup_leg_dir(
     if not save_flv:
         for flv in leg_dir.glob("output_*.flv"):
             flv.unlink(missing_ok=True)
-    if (leg_dir / "logs").is_dir():
+    if not keep_logs and (leg_dir / "logs").is_dir():
         shutil.rmtree(leg_dir / "logs", ignore_errors=True)
     if (leg_dir / "csv").is_dir():
         shutil.rmtree(leg_dir / "csv", ignore_errors=True)
@@ -528,6 +529,7 @@ def finalize_leg(
     keep_raw_runtime: bool,
     save_flv: bool,
     keep_all_buffers: bool,
+    keep_logs: bool,
 ) -> dict:
     leg_dir = leg_dir.resolve()
     repo = repo.resolve()
@@ -574,10 +576,17 @@ def finalize_leg(
         if p.is_file():
             p.unlink(missing_ok=True)
 
-    kept = _cleanup_leg_dir(leg_dir, throughput_ok=throughput_ok, keep_pcap=keep_pcap, save_flv=save_flv)
+    kept = _cleanup_leg_dir(
+        leg_dir,
+        throughput_ok=throughput_ok,
+        keep_pcap=keep_pcap,
+        save_flv=save_flv,
+        keep_logs=keep_logs,
+    )
 
     pcap_retained = any(leg_dir.rglob("*.pcap"))
     flv_retained = any(leg_dir.glob("output_*.flv"))
+    logs_retained = (leg_dir / "logs").is_dir() and any((leg_dir / "logs").iterdir())
     raw_retained = (repo / "derived" / "qaccess_runtime_samples.csv").is_file() or (
         leg_dir / "qaccess_runtime_samples_full.csv.gz"
     ).is_file()
@@ -596,6 +605,7 @@ def finalize_leg(
         "pcap_retained": pcap_retained,
         "raw_runtime_retained": raw_retained,
         "output_flv_retained": flv_retained,
+        "logs_retained": logs_retained,
         "kept_files": kept,
         "control_law_diagnostics_rows": int(len(diag)),
     }
@@ -611,6 +621,7 @@ def main() -> int:
     ap.add_argument("--keep-pcap", type=int, default=int(os.environ.get("KEEP_PCAP", "0")))
     ap.add_argument("--keep-raw-runtime", type=int, default=int(os.environ.get("KEEP_RAW_RUNTIME", "0")))
     ap.add_argument("--save-output-flv", type=int, default=int(os.environ.get("SAVE_OUTPUT_FLV", "0")))
+    ap.add_argument("--keep-logs", type=int, default=int(os.environ.get("SAVE_VERBOSE_LOGS", "0")))
     ap.add_argument(
         "--keep-all-processed-buffers",
         type=int,
@@ -627,6 +638,7 @@ def main() -> int:
         keep_raw_runtime=bool(args.keep_raw_runtime),
         save_flv=bool(args.save_output_flv),
         keep_all_buffers=bool(args.keep_all_processed_buffers),
+        keep_logs=bool(args.keep_logs),
     )
 
     print(f"[finalize] leg={summary['leg_dir']}")
@@ -639,6 +651,7 @@ def main() -> int:
     print(f"[finalize] pcap_retained={summary['pcap_retained']}")
     print(f"[finalize] raw_runtime_retained={summary['raw_runtime_retained']}")
     print(f"[finalize] output_flv_retained={summary['output_flv_retained']}")
+    print(f"[finalize] logs_retained={summary['logs_retained']}")
     print("[finalize] kept files:")
     for f in summary["kept_files"]:
         print(f"  {f}")
