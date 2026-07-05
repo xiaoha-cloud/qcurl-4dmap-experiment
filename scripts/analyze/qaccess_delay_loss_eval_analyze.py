@@ -64,15 +64,19 @@ def _p95(s: pd.Series) -> float:
 
 def _pcap_bytes_by_second(pcap: Path, global_t0: float) -> dict[int, int]:
     cmd = [
-        "tshark", "-r", str(pcap),
+        "tshark", "-n", "-r", str(pcap),
         "-T", "fields", "-E", "separator=,",
         "-e", "frame.time_epoch", "-e", "frame.len",
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if proc.returncode != 0:
-        raise RuntimeError(f"tshark failed for {pcap}: {proc.stderr[:500]}")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
     bins: dict[int, int] = {}
-    for line in proc.stdout.splitlines():
+    for line in proc.stdout:
         if not line.strip():
             continue
         parts = line.split(",", 1)
@@ -85,7 +89,34 @@ def _pcap_bytes_by_second(pcap: Path, global_t0: float) -> dict[int, int]:
         si = int(math.floor(t - global_t0))
         if si >= 0:
             bins[si] = bins.get(si, 0) + n
+    stderr = proc.stderr.read() if proc.stderr is not None else ""
+    returncode = proc.wait()
+    if returncode != 0:
+        raise RuntimeError(
+            f"tshark failed for {pcap} (exit={returncode}): {stderr.strip()[:1000]}"
+        )
     return bins
+
+
+def _first_pcap_epoch(pcap: Path) -> float | None:
+    proc = subprocess.run(
+        [
+            "tshark", "-n", "-r", str(pcap), "-c", "1",
+            "-T", "fields", "-e", "frame.time_epoch",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"tshark failed to read first packet from {pcap} "
+            f"(exit={proc.returncode}): {proc.stderr.strip()[:1000]}"
+        )
+    for line in proc.stdout.splitlines():
+        if line.strip():
+            return float(line.strip())
+    return None
 
 
 def load_wire_timeseries(run_dir: Path) -> pd.DataFrame:
@@ -94,15 +125,7 @@ def load_wire_timeseries(run_dir: Path) -> pd.DataFrame:
     if not pcaps:
         return pd.DataFrame()
 
-    epochs: list[float] = []
-    for p in pcaps:
-        out = subprocess.run(
-            ["tshark", "-r", str(p), "-T", "fields", "-e", "frame.time_epoch"],
-            capture_output=True, text=True, check=True,
-        )
-        for line in out.stdout.splitlines():
-            if line.strip():
-                epochs.append(float(line.strip()))
+    epochs = [epoch for p in pcaps if (epoch := _first_pcap_epoch(p)) is not None]
     if not epochs:
         return pd.DataFrame()
 
