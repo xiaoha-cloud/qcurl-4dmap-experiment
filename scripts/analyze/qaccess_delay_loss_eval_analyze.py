@@ -6,18 +6,22 @@ Primary metrics differ from Fig.7 throughput eval:
   delay — OWD/RTT proxy, jitter, path-B usage shift, recovery time
   loss  — loss rate, retrans/lost-byte proxy, path-B usage shift, recovery time
 
-Throughput (total / path A / path B) is reported as secondary only.
-Worker-based throughput RF optimization is NOT the objective here.
+Throughput (total / path A / path B) is computed from every captured frame.
+The evaluator is read-only: worker execution mode is recorded by the experiment runner.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import subprocess
 import sys
 from pathlib import Path
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import pandas as pd
 
 _REPO = Path(__file__).resolve().parents[2]
@@ -39,6 +43,7 @@ PRESETS: dict[str, dict[str, object]] = {
         "dynamic_dirs": ("delay_qaccess_d_dynamic", "delay_qaccess_dynamic"),
         "out_subdir": "delay_only_compare",
         "file_prefix": "delay",
+        "recovery_start_s": 150.0,
     },
     "loss": {
         "title": "Loss-only (primary: loss/retrans/recovery)",
@@ -46,6 +51,7 @@ PRESETS: dict[str, dict[str, object]] = {
         "dynamic_dirs": ("loss_qaccess_l_dynamic", "loss_qaccess_dynamic"),
         "out_subdir": "loss_only_compare",
         "file_prefix": "loss",
+        "recovery_start_s": 100.0,
     },
 }
 
@@ -146,6 +152,8 @@ def load_pull_frames(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
 def load_runtime_samples(run_dir: Path) -> pd.DataFrame:
     for p in (
         run_dir / "qaccess_runtime_samples.csv",
+        run_dir / "qaccess_runtime_samples_full.csv.gz",
+        run_dir / "derived_snapshots" / "qaccess_runtime_samples.csv",
         _REPO / "derived" / "qaccess_runtime_samples.csv",
     ):
         if p.is_file() and p.stat().st_size > 0:
@@ -161,9 +169,33 @@ def load_runtime_samples(run_dir: Path) -> pd.DataFrame:
 def _path_b_rows(df: pd.DataFrame, path_col: str = "path") -> pd.DataFrame:
     if df.empty or path_col not in df.columns:
         return df
-    # Mininet path B is typically path id 2 in logs.
-    pb = df[df[path_col].astype(str).isin(("2", "2.0"))]
-    return pb if not pb.empty else df
+
+    for label_col in ("physical_path_label", "physical_path"):
+        if label_col in df.columns:
+            labels = df[label_col].astype(str).str.strip().str.lower()
+            pb = df[labels.isin(("path b", "path_b", "b"))]
+            if not pb.empty:
+                return pb
+
+    for endpoint_col in ("remote_endpoint", "endpoint"):
+        if endpoint_col in df.columns:
+            endpoints = df[endpoint_col].fillna("").astype(str)
+            pb = df[endpoints.str.contains(r"10\.0\.2\.", regex=True)]
+            if not pb.empty:
+                return pb
+
+    numeric_ids = pd.to_numeric(df[path_col], errors="coerce")
+    # Pull utility logs use path=2 for Path B; qserver runtime samples use path_id=3.
+    preferred_ids = (3, 2) if path_col == "path_id" else (2, 3)
+    for path_id in preferred_ids:
+        pb = df[numeric_ids == path_id]
+        if not pb.empty:
+            return pb
+
+    unique_ids = sorted(numeric_ids.dropna().unique())
+    if len(unique_ids) >= 2:
+        return df[numeric_ids == unique_ids[-1]]
+    return df.iloc[0:0]
 
 
 def _window_mask(df: pd.DataFrame, lo: float, hi: float) -> pd.DataFrame:
@@ -206,6 +238,149 @@ def _recovery_time_s(
         else:
             streak = 0
     return float("nan")
+
+
+def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.DataFrame:
+    columns = [
+        "method", "time_s", "owd_ms_mean", "owd_ms_p95",
+        "rtt_ms_mean", "rtt_ms_p95", "jitter_ms_mean",
+    ]
+    pieces: list[pd.DataFrame] = []
+    if not util.empty and "owd_ms" in util.columns:
+        u = util.rename(columns={"t": "time_s"}) if "t" in util.columns else util.copy()
+        u = _path_b_rows(u)
+        if not u.empty:
+            u = u.copy()
+            u["time_s"] = pd.to_numeric(u["time_s"], errors="coerce").floordiv(1)
+            pieces.append(
+                u.groupby("time_s", as_index=False)["owd_ms"]
+                .agg(owd_ms_mean="mean", owd_ms_p95=lambda s: s.quantile(0.95))
+            )
+    if not mon.empty and "rtt_smoothed_ms" in mon.columns:
+        m = mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon.copy()
+        m = _path_b_rows(m)
+        if not m.empty:
+            m = m.copy()
+            m["time_s"] = pd.to_numeric(m["time_s"], errors="coerce").floordiv(1)
+            agg: dict[str, object] = {
+                "rtt_ms_mean": ("rtt_smoothed_ms", "mean"),
+                "rtt_ms_p95": ("rtt_smoothed_ms", lambda s: s.quantile(0.95)),
+            }
+            if "rtt_mean_dev_ms" in m.columns:
+                agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
+            pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
+
+    if not pieces:
+        return pd.DataFrame(columns=columns)
+    result = pieces[0]
+    for piece in pieces[1:]:
+        result = result.merge(piece, on="time_s", how="outer")
+    result.insert(0, "method", method)
+    for column in columns:
+        if column not in result.columns:
+            result[column] = float("nan")
+    return result[columns].sort_values("time_s").reset_index(drop=True)
+
+
+def _pct_change(baseline: float, dynamic: float, higher_is_better: bool) -> float:
+    if not math.isfinite(baseline) or not math.isfinite(dynamic) or baseline == 0:
+        return float("nan")
+    delta = dynamic - baseline
+    return float((delta if higher_is_better else -delta) / abs(baseline) * 100.0)
+
+
+def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.DataFrame:
+    metric_directions = {
+        "owd_ms_mean": False,
+        "owd_ms_p95": False,
+        "rtt_ms_mean": False,
+        "rtt_ms_p95": False,
+        "jitter_ms_mean": False,
+        "secondary_total_quic_wire_mbps_mean": True,
+        "secondary_path_a_quic_wire_mbps_mean": True,
+        "secondary_path_b_quic_wire_mbps_mean": True,
+    }
+    rows: list[dict[str, object]] = []
+    for window in df_win["window"].drop_duplicates():
+        baseline_rows = df_win[(df_win["method"] == "baseline") & (df_win["window"] == window)]
+        dynamic_rows = df_win[(df_win["method"] == dynamic_method) & (df_win["window"] == window)]
+        if baseline_rows.empty or dynamic_rows.empty:
+            continue
+        baseline_row, dynamic_row = baseline_rows.iloc[0], dynamic_rows.iloc[0]
+        for metric, higher_is_better in metric_directions.items():
+            if metric not in df_win.columns:
+                continue
+            baseline = float(baseline_row[metric])
+            dynamic = float(dynamic_row[metric])
+            rows.append({
+                "window": window,
+                "metric": metric,
+                "baseline": baseline,
+                "qaccess": dynamic,
+                "improvement_pct": _pct_change(baseline, dynamic, higher_is_better),
+                "better_when": "higher" if higher_is_better else "lower",
+            })
+        if "path_b_share_pct_mean" in df_win.columns:
+            baseline = float(baseline_row["path_b_share_pct_mean"])
+            dynamic = float(dynamic_row["path_b_share_pct_mean"])
+            rows.append({
+                "window": window,
+                "metric": "path_b_share_pct_mean",
+                "baseline": baseline,
+                "qaccess": dynamic,
+                "improvement_pct": float("nan"),
+                "change_percentage_points": dynamic - baseline,
+                "better_when": "context-dependent",
+            })
+    return pd.DataFrame(rows)
+
+
+def _plot_timeseries(
+    throughput: pd.DataFrame,
+    delay: pd.DataFrame,
+    out: Path,
+    prefix: str,
+) -> None:
+    if throughput.empty and delay.empty:
+        return
+
+    fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
+    for method, group in throughput.groupby("method"):
+        axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], label=method, linewidth=1.5)
+    axes[0].set_ylabel("Throughput (Mbps)")
+    axes[0].set_title("Total throughput from all captured frames")
+    axes[0].grid(alpha=0.25)
+    axes[0].legend()
+
+    for method, group in throughput.groupby("method"):
+        axes[1].plot(
+            group["time_s"], group["path_a_quic_wire_mbps"],
+            label=f"{method} Path A", linewidth=1.1,
+        )
+        axes[1].plot(
+            group["time_s"], group["path_b_quic_wire_mbps"],
+            label=f"{method} Path B", linewidth=1.1, linestyle="--",
+        )
+    axes[1].set_ylabel("Per-path (Mbps)")
+    axes[1].grid(alpha=0.25)
+    axes[1].legend(ncol=2, fontsize=8)
+
+    if not delay.empty and delay["owd_ms_mean"].notna().any():
+        for method, group in delay.groupby("method"):
+            axes[2].plot(group["time_s"], group["owd_ms_mean"], label=method, linewidth=1.5)
+        axes[2].set_ylabel("Path B OWD (ms)")
+        axes[2].legend()
+    else:
+        axes[2].text(0.5, 0.5, "No OWD samples found", ha="center", va="center",
+                     transform=axes[2].transAxes)
+        axes[2].set_ylabel("Path B OWD (ms)")
+    axes[2].set_xlabel("Time (s)")
+    axes[2].grid(alpha=0.25)
+    for axis in axes:
+        axis.axvspan(90, 150 if prefix == "delay" else 100, color="tab:red", alpha=0.08)
+    fig.tight_layout()
+    fig.savefig(out / f"{prefix}_throughput_delay_over_time.png", dpi=180)
+    plt.close(fig)
 
 
 def _delay_window_metrics(
@@ -286,13 +461,16 @@ def analyze_run(
     method: str,
     preset: str,
     full_hi: float,
-) -> tuple[pd.DataFrame, dict]:
+    recovery_start_s: float,
+) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
     util, mon = load_pull_frames(run_dir)
     wire = load_wire_timeseries(run_dir)
     samples = load_runtime_samples(run_dir)
 
     if not wire.empty:
-        wire.to_csv(run_dir / f"wire_timeseries_{method}.csv", index=False)
+        wire = wire.copy()
+        wire.insert(0, "method", method)
+    delay_timeseries = _per_second_delay(util, mon, method)
 
     recovery: dict[str, float] = {}
     if preset == "delay":
@@ -300,24 +478,26 @@ def analyze_run(
         if not ref_series.empty and "owd_ms" in ref_series.columns:
             recovery["recovery_time_s_owd"] = _recovery_time_s(
                 _path_b_rows(ref_series), tcol="time_s", vcol="owd_ms", ref_lo=50.0, ref_hi=90.0,
+                recover_after=recovery_start_s,
             )
         share_series = wire if not wire.empty else pd.DataFrame()
         if not share_series.empty:
             recovery["recovery_time_s_path_b_share"] = _recovery_time_s(
                 share_series, tcol="time_s", vcol="path_b_share_pct",
-                ref_lo=50.0, ref_hi=90.0, tol_frac=0.10,
+                ref_lo=50.0, ref_hi=90.0, recover_after=recovery_start_s, tol_frac=0.10,
             )
     else:
         if not samples.empty and "loss_rate" in samples.columns:
             sb = _path_b_rows(samples, path_col="path_id")
             recovery["recovery_time_s_loss_rate"] = _recovery_time_s(
                 sb, tcol="time_s", vcol="loss_rate", ref_lo=50.0, ref_hi=90.0,
+                recover_after=recovery_start_s,
             )
         share_series = wire if not wire.empty else pd.DataFrame()
         if not share_series.empty:
             recovery["recovery_time_s_path_b_share"] = _recovery_time_s(
                 share_series, tcol="time_s", vcol="path_b_share_pct",
-                ref_lo=50.0, ref_hi=90.0, tol_frac=0.10,
+                ref_lo=50.0, ref_hi=90.0, recover_after=recovery_start_s, tol_frac=0.10,
             )
 
     rows: list[dict] = []
@@ -341,7 +521,7 @@ def analyze_run(
             **metrics,
         })
 
-    return pd.DataFrame(rows), recovery
+    return pd.DataFrame(rows), recovery, wire, delay_timeseries
 
 
 def main() -> None:
@@ -373,14 +553,22 @@ def main() -> None:
     }
 
     all_windows: list[pd.DataFrame] = []
+    all_wire: list[pd.DataFrame] = []
+    all_delay: list[pd.DataFrame] = []
     recovery_rows: list[dict] = []
     for method, rdir in runs.items():
         if not rdir.is_dir():
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
-        df, rec = analyze_run(rdir, method, args.preset, args.full_hi)
+        df, rec, wire, delay = analyze_run(
+            rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
+        )
         if not df.empty:
             all_windows.append(df)
+        if not wire.empty:
+            all_wire.append(wire)
+        if not delay.empty:
+            all_delay.append(delay)
         recovery_rows.append({"method": method, "run_dir": str(rdir), **rec})
 
     if not all_windows:
@@ -389,8 +577,14 @@ def main() -> None:
 
     prefix = cfg["file_prefix"]
     df_win = pd.concat(all_windows, ignore_index=True)
+    df_wire = pd.concat(all_wire, ignore_index=True) if all_wire else pd.DataFrame()
+    df_delay = pd.concat(all_delay, ignore_index=True) if all_delay else pd.DataFrame()
     df_win.to_csv(out / f"{prefix}_primary_metrics_windows.csv", index=False)
     pd.DataFrame(recovery_rows).to_csv(out / f"{prefix}_recovery_times.csv", index=False)
+    if not df_wire.empty:
+        df_wire.to_csv(out / f"{prefix}_throughput_timeseries.csv", index=False)
+    if not df_delay.empty:
+        df_delay.to_csv(out / f"{prefix}_delay_timeseries.csv", index=False)
 
     # Secondary throughput table (explicitly labeled).
     sec_cols = [
@@ -398,13 +592,24 @@ def main() -> None:
         "secondary_path_a_quic_wire_mbps_mean", "secondary_path_b_quic_wire_mbps_mean",
     ]
     df_win[sec_cols].to_csv(out / f"{prefix}_secondary_throughput_windows.csv", index=False)
+    dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
+    comparison = build_improvement_table(df_win, dynamic_method)
+    comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
+    _plot_timeseries(df_wire, df_delay, out, prefix)
+
+    metadata_path = session / "experiment_metadata.json"
+    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
+    execution_mode = metadata.get("execution_mode", "unknown")
 
     print(f"Experiment: {cfg['title']}")
     print(f"Session: {session}")
     print(f"Primary metrics: {out / f'{prefix}_primary_metrics_windows.csv'}")
     print(f"Recovery times:  {out / f'{prefix}_recovery_times.csv'}")
     print(f"Secondary TP:    {out / f'{prefix}_secondary_throughput_windows.csv'}")
-    print("\nNote: worker disabled in eval scripts; do not interpret as throughput-RF optimization.")
+    print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
+    print(f"Time-series plot:{out / f'{prefix}_throughput_delay_over_time.png'}")
+    print(f"\nWorker execution mode recorded by runner: {execution_mode}")
+    print("Evaluation is read-only and does not start or stop the worker.")
     print(df_win.to_string(index=False, float_format="%.3f"))
 
 
