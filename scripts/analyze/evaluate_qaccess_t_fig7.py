@@ -27,7 +27,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Optional
 
 
 QUIC_FILTERS = {
@@ -41,6 +41,10 @@ RUNS = {
 }
 
 DEFAULT_WINDOWS = [(0.0, 50.0), (50.0, 100.0), (100.0, 200.0)]
+DEFAULT_CAPACITY_PHASES = (
+    "0:50:phase_1_20mbps,50:100:phase_2_30mbps,"
+    "100:200:phase_3_10mbps,200::post_200s_10mbps"
+)
 
 
 def traffic_label() -> str:
@@ -78,6 +82,28 @@ def parse_windows(spec: str) -> list[tuple[float, float]]:
     if not windows:
         raise ValueError("at least one window is required")
     return windows
+
+
+def parse_capacity_phases(spec: str) -> list[tuple[float, Optional[float], str]]:
+    phases: list[tuple[float, Optional[float], str]] = []
+    for part in spec.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        pieces = item.split(":", 2)
+        if len(pieces) != 3:
+            raise ValueError(f"invalid capacity phase {item!r}; expected START:END:LABEL")
+        start_s, end_s, label = pieces
+        lo = float(start_s)
+        hi = float(end_s) if end_s else None
+        if hi is not None and hi <= lo:
+            raise ValueError(f"invalid capacity phase {item!r}; END must be greater than START")
+        if not label:
+            raise ValueError(f"invalid capacity phase {item!r}; LABEL is required")
+        phases.append((lo, hi, label))
+    if not phases:
+        raise ValueError("at least one capacity phase is required")
+    return phases
 
 
 def bin_suffix(bin_size: float) -> str:
@@ -192,14 +218,11 @@ def rows_from_bins(bins: dict[int, int], max_idx: int, bin_size: float) -> list[
     return rows
 
 
-def capacity_phase(time_s: float) -> str:
-    if time_s < 50:
-        return "phase_1_20mbps"
-    if time_s < 100:
-        return "phase_2_30mbps"
-    if time_s < 200:
-        return "phase_3_10mbps"
-    return "post_200s_10mbps"
+def capacity_phase(time_s: float, phases: list[tuple[float, Optional[float], str]]) -> str:
+    for lo, hi, label in phases:
+        if time_s >= lo and (hi is None or time_s < hi):
+            return label
+    return "unknown"
 
 
 def write_csv(path: Path, rows: list[dict], fieldnames: list[str]) -> None:
@@ -512,6 +535,7 @@ def evaluate(args: argparse.Namespace) -> Path:
 
     ensure_tshark(args.tshark_bin)
     windows = parse_windows(args.windows)
+    capacity_phases = parse_capacity_phases(args.capacity_phases)
     suffix = bin_suffix(args.bin_size)
 
     pcap_used: dict[str, dict[str, str]] = {}
@@ -589,7 +613,7 @@ def evaluate(args: argparse.Namespace) -> Path:
                     "pathA_mbps": a,
                     "pathB_mbps": b,
                     "total_mbps": a + b,
-                    "capacity_phase": capacity_phase(time_s),
+                    "capacity_phase": capacity_phase(time_s, capacity_phases),
                 }
             )
         total_by_mode[mode] = total_rows
@@ -648,6 +672,7 @@ def main() -> None:
     )
     ap.add_argument("--bin-size", type=float, default=1.0)
     ap.add_argument("--windows", default="0:50,50:100,100:200")
+    ap.add_argument("--capacity-phases", default=DEFAULT_CAPACITY_PHASES)
     ap.add_argument("--tshark-bin", default="tshark")
     args = ap.parse_args()
 

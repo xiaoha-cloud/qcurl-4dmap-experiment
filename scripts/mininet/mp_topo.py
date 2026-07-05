@@ -83,6 +83,15 @@ SCENARIOS = {
         "path_a": (20, "40ms", 0),
         "path_b": (20, "20ms", 0.001),
     },
+    # Low-capacity Fig.7 sensitivity:
+    #   Link1(path_a): 10Mbps, 40ms, 0%
+    #   Link2(path_b): 10Mbps, 20ms, 0.001%
+    # Combine with bw_profile.fig7_lowcap_200s.env so path_b changes
+    # 10 -> 15 -> 5 Mbps without changing the original Fig.7 preset.
+    "fig7_lowcap": {
+        "path_a": (10, "40ms", 0),
+        "path_b": (10, "20ms", 0.001),
+    },
 }
 
 
