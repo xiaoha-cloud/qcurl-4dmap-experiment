@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 import pandas as pd
 
@@ -68,6 +71,30 @@ class DelayLossEvaluationTest(unittest.TestCase):
         )
         self.assertEqual(result["method"].tolist(), ["loss_qaccess_l"])
         self.assertAlmostEqual(result["sample_loss_rate_mean"].iloc[0], 0.05)
+
+    def test_delay_plot_falls_back_to_rtt_when_owd_missing(self):
+        throughput = pd.DataFrame([
+            {
+                "method": "baseline",
+                "time_s": 1,
+                "total_quic_wire_mbps": 10.0,
+                "path_a_quic_wire_mbps": 9.0,
+                "path_b_quic_wire_mbps": 1.0,
+            }
+        ])
+        quality = pd.DataFrame([
+            {
+                "method": "baseline",
+                "time_s": 1,
+                "owd_ms_mean": float("nan"),
+                "rtt_ms_mean": 42.0,
+            }
+        ])
+
+        with TemporaryDirectory() as td, patch("matplotlib.axes.Axes.text") as text:
+            evaluation._plot_timeseries(throughput, quality, Path(td), "delay")
+
+        text.assert_not_called()
 
 
 if __name__ == "__main__":

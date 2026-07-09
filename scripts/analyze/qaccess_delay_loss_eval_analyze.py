@@ -453,7 +453,6 @@ def _plot_timeseries(
     for method, group in throughput.groupby("method"):
         axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], label=method, linewidth=1.5)
     axes[0].set_ylabel("Throughput (Mbps)")
-    axes[0].set_title("Total throughput from all captured frames")
     axes[0].grid(alpha=0.25)
     axes[0].legend()
 
@@ -472,8 +471,14 @@ def _plot_timeseries(
 
     quality_column = ""
     quality_label = ""
-    if prefix == "delay" and "owd_ms_mean" in quality.columns:
-        quality_column, quality_label = "owd_ms_mean", "Path B OWD (ms)"
+    if prefix == "delay":
+        for candidate, label in (
+            ("owd_ms_mean", "Path B OWD (ms)"),
+            ("rtt_ms_mean", "Path B RTT (ms)"),
+        ):
+            if candidate in quality.columns and quality[candidate].notna().any():
+                quality_column, quality_label = candidate, label
+                break
     else:
         for candidate, label in (
             ("utility_loss_mean", "Path B utility loss"),
