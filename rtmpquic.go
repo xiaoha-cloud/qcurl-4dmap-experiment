@@ -77,8 +77,57 @@ func pullrtmp(url, filename string, protocol string) {
 		//option.ReadAVTimeoutMS = 10000
 	})
 
+	var (
+		loggedFirstVideoReceive bool
+		pullerVideoCount        int64
+	)
+
 	err = session.Pull(url, func(msg base.RTMPMsg) {
 		tag := remux.RTMPMsg2FLVTag(msg)
+		physicalMS := qoeNowMS()
+
+		if msg.Header.MsgTypeID == base.RTMPTypeIDVideo {
+			pullerVideoCount++
+			if !loggedFirstVideoReceive {
+				logQoEEvent(qoeEvent{
+					role:           "puller",
+					event:          "puller_first_video",
+					flvTimestampMS: qoeUint32(msg.Header.TimestampAbs),
+					physicalTimeMS: physicalMS,
+					tagType:        qoeRTMPTagType(msg),
+					frameType:      qoeRTMPFrameType(msg),
+					chunkSize:      qoeInt(len(msg.Payload)),
+					streamID:       qoeInt(int(msg.Header.MsgStreamID)),
+					note:           qoeNote("video_index=%d", pullerVideoCount),
+				})
+				loggedFirstVideoReceive = true
+			}
+			if qoeShouldLogVideo(pullerVideoCount) {
+				logQoEEvent(qoeEvent{
+					role:           "puller",
+					event:          "puller_video_receive",
+					flvTimestampMS: qoeUint32(msg.Header.TimestampAbs),
+					physicalTimeMS: physicalMS,
+					tagType:        qoeRTMPTagType(msg),
+					frameType:      qoeRTMPFrameType(msg),
+					chunkSize:      qoeInt(len(msg.Payload)),
+					streamID:       qoeInt(int(msg.Header.MsgStreamID)),
+					note:           qoeNote("video_index=%d", pullerVideoCount),
+				})
+			}
+		} else if msg.Header.MsgTypeID == base.RTMPTypeIDAudio && qoeShouldLogAudio() {
+			logQoEEvent(qoeEvent{
+				role:           "puller",
+				event:          "puller_audio_receive",
+				flvTimestampMS: qoeUint32(msg.Header.TimestampAbs),
+				physicalTimeMS: physicalMS,
+				tagType:        qoeRTMPTagType(msg),
+				frameType:      qoeRTMPFrameType(msg),
+				chunkSize:      qoeInt(len(msg.Payload)),
+				streamID:       qoeInt(int(msg.Header.MsgStreamID)),
+			})
+		}
+
 		err := w.WriteTag(*tag)
 		nazalog.Assert(nil, err)
 	})

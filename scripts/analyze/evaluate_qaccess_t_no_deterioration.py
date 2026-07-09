@@ -263,8 +263,14 @@ def strict_qoe_summary(run_dir: Path) -> dict[str, Any]:
     def is_puller_receive(row: dict[str, str]) -> bool:
         ev = str(row.get("event", "")).lower()
         role = role_text(row)
+        puller_receive_events = {
+            "receiver_frame",
+            "puller_first_video",
+            "puller_video_receive",
+            "video_tag_receive",
+        }
         return is_video(row) and ("puller" in role or "receiver" in role) and (
-            "receive" in ev or "receiver" in ev or ev in {"receiver_frame", "puller_first_video"}
+            "receive" in ev or "receiver" in ev or ev in puller_receive_events
         )
 
     def is_server_receive(row: dict[str, str]) -> bool:
