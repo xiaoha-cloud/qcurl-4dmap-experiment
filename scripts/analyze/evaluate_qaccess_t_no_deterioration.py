@@ -279,18 +279,22 @@ def strict_qoe_summary(run_dir: Path) -> dict[str, Any]:
         return is_video(row) and "server" in role and ("receive" in ev or ev == "server_video_receive")
 
     def matched_delay_stats(send_events: list[dict[str, str]], recv_events: list[dict[str, str]]) -> dict[str, Any]:
-        sends_by_media: dict[float, float] = {}
+        sends_by_media: dict[float, list[float]] = {}
         for row in sorted(send_events, key=lambda r: event_time(r) or 0):
             mt, et = media_time(row), event_time(row)
             if mt is not None and et is not None:
-                sends_by_media.setdefault(round(mt, 3), et)
+                sends_by_media.setdefault(round(mt, 3), []).append(et)
+
         delays = []
         for row in sorted(recv_events, key=lambda r: event_time(r) or 0):
             mt, rt = media_time(row), event_time(row)
             if mt is None or rt is None:
                 continue
-            st = sends_by_media.get(round(mt, 3))
-            if st is not None and rt >= st:
+            send_queue = sends_by_media.get(round(mt, 3), [])
+            while send_queue and send_queue[0] > rt:
+                send_queue.pop(0)
+            if send_queue:
+                st = send_queue.pop(0)
                 delays.append(rt - st)
         if not delays:
             return {}
