@@ -236,6 +236,17 @@ def strict_qoe_summary(run_dir: Path) -> dict[str, Any]:
         "qoe_events_available": "yes" if rows else "no",
         "startup_latency_ms": "",
         "avg_stream_delay_ms": "",
+        "stream_delay_scope": "",
+        "matched_stream_delay_frames": "",
+        "p50_stream_delay_ms": "",
+        "p95_stream_delay_ms": "",
+        "max_stream_delay_ms": "",
+        "startup_pusher_server_ms": "",
+        "avg_pusher_server_delay_ms": "",
+        "p50_pusher_server_delay_ms": "",
+        "p95_pusher_server_delay_ms": "",
+        "max_pusher_server_delay_ms": "",
+        "matched_pusher_server_frames": "",
         "rebuffering_time_s": "",
         "rebuffering_ratio": "",
         "qoe_note": "",
@@ -244,45 +255,95 @@ def strict_qoe_summary(run_dir: Path) -> dict[str, Any]:
         out["qoe_note"] = "raw_qoe_events_missing"
         return out
 
-    send_events = []
-    recv_events = []
-    for row in rows:
+    def is_pusher_send(row: dict[str, str]) -> bool:
         ev = str(row.get("event", "")).lower()
-        t = event_time(row)
-        if t is None or not is_video(row):
-            continue
         role = role_text(row)
-        if "pusher" in role or "publisher" in role or "send" in ev:
-            if "send" in ev or ev in {"first_tag_send"}:
-                send_events.append(row)
-        if "puller" in role or "receiver" in role or ev in {"receiver_frame", "puller_first_video"}:
-            if "receive" in ev or "receiver" in ev or ev == "puller_first_video":
-                recv_events.append(row)
+        return is_video(row) and ("pusher" in role or "publisher" in role) and ("send" in ev or ev == "first_tag_send")
+
+    def is_puller_receive(row: dict[str, str]) -> bool:
+        ev = str(row.get("event", "")).lower()
+        role = role_text(row)
+        return is_video(row) and ("puller" in role or "receiver" in role) and (
+            "receive" in ev or "receiver" in ev or ev in {"receiver_frame", "puller_first_video"}
+        )
+
+    def is_server_receive(row: dict[str, str]) -> bool:
+        ev = str(row.get("event", "")).lower()
+        role = role_text(row)
+        return is_video(row) and "server" in role and ("receive" in ev or ev == "server_video_receive")
+
+    def matched_delay_stats(send_events: list[dict[str, str]], recv_events: list[dict[str, str]]) -> dict[str, Any]:
+        sends_by_media: dict[float, float] = {}
+        for row in sorted(send_events, key=lambda r: event_time(r) or 0):
+            mt, et = media_time(row), event_time(row)
+            if mt is not None and et is not None:
+                sends_by_media.setdefault(round(mt, 3), et)
+        delays = []
+        for row in sorted(recv_events, key=lambda r: event_time(r) or 0):
+            mt, rt = media_time(row), event_time(row)
+            if mt is None or rt is None:
+                continue
+            st = sends_by_media.get(round(mt, 3))
+            if st is not None and rt >= st:
+                delays.append(rt - st)
+        if not delays:
+            return {}
+        delays_sorted = sorted(delays)
+
+        def percentile(values: list[float], q: float) -> float:
+            if len(values) == 1:
+                return values[0]
+            pos = (len(values) - 1) * q
+            lo = int(math.floor(pos))
+            hi = int(math.ceil(pos))
+            if lo == hi:
+                return values[lo]
+            return values[lo] + (values[hi] - values[lo]) * (pos - lo)
+
+        return {
+            "matched": len(delays_sorted),
+            "startup": round(delays_sorted[0], 3),
+            "avg": round(sum(delays_sorted) / len(delays_sorted), 3),
+            "p50": round(percentile(delays_sorted, 0.50), 3),
+            "p95": round(percentile(delays_sorted, 0.95), 3),
+            "max": round(delays_sorted[-1], 3),
+        }
+
+    send_events = [r for r in rows if is_pusher_send(r)]
+    puller_recv_events = [r for r in rows if is_puller_receive(r)]
+    server_recv_events = [r for r in rows if is_server_receive(r)]
 
     notes = []
-    send_events = sorted(send_events, key=lambda r: event_time(r) or 0)
-    recv_events = sorted(recv_events, key=lambda r: event_time(r) or 0)
-    if send_events and recv_events:
-        out["startup_latency_ms"] = round((event_time(recv_events[0]) or 0) - (event_time(send_events[0]) or 0), 3)
+    puller_stats = matched_delay_stats(send_events, puller_recv_events)
+    server_stats = matched_delay_stats(send_events, server_recv_events)
+
+    if server_stats:
+        out["startup_pusher_server_ms"] = server_stats["startup"]
+        out["avg_pusher_server_delay_ms"] = server_stats["avg"]
+        out["p50_pusher_server_delay_ms"] = server_stats["p50"]
+        out["p95_pusher_server_delay_ms"] = server_stats["p95"]
+        out["max_pusher_server_delay_ms"] = server_stats["max"]
+        out["matched_pusher_server_frames"] = server_stats["matched"]
+
+    if puller_stats:
+        out["startup_latency_ms"] = puller_stats["startup"]
+        out["avg_stream_delay_ms"] = puller_stats["avg"]
+        out["p50_stream_delay_ms"] = puller_stats["p50"]
+        out["p95_stream_delay_ms"] = puller_stats["p95"]
+        out["max_stream_delay_ms"] = puller_stats["max"]
+        out["matched_stream_delay_frames"] = puller_stats["matched"]
+        out["stream_delay_scope"] = "pusher_to_puller"
+    elif server_stats:
+        out["startup_latency_ms"] = server_stats["startup"]
+        out["avg_stream_delay_ms"] = server_stats["avg"]
+        out["p50_stream_delay_ms"] = server_stats["p50"]
+        out["p95_stream_delay_ms"] = server_stats["p95"]
+        out["max_stream_delay_ms"] = server_stats["max"]
+        out["matched_stream_delay_frames"] = server_stats["matched"]
+        out["stream_delay_scope"] = "pusher_to_server_fallback"
+        notes.append("stream_delay_uses_pusher_to_server_fallback_no_puller_frames")
     else:
         notes.append("startup_unavailable_no_matched_first_video_send_receive")
-
-    sends_by_media: dict[float, float] = {}
-    for row in send_events:
-        mt, et = media_time(row), event_time(row)
-        if mt is not None and et is not None:
-            sends_by_media.setdefault(round(mt, 3), et)
-    delays = []
-    for row in recv_events:
-        mt, rt = media_time(row), event_time(row)
-        if mt is None or rt is None:
-            continue
-        st = sends_by_media.get(round(mt, 3))
-        if st is not None:
-            delays.append(rt - st)
-    if delays:
-        out["avg_stream_delay_ms"] = round(sum(delays) / len(delays), 3)
-    else:
         notes.append("stream_delay_unavailable_no_matched_frame_timestamps")
 
     gap_events = [r for r in rows if str(r.get("event", "")).lower() in {"receiver_gap", "playback_gap", "rebuffer", "rebuffering"}]
@@ -301,7 +362,8 @@ def strict_qoe_summary(run_dir: Path) -> dict[str, Any]:
         out["rebuffering_time_s"] = 0.0
         notes.append("no_explicit_rebuffer_events")
 
-    video_rows = sorted(recv_events, key=lambda r: event_time(r) or 0)
+    ratio_reference_events = puller_recv_events if puller_recv_events else server_recv_events
+    video_rows = sorted(ratio_reference_events, key=lambda r: event_time(r) or 0)
     if video_rows and out["rebuffering_time_s"] != "":
         start = event_time(video_rows[0])
         end = event_time(video_rows[-1])
@@ -388,7 +450,7 @@ def plot_qoe(out: Path, qoe_rows: list[dict[str, Any]]) -> None:
     metrics = [
         ("rebuffering_time_s", "Re-buffering time (s)"),
         ("startup_latency_ms", "Start-up latency (ms)"),
-        ("avg_stream_delay_ms", "Average stream delay (ms)"),
+        ("avg_stream_delay_ms", "Stream delay (ms)"),
         ("aSSIM", "aSSIM"),
     ]
     methods = [r["method"] for r in qoe_rows]
