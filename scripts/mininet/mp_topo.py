@@ -77,6 +77,12 @@ TC_BW_SCRIPT = os.path.join(MININET_DIR, "tc_bw_steps.sh")
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
 # Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP utility-mode selection.
 SCENARIOS = {
+    # Controlled experiments start with identical paths. Dynamic profiles, when
+    # selected, change only Path B server egress on h2-eth1.
+    "clean_equal_paths": {
+        "path_a": (20, "40ms", 0),
+        "path_b": (20, "40ms", 0),
+    },
     # Paper Fig.7-like baseline:
     #   Link1(path_a): 20Mbps, 40ms, 0%
     #   Link2(path_b): 20Mbps, 20ms, 0.001%

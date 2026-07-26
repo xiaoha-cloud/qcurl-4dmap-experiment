@@ -20,10 +20,17 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_ROOT="$ROOT"
 CHECK_ONLY=0
-if [[ "${1:-}" == "--check-only" ]]; then
-  CHECK_ONLY=1
-  shift
-fi
+CONFIGURATION_ONLY=0
+case "${1:-}" in
+  --check-only)
+    CHECK_ONLY=1
+    shift
+    ;;
+  --configuration-only)
+    CONFIGURATION_ONLY=1
+    shift
+    ;;
+esac
 if [[ "$#" -ne 0 ]]; then
   echo "[error] unsupported argument: $1" >&2
   exit 2
@@ -31,11 +38,17 @@ fi
 MP="$ROOT/scripts/mininet/mp_topo.py"
 RESET="$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
 FINALIZE="$ROOT/scripts/mininet/finalize_experiment_leg.sh"
+CLEAN_CONFIG="$ROOT/scripts/mininet/clean_experiment_config.py"
 PHASE2_STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived}"
 SCENARIO="${SCENARIO:-fig8}"
 CONTROLLER_VARIANT="${QACCESS_CONTROLLER_VARIANT:-qaccess_t}"
 PROFILE_KIND="${QACCESS_PROFILE_KIND:-combined}"
-DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile_90_150.env}"
+if [[ "$PROFILE_KIND" == "none" ]]; then
+  DETERIORATION_PROFILE="${DETERIORATION_PROFILE-}"
+else
+  DETERIORATION_PROFILE="${DETERIORATION_PROFILE:-scripts/mininet/combined_deterioration_profile_90_150.env}"
+fi
+EXPERIMENT_FAMILY="${QACCESS_EXPERIMENT_FAMILY:-historical}"
 TIMEOUT="${TIMEOUT:-220}"
 POST_UPDATE_OBSERVE_SEC="${QACCESS_POST_UPDATE_OBSERVE_SEC:-15}"
 SAVE_VERBOSE_LOGS="${SAVE_VERBOSE_LOGS:-0}"
@@ -49,7 +62,7 @@ COEFF_SMOOTHING="${QACCESS_COEFF_SMOOTHING:-1}"
 WORKER_PYTHON="${WORKER_PYTHON:-${REPO_ROOT}/.venv/bin/python3}"
 WORKER_MODEL="${QACCESS_WORKER_MODEL:-derived/qaccess_t_redesign/qaccess_t_model_delta_bw_1s.pkl}"
 WORKER_MODEL_METADATA="${QACCESS_WORKER_MODEL_METADATA:-derived/qaccess_t_redesign/qaccess_t_redesign_report.json}"
-WORKER_TARGET_MODE="${QACCESS_WORKER_TARGET_MODE:-delta_bw_1s}"
+WORKER_TARGET_MODE="${QACCESS_WORKER_TARGET_MODE:-${QACCESS_TARGET_MODE:-delta_bw_1s}}"
 EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-shadow}"
 MULTIPATH_SHADOW_SCORING=1
 COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}"
@@ -57,6 +70,8 @@ GATE_BPS="${QACCESS_GATE_BPS:-${QACCESS_MIN_DELTA_GAIN_BPS:-500000}}"
 GATE_MODE="${QACCESS_GATE_MODE:-absolute}"
 MIN_RELATIVE_GAIN="${QACCESS_MIN_RELATIVE_GAIN:-0.03}"
 MIN_OBJECTIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_IMPROVEMENT:-0}"
+GATE_POLICY="${QACCESS_GATE_POLICY:-legacy}"
+TRIGGER_MODE="${QACCESS_TRIGGER_MODE:-legacy_buffer_full}"
 SESSION_KIND="${QACCESS_SESSION_KIND:-combined_deterioration}"
 BASELINE_LABEL="${QACCESS_BASELINE_LABEL:-combined_baseline}"
 DYNAMIC_LABEL="${QACCESS_DYNAMIC_LABEL:-combined_${CONTROLLER_VARIANT}_dynamic}"
@@ -72,7 +87,9 @@ resolve_repo_path() {
 
 WORKER_MODEL="$(resolve_repo_path "$WORKER_MODEL")"
 WORKER_MODEL_METADATA="$(resolve_repo_path "$WORKER_MODEL_METADATA")"
-DETERIORATION_PROFILE="$(resolve_repo_path "$DETERIORATION_PROFILE")"
+if [[ -n "$DETERIORATION_PROFILE" ]]; then
+  DETERIORATION_PROFILE="$(resolve_repo_path "$DETERIORATION_PROFILE")"
+fi
 PHASE2_STATE_DIR="$(resolve_repo_path "$PHASE2_STATE_DIR")"
 [[ "$PHASE2_STATE_DIR" = /* ]] || { echo "[error] Phase 2 state dir must be absolute" >&2; exit 2; }
 RUNTIME_COEFFS="$PHASE2_STATE_DIR/qaccess_t_runtime_coefficients.json"
@@ -95,9 +112,15 @@ case "$CONTROLLER_VARIANT:$WORKER_TARGET_MODE" in
   ;;
 esac
 case "$PROFILE_KIND" in
-  combined|delay|loss) ;;
-  *) echo "[error] QACCESS_PROFILE_KIND must be combined, delay, or loss" >&2; exit 2 ;;
+  combined|bandwidth|delay|loss|none) ;;
+  *) echo "[error] QACCESS_PROFILE_KIND must be combined, bandwidth, delay, loss, or none" >&2; exit 2 ;;
 esac
+if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]]; then
+  [[ "$GATE_POLICY" == "legacy" ]] || { echo "[error] Phase 2 clean runners require QACCESS_GATE_POLICY=legacy" >&2; exit 2; }
+  [[ "$TRIGGER_MODE" == "legacy_buffer_full" ]] || { echo "[error] Phase 2 clean runners require QACCESS_TRIGGER_MODE=legacy_buffer_full" >&2; exit 2; }
+  [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "[error] clean experiment TIMEOUT must be an integer number of seconds" >&2; exit 2; }
+  ((TIMEOUT >= 200)) || { echo "[error] clean experiment TIMEOUT must be at least 200 seconds" >&2; exit 2; }
+fi
 
 export KEEP_PCAP="${KEEP_PCAP:-0}"
 export SAVE_OUTPUT_FLV="${SAVE_OUTPUT_FLV:-0}"
@@ -134,6 +157,18 @@ WORKER_PID=""
 WORKER_READY_TIMEOUT="${QACCESS_WORKER_READY_TIMEOUT:-30}"
 
 validate_profile() {
+  if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]]; then
+    local -a config_cmd=(
+      python3 "$CLEAN_CONFIG"
+      --scenario "$SCENARIO"
+      --profile-kind "$PROFILE_KIND"
+    )
+    if [[ "$PROFILE_KIND" != "none" ]]; then
+      config_cmd+=(--profile "$DETERIORATION_PROFILE")
+    fi
+    "${config_cmd[@]}"
+    return
+  fi
   [[ -f "$DETERIORATION_PROFILE" ]] || { echo "[error] missing deterioration profile: $DETERIORATION_PROFILE" >&2; return 1; }
   grep -q '^IFACE=h2-eth1$' "$DETERIORATION_PROFILE" || {
     echo "[error] profile must target h2-eth1: $DETERIORATION_PROFILE" >&2
@@ -143,15 +178,26 @@ validate_profile() {
 
 check_configuration() {
   echo "[check] repository_root=$ROOT"
+  echo "[check] experiment_family=$EXPERIMENT_FAMILY"
+  echo "[check] scenario=$SCENARIO"
   echo "[check] input_media=${INPUT_FLV:-<mp_topo-default>}"
-  [[ -n "$INPUT_FLV" && -f "$INPUT_FLV" ]] || { echo "[FAIL] input media is missing: ${INPUT_FLV:-<unset>}" >&2; return 1; }
+  if [[ "$EXPERIMENT_FAMILY" != "clean_controlled" && ( -z "$INPUT_FLV" || ! -f "$INPUT_FLV" ) ]]; then
+    echo "[FAIL] input media is missing: ${INPUT_FLV:-<unset>}" >&2
+    return 1
+  fi
+  if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" && -n "$INPUT_FLV" && ! -f "$INPUT_FLV" ]]; then
+    echo "[FAIL] input media is missing: $INPUT_FLV" >&2
+    return 1
+  fi
   echo "[check] model_path=$WORKER_MODEL"
   [[ -f "$WORKER_MODEL" ]] || { echo "[FAIL] model is missing: $WORKER_MODEL" >&2; return 1; }
+  echo "[check] model_metadata=$WORKER_MODEL_METADATA"
+  [[ -f "$WORKER_MODEL_METADATA" ]] || { echo "[FAIL] model metadata is missing: $WORKER_MODEL_METADATA" >&2; return 1; }
   echo "[check] model_exists=true"
   echo "[check] requested_target_mode=$WORKER_TARGET_MODE"
   echo "[check] controller_variant=$CONTROLLER_VARIANT"
   echo "[check] profile_kind=$PROFILE_KIND"
-  echo "[check] deterioration_profile=$DETERIORATION_PROFILE"
+  echo "[check] deterioration_profile=${DETERIORATION_PROFILE:-none}"
   validate_profile
   echo "[check] execution_mode=$EXECUTION_MODE"
   echo "[check] buffer=$BUFFER_SIZE"
@@ -159,6 +205,7 @@ check_configuration() {
   echo "[check] gate_bps=$GATE_BPS"
   echo "[check] min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
   echo "[check] gate_mode=$GATE_MODE min_relative_gain=$MIN_RELATIVE_GAIN"
+  echo "[check] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE"
   [[ -x "$WORKER_PYTHON" ]] || { echo "[FAIL] worker Python is not executable: $WORKER_PYTHON" >&2; return 1; }
   "$WORKER_PYTHON" scripts/analyze/qaccess_t_update_worker.py \
     --model "$WORKER_MODEL" \
@@ -168,6 +215,32 @@ check_configuration() {
     --validate-model-only
   echo "[PASS] configuration is compatible; no Mininet, TC or runtime state was started"
 }
+
+check_clean_configuration_only() {
+  [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]] || {
+    echo "[FAIL] --configuration-only is limited to clean controlled runners" >&2
+    return 1
+  }
+  echo "[configuration] repository_root=$ROOT"
+  echo "[configuration] experiment_family=$EXPERIMENT_FAMILY"
+  echo "[configuration] scenario=$SCENARIO"
+  echo "[configuration] input_media=${INPUT_FLV:-<mp_topo-default>}"
+  echo "[configuration] model_target=$WORKER_TARGET_MODE"
+  echo "[configuration] model_path=$WORKER_MODEL"
+  echo "[configuration] model_metadata=$WORKER_MODEL_METADATA"
+  echo "[configuration] profile_kind=$PROFILE_KIND"
+  echo "[configuration] profile=${DETERIORATION_PROFILE:-none}"
+  echo "[configuration] duration_sec=$TIMEOUT"
+  validate_profile
+  echo "[configuration] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
+  echo "[PASS] clean runner configuration is valid; production model validation was not requested"
+}
+
+if [[ "$CONFIGURATION_ONLY" == "1" ]]; then
+  cd "$ROOT"
+  check_clean_configuration_only
+  exit $?
+fi
 
 if [[ "$CHECK_ONLY" == "1" ]]; then
   cd "$ROOT"
@@ -202,7 +275,30 @@ stop_worker() {
   WORKER_PID=""
 }
 
-trap stop_worker EXIT
+STATE_LOCK_DIR=""
+
+release_state_lock() {
+  if [[ -n "$STATE_LOCK_DIR" ]]; then
+    rmdir "$STATE_LOCK_DIR" 2>/dev/null || true
+    STATE_LOCK_DIR=""
+  fi
+}
+
+if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]]; then
+  mkdir -p "$PHASE2_STATE_DIR"
+  STATE_LOCK_DIR="$PHASE2_STATE_DIR/.clean_experiment_lock"
+  if ! mkdir "$STATE_LOCK_DIR" 2>/dev/null; then
+    echo "[error] Phase 2 state directory is already in use: $PHASE2_STATE_DIR" >&2
+    exit 1
+  fi
+fi
+
+cleanup() {
+  stop_worker
+  release_state_lock
+}
+
+trap cleanup EXIT INT TERM
 
 worker_ready_file() {
   printf '%s/worker_ready.json' "$SESSION_DIR"
@@ -397,13 +493,15 @@ run_one() {
   )
   case "$PROFILE_KIND" in
     combined) cmd+=(--dynamic-deterioration-profile "$DETERIORATION_PROFILE") ;;
+    bandwidth) cmd+=(--dynamic-bw-profile "$DETERIORATION_PROFILE") ;;
     delay) cmd+=(--dynamic-delay-profile "$DETERIORATION_PROFILE") ;;
     loss) cmd+=(--dynamic-loss-profile "$DETERIORATION_PROFILE") ;;
+    none) ;;
   esac
   [[ "$SAVE_VERBOSE_LOGS" == "1" ]] || cmd+=(--disable-logs)
   [[ -n "$INPUT_FLV" ]] && cmd+=(--input-flv "$INPUT_FLV")
   [[ "$LOG_CONTROL" == "1" ]] && cmd+=(--log-control)
-  echo "[combined_deterioration] scenario=$SCENARIO utility-mode=$um label=$label profile=$DETERIORATION_PROFILE"
+  echo "[combined_deterioration] scenario=$SCENARIO utility-mode=$um label=$label profile=${DETERIORATION_PROFILE:-none}"
   echo "[combined_deterioration] KEEP_PCAP=$KEEP_PCAP SAVE_OUTPUT_FLV=$SAVE_OUTPUT_FLV KEEP_RAW_RUNTIME=$KEEP_RAW_RUNTIME SAVE_VERBOSE_LOGS=$SAVE_VERBOSE_LOGS"
   env "$@" "${cmd[@]}"
   finalize_leg "$label" || true
@@ -411,8 +509,15 @@ run_one() {
 
 echo "[combined_deterioration] profile contents:"
 validate_profile
-cat "$DETERIORATION_PROFILE"
+if [[ "$PROFILE_KIND" != "none" ]]; then
+  cat "$DETERIORATION_PROFILE"
+else
+  echo "none"
+fi
 echo ""
+echo "[combined_deterioration] experiment_family=$EXPERIMENT_FAMILY scenario=$SCENARIO"
+echo "[combined_deterioration] model_target=$WORKER_TARGET_MODE model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
+echo "[combined_deterioration] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
 
 echo "[combined_deterioration] validating worker model before starting Mininet"
 echo "[combined_deterioration] resolved worker model: $WORKER_MODEL"
@@ -440,7 +545,7 @@ echo "[combined_deterioration] dynamic leg: $CONTROLLER_VARIANT + $WORKER_TARGET
 echo "[combined_deterioration] worker model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
 echo "[combined_deterioration] global buffer capacity=$BUFFER_SIZE min samples per path=$MIN_SAMPLES_PER_PATH"
 ACTIVE_DYNAMIC_TIMEOUT="$TIMEOUT"
-if [[ "$EXECUTION_MODE" == "active" ]]; then
+if [[ "$EXECUTION_MODE" == "active" && "$EXPERIMENT_FAMILY" != "clean_controlled" ]]; then
   ACTIVE_DYNAMIC_TIMEOUT=$((TIMEOUT + POST_UPDATE_OBSERVE_SEC))
   echo "[combined_deterioration] active post-update observe window=${POST_UPDATE_OBSERVE_SEC}s dynamic_timeout=${ACTIVE_DYNAMIC_TIMEOUT}s"
 fi
@@ -575,6 +680,50 @@ meta = {
     'SAVE_OUTPUT_FLV': int('$SAVE_OUTPUT_FLV'),
     'legs': {},
 }
+if '$EXPERIMENT_FAMILY' == 'clean_controlled':
+    command = [
+        __import__('sys').executable,
+        str(repo / 'scripts/mininet/clean_experiment_config.py'),
+        '--scenario', '$SCENARIO',
+        '--profile-kind', '$PROFILE_KIND',
+        '--json',
+    ]
+    if '$PROFILE_KIND' != 'none':
+        command.extend(['--profile', '$DETERIORATION_PROFILE'])
+    clean_config = json.loads(subprocess.check_output(command, cwd=repo, text=True))
+    common_leg_config = {
+        'scenario': clean_config['scenario'],
+        'profile_path': clean_config['profile_path'],
+        'transitions_sec': clean_config['transitions_sec'],
+        'input_video': '$INPUT_FLV' or '<mp_topo-default>',
+        'duration_sec': int('$TIMEOUT'),
+        'impairment_interface': clean_config['dynamic_interface'],
+    }
+    baseline_leg_config = dict(common_leg_config)
+    active_leg_config = dict(common_leg_config)
+    meta.update(clean_config)
+    meta.update({
+        'objective': {
+            'qaccess_t': 'throughput',
+            'qaccess_d': 'delay',
+            'qaccess_l': 'loss',
+        }.get('$CONTROLLER_VARIANT', 'unknown'),
+        'model_target': '$WORKER_TARGET_MODE',
+        'gate_policy': '$GATE_POLICY',
+        'trigger_mode': '$TRIGGER_MODE',
+        'baseline_label': '$BASELINE_LABEL',
+        'active_label': '$DYNAMIC_LABEL',
+        'baseline_leg_configuration': baseline_leg_config,
+        'active_leg_configuration': active_leg_config,
+        'paired_leg_validation': {
+            'same_scenario': baseline_leg_config['scenario'] == active_leg_config['scenario'],
+            'same_profile': baseline_leg_config['profile_path'] == active_leg_config['profile_path'],
+            'same_transitions': baseline_leg_config['transitions_sec'] == active_leg_config['transitions_sec'],
+            'same_input_video': baseline_leg_config['input_video'] == active_leg_config['input_video'],
+            'same_duration': baseline_leg_config['duration_sec'] == int('$ACTIVE_DYNAMIC_TIMEOUT'),
+            'same_impairment_interface': baseline_leg_config['impairment_interface'] == active_leg_config['impairment_interface'],
+        },
+    })
 for leg_name in ('$BASELINE_LABEL', '$DYNAMIC_LABEL'):
     status_path = session / leg_name / 'leg_status.json'
     if status_path.is_file():
