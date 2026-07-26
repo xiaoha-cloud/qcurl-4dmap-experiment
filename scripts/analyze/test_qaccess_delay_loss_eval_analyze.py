@@ -177,8 +177,25 @@ class DelayLossEvaluationTest(unittest.TestCase):
             _, monitor = load_pull_log(log)
         self.assertEqual(monitor["rtt_latest_ms"].tolist(), [175.0])
         self.assertEqual(monitor["rtt_mean_dev_ms"].tolist(), [12.0])
+        self.assertEqual(monitor["owd_ms"].tolist(), [80.0])
         result = evaluation._per_second_delay(pd.DataFrame(), monitor, "qaccess_d")
         self.assertEqual(result["rtt_latest_ms_mean"].tolist(), [175.0])
+        self.assertEqual(result["owd_ms_mean"].tolist(), [80.0])
+
+    def test_delay_window_metrics_fall_back_to_monitor_owd(self):
+        monitor = pd.DataFrame([{
+            "time_s": 1.0,
+            "path": 2,
+            "owd_ms": 80.0,
+            "rtt_smoothed_ms": 160.0,
+            "rtt_latest_ms": 175.0,
+            "rtt_mean_dev_ms": 12.0,
+        }])
+        metrics = evaluation._delay_window_metrics(
+            pd.DataFrame(), monitor, pd.DataFrame(), 0.0, 50.0,
+        )
+        self.assertEqual(metrics["owd_ms_mean"], 80.0)
+        self.assertEqual(metrics["owd_ms_p95"], 80.0)
 
 
 if __name__ == "__main__":

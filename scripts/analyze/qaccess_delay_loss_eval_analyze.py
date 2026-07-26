@@ -334,10 +334,12 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
         "rtt_ms_mean", "rtt_ms_p95", "jitter_ms_mean",
     ]
     pieces: list[pd.DataFrame] = []
+    has_utility_owd = False
     if not util.empty and "owd_ms" in util.columns:
         u = util.rename(columns={"t": "time_s"}) if "t" in util.columns else util.copy()
         u = _path_b_rows(u)
         if not u.empty:
+            has_utility_owd = u["owd_ms"].notna().any()
             u = u.copy()
             u["time_s"] = pd.to_numeric(u["time_s"], errors="coerce").floordiv(1)
             pieces.append(
@@ -361,6 +363,9 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
                 agg["rtt_latest_ms_p95"] = ("rtt_latest_ms", lambda s: s.quantile(0.95))
             if "rtt_mean_dev_ms" in m.columns:
                 agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
+            if not has_utility_owd and "owd_ms" in m.columns:
+                agg["owd_ms_mean"] = ("owd_ms", "mean")
+                agg["owd_ms_p95"] = ("owd_ms", lambda s: s.quantile(0.95))
             pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
 
     if not pieces:
@@ -655,10 +660,11 @@ def _delay_window_metrics(
     w = _window_mask(wire, lo, hi)
     ub = _path_b_rows(u)
     mb = _path_b_rows(m)
+    owd_rows = ub if "owd_ms" in ub.columns and ub["owd_ms"].notna().any() else mb
 
     out = {
-        "owd_ms_mean": float(ub["owd_ms"].mean()) if "owd_ms" in ub.columns and len(ub) else float("nan"),
-        "owd_ms_p95": _p95(ub["owd_ms"]) if "owd_ms" in ub.columns else float("nan"),
+        "owd_ms_mean": float(owd_rows["owd_ms"].mean()) if "owd_ms" in owd_rows.columns and len(owd_rows) else float("nan"),
+        "owd_ms_p95": _p95(owd_rows["owd_ms"]) if "owd_ms" in owd_rows.columns else float("nan"),
         "rtt_ms_mean": float(mb["rtt_smoothed_ms"].mean()) if "rtt_smoothed_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_ms_p95": _p95(mb["rtt_smoothed_ms"]) if "rtt_smoothed_ms" in mb.columns else float("nan"),
         "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
@@ -750,7 +756,12 @@ def analyze_run(
     recovery: dict[str, float] = {}
     ref_lo, ref_hi = reference_window
     if objective_kind == "delay":
-        ref_series = util.rename(columns={"t": "time_s"}) if not util.empty else pd.DataFrame()
+        if not util.empty and "owd_ms" in util.columns and util["owd_ms"].notna().any():
+            ref_series = util.rename(columns={"t": "time_s"})
+        elif not mon.empty and "owd_ms" in mon.columns and mon["owd_ms"].notna().any():
+            ref_series = mon.rename(columns={"t": "time_s"})
+        else:
+            ref_series = pd.DataFrame()
         if not ref_series.empty and "owd_ms" in ref_series.columns:
             recovery["recovery_time_s_owd"] = _recovery_time_s(
                 _path_b_rows(ref_series), tcol="time_s", vcol="owd_ms", ref_lo=ref_lo, ref_hi=ref_hi,

@@ -148,7 +148,7 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                  gain, backoff, U, trend_ms, label
     df_mon  : DataFrame  — one row per [m]monitor line (zero-RTT rows kept)
         columns: t, path, rtt_smoothed_ms, rtt_min_ms, rtt_latest_ms,
-                 rtt_mean_dev_ms, bw_bytes,
+                 rtt_mean_dev_ms, owd_ms, bw_bytes,
                  cwnd_full, cwnd_room, inflight, loss, lost_B, label
     """
     util_rows = []
@@ -197,6 +197,7 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                         "rtt_min_ms": _parse_go_duration(mm["rtt_min"]),
                         "rtt_latest_ms": _parse_go_duration(mm["rtt_latest"]),
                         "rtt_mean_dev_ms": _parse_go_duration(mm["rtt_mean_dev"]),
+                        "owd_ms": _parse_go_duration(mm["owd"]),
                         "bw_bytes": _parse_bytes(mm["bw"]),
                         "cwnd_full": _parse_bytes(mm["cwnd_full"]),
                         "cwnd_room": _parse_bytes(mm["cwnd_room"]),
