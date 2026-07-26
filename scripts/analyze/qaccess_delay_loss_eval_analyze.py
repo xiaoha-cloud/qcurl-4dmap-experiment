@@ -24,6 +24,14 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from clean_evaluator_presets import (
+    CLEAN_PRESETS,
+    WindowSpec,
+    clean_windows,
+    clip_to_clean_run,
+    preset_from_metadata,
+)
+
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
@@ -38,6 +46,7 @@ EVAL_WINDOWS = [
 
 PRESETS: dict[str, dict[str, object]] = {
     "delay": {
+        "objective_kind": "delay",
         "title": "Delay-only (primary: delay/RTT/recovery)",
         "baseline_dir": "delay_baseline",
         "dynamic_dirs": ("delay_qaccess_d_dynamic", "delay_qaccess_dynamic"),
@@ -46,6 +55,7 @@ PRESETS: dict[str, dict[str, object]] = {
         "recovery_start_s": 150.0,
     },
     "loss": {
+        "objective_kind": "loss",
         "title": "Loss-only (primary: loss/retrans/recovery)",
         "baseline_dir": "loss_baseline",
         "dynamic_dirs": ("loss_qaccess_l_dynamic", "loss_qaccess_dynamic"),
@@ -53,7 +63,45 @@ PRESETS: dict[str, dict[str, object]] = {
         "file_prefix": "loss",
         "recovery_start_s": 150.0,
     },
+    "delay_clean": {
+        "objective_kind": "delay",
+        "title": "Clean delay (primary: SmoothedRTT()/2 delay proxy)",
+        "baseline_dir": "clean_delay_baseline",
+        "dynamic_dirs": ("clean_delay_qaccess_d",),
+        "out_subdir": "delay_clean_compare",
+        "file_prefix": "delay_clean",
+        "recovery_start_s": 100.0,
+        "reference_window": (0.0, 50.0),
+        "clean_preset": "delay_clean",
+    },
+    "loss_clean": {
+        "objective_kind": "loss",
+        "title": "Clean loss (primary: runtime loss/loss-risk evidence)",
+        "baseline_dir": "clean_loss_baseline",
+        "dynamic_dirs": ("clean_loss_qaccess_l",),
+        "out_subdir": "loss_clean_compare",
+        "file_prefix": "loss_clean",
+        "recovery_start_s": 100.0,
+        "reference_window": (0.0, 50.0),
+        "clean_preset": "loss_clean",
+    },
 }
+
+
+def _load_metadata(session: Path) -> dict[str, object]:
+    path = session / "experiment_metadata.json"
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _historical_windows() -> tuple[WindowSpec, ...]:
+    return tuple(WindowSpec(name, lo, hi, "historical", "historical window") for name, lo, hi in EVAL_WINDOWS) + (
+        WindowSpec("0-200", 0.0, 200.0, "full_run", "full run"),
+    )
 
 
 def _p95(s: pd.Series) -> float:
@@ -292,8 +340,10 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
             u = u.copy()
             u["time_s"] = pd.to_numeric(u["time_s"], errors="coerce").floordiv(1)
             pieces.append(
-                u.groupby("time_s", as_index=False)["owd_ms"]
-                .agg(owd_ms_mean="mean", owd_ms_p95=lambda s: s.quantile(0.95))
+                u.groupby("time_s", as_index=False).agg(
+                    owd_ms_mean=("owd_ms", "mean"),
+                    owd_ms_p95=("owd_ms", lambda s: s.quantile(0.95)),
+                )
             )
     if not mon.empty and "rtt_smoothed_ms" in mon.columns:
         m = mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon.copy()
@@ -417,6 +467,11 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
             change = dynamic - baseline
             rows.append({
                 "window": window,
+                **({
+                    "window_role": baseline_row.get("window_role", ""),
+                    "condition": baseline_row.get("condition", ""),
+                    "result_type": baseline_row.get("window_role", ""),
+                } if "window_role" in df_win.columns else {}),
                 "metric": metric,
                 "baseline": baseline,
                 "qaccess": dynamic,
@@ -445,6 +500,8 @@ def _plot_timeseries(
     quality: pd.DataFrame,
     out: Path,
     prefix: str,
+    objective_kind: str | None = None,
+    windows: tuple[WindowSpec, ...] | None = None,
 ) -> None:
     if throughput.empty and quality.empty:
         return
@@ -471,7 +528,7 @@ def _plot_timeseries(
 
     quality_column = ""
     quality_label = ""
-    if prefix == "delay":
+    if (objective_kind or prefix) == "delay":
         for candidate, label in (
             ("owd_ms_mean", "Path B OWD (ms)"),
             ("rtt_ms_mean", "Path B RTT (ms)"),
@@ -501,7 +558,12 @@ def _plot_timeseries(
     axes[2].set_xlabel("Time (s)")
     axes[2].grid(alpha=0.25)
     for axis in axes:
-        axis.axvspan(90, 150, color="tab:red", alpha=0.08)
+        if windows is None:
+            axis.axvspan(90, 150, color="tab:red", alpha=0.08)
+        else:
+            for window in windows:
+                if window.role == "response":
+                    axis.axvspan(window.start_s, window.end_s, color="tab:orange", alpha=0.10)
     fig.tight_layout()
     fig.savefig(out / f"{prefix}_throughput_quality_over_time.png", dpi=180)
     plt.close(fig)
@@ -583,55 +645,65 @@ def _loss_window_metrics(
 def analyze_run(
     run_dir: Path,
     method: str,
-    preset: str,
-    full_hi: float,
+    objective_kind: str,
+    windows: tuple[WindowSpec, ...],
     recovery_start_s: float,
+    reference_window: tuple[float, float],
+    clean: bool = False,
 ) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
     util, mon = load_pull_frames(run_dir)
     wire = load_wire_timeseries(run_dir)
     samples = load_runtime_samples(run_dir)
+    if clean:
+        util_time = "t" if "t" in util.columns else "time_s"
+        mon_time = "t" if "t" in mon.columns else "time_s"
+        util = clip_to_clean_run(util, util_time)
+        mon = clip_to_clean_run(mon, mon_time)
+        wire = clip_to_clean_run(wire)
+        samples = clip_to_clean_run(samples)
 
     if not wire.empty:
         wire = wire.copy()
         wire.insert(0, "method", method)
     quality_timeseries = (
         _per_second_delay(util, mon, method)
-        if preset == "delay"
+        if objective_kind == "delay"
         else _per_second_loss(util, mon, samples, method)
     )
 
     recovery: dict[str, float] = {}
-    if preset == "delay":
+    ref_lo, ref_hi = reference_window
+    if objective_kind == "delay":
         ref_series = util.rename(columns={"t": "time_s"}) if not util.empty else pd.DataFrame()
         if not ref_series.empty and "owd_ms" in ref_series.columns:
             recovery["recovery_time_s_owd"] = _recovery_time_s(
-                _path_b_rows(ref_series), tcol="time_s", vcol="owd_ms", ref_lo=50.0, ref_hi=90.0,
+                _path_b_rows(ref_series), tcol="time_s", vcol="owd_ms", ref_lo=ref_lo, ref_hi=ref_hi,
                 recover_after=recovery_start_s,
             )
         share_series = wire if not wire.empty else pd.DataFrame()
         if not share_series.empty:
             recovery["recovery_time_s_path_b_share"] = _recovery_time_s(
                 share_series, tcol="time_s", vcol="path_b_share_pct",
-                ref_lo=50.0, ref_hi=90.0, recover_after=recovery_start_s, tol_frac=0.10,
+                ref_lo=ref_lo, ref_hi=ref_hi, recover_after=recovery_start_s, tol_frac=0.10,
             )
     else:
         if not samples.empty and "loss_rate" in samples.columns:
             sb = _path_b_rows(samples, path_col="path_id")
             recovery["recovery_time_s_loss_rate"] = _recovery_time_s(
-                sb, tcol="time_s", vcol="loss_rate", ref_lo=50.0, ref_hi=90.0,
+                sb, tcol="time_s", vcol="loss_rate", ref_lo=ref_lo, ref_hi=ref_hi,
                 recover_after=recovery_start_s, absolute_tol=1e-6,
             )
         share_series = wire if not wire.empty else pd.DataFrame()
         if not share_series.empty:
             recovery["recovery_time_s_path_b_share"] = _recovery_time_s(
                 share_series, tcol="time_s", vcol="path_b_share_pct",
-                ref_lo=50.0, ref_hi=90.0, recover_after=recovery_start_s, tol_frac=0.10,
+                ref_lo=ref_lo, ref_hi=ref_hi, recover_after=recovery_start_s, tol_frac=0.10,
             )
 
     rows: list[dict] = []
-    windows = [*EVAL_WINDOWS, ("0-200", 0.0, full_hi)]
-    for wname, lo, hi in windows:
-        if preset == "delay":
+    for window in windows:
+        wname, lo, hi = window.name, window.start_s, window.end_s
+        if objective_kind == "delay":
             metrics = _delay_window_metrics(util.rename(columns={"t": "time_s"}) if "t" in util.columns else util,
                                             mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon,
                                             wire, lo, hi)
@@ -646,6 +718,11 @@ def analyze_run(
             "window": wname,
             "t_lo": lo,
             "t_hi": hi,
+            "window_role": window.role,
+            "condition": window.condition,
+            "primary_metric": (
+                CLEAN_PRESETS[f"{objective_kind}_clean"]["primary_metric"] if clean else objective_kind
+            ),
             **metrics,
         })
 
@@ -657,7 +734,7 @@ def main() -> None:
         description="Delay/loss-primary analysis (throughput is secondary)",
     )
     ap.add_argument("--session", type=Path, required=True)
-    ap.add_argument("--preset", choices=sorted(PRESETS), required=True)
+    ap.add_argument("--preset", choices=["auto", *sorted(PRESETS)], default="auto")
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--full-hi", type=float, default=200.0)
     args = ap.parse_args()
@@ -667,7 +744,19 @@ def main() -> None:
         print(f"[error] session not found: {session}", file=sys.stderr)
         sys.exit(1)
 
-    cfg = PRESETS[args.preset]
+    metadata = _load_metadata(session)
+    selected_preset = args.preset
+    if selected_preset == "auto":
+        selected_preset = preset_from_metadata(metadata) or str(metadata.get("profile_kind") or "")
+        if selected_preset not in PRESETS:
+            print("[error] --preset auto could not resolve delay/loss evaluator preset", file=sys.stderr)
+            sys.exit(2)
+    cfg = PRESETS[selected_preset]
+    clean_preset = cfg.get("clean_preset")
+    windows = clean_windows(str(clean_preset), metadata) if clean_preset else _historical_windows()
+    if not clean_preset and args.full_hi != 200.0:
+        windows = windows[:-1] + (WindowSpec("0-200", 0.0, args.full_hi, "full_run", "full run"),)
+    reference_window = tuple(cfg.get("reference_window", (50.0, 90.0)))
     out = (args.out or (_REPO / "derived" / cfg["out_subdir"] / session.name)).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -689,7 +778,8 @@ def main() -> None:
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
         df, rec, wire, quality = analyze_run(
-            rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
+            rdir, method, str(cfg["objective_kind"]), windows, float(cfg["recovery_start_s"]),
+            (float(reference_window[0]), float(reference_window[1])), clean=bool(clean_preset),
         )
         if not df.empty:
             all_windows.append(df)
@@ -712,7 +802,7 @@ def main() -> None:
     if not df_wire.empty:
         df_wire.to_csv(out / f"{prefix}_throughput_timeseries.csv", index=False)
     if not df_quality.empty:
-        quality_name = "delay" if args.preset == "delay" else "loss"
+        quality_name = str(cfg["objective_kind"])
         df_quality.to_csv(out / f"{prefix}_{quality_name}_timeseries.csv", index=False)
 
     # Secondary throughput table (explicitly labeled).
@@ -720,17 +810,21 @@ def main() -> None:
         "method", "window", "secondary_total_quic_wire_mbps_mean",
         "secondary_path_a_quic_wire_mbps_mean", "secondary_path_b_quic_wire_mbps_mean",
     ]
+    if clean_preset:
+        sec_cols[2:2] = ["window_role", "condition"]
     df_win[sec_cols].to_csv(out / f"{prefix}_secondary_throughput_windows.csv", index=False)
     dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
-    _plot_timeseries(df_wire, df_quality, out, prefix)
+    _plot_timeseries(
+        df_wire, df_quality, out, prefix, str(cfg["objective_kind"]),
+        windows if clean_preset else None,
+    )
 
-    metadata_path = session / "experiment_metadata.json"
-    metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
     execution_mode = metadata.get("execution_mode", "unknown")
 
     print(f"Experiment: {cfg['title']}")
+    print(f"Evaluator preset: {selected_preset}")
     print(f"Session: {session}")
     print(f"Primary metrics: {out / f'{prefix}_primary_metrics_windows.csv'}")
     print(f"Recovery times:  {out / f'{prefix}_recovery_times.csv'}")

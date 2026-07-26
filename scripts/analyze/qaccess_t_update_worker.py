@@ -87,6 +87,11 @@ VARIANT_TARGETS = {
 DEFAULT_MIN_IMPROVEMENT_PCT = 3.0
 DEFAULT_MIN_DELTA_GAIN_BPS = 500_000.0
 DEFAULT_MIN_RELATIVE_GAIN = 0.03
+DEFAULT_OBJECTIVE_T_RELATIVE_GAIN = 0.05
+DEFAULT_OBJECTIVE_D_REDUCTION_MS = 10.0
+DEFAULT_OBJECTIVE_D_RELATIVE_REDUCTION = 0.10
+DEFAULT_OBJECTIVE_L_REDUCTION_BYTES = 4096.0
+DEFAULT_OBJECTIVE_L_RELATIVE_REDUCTION = 0.25
 DEFAULT_MIN_RELATIVE_DELTA_GAIN = 0.01
 DEFAULT_CHANGED_PATH_IDS = (3,)
 DEFAULT_CHANGED_PATH_GAIN_BPS = 100_000.0
@@ -94,6 +99,10 @@ DEFAULT_MIN_AGGREGATE_GAIN_BPS = 0.0
 DEFAULT_MAX_OTHER_PATH_LOSS_RATIO = 0.75
 DEFAULT_MAX_OTHER_PATH_LOSS_BPS = 200_000.0
 GATE_MODES = ("absolute", "relative", "hybrid")
+GATE_POLICIES = ("legacy", "objective_aware")
+OBJECTIVES = ("throughput", "delay", "loss")
+VARIANT_OBJECTIVES = {"qaccess_t": "throughput", "qaccess_d": "delay", "qaccess_l": "loss"}
+SECONDARY_GUARDRAILS_UNAVAILABLE = "NOT_AVAILABLE_FOR_PRE_UPDATE_EVALUATION"
 RELATIVE_GAIN_EPSILON = 1e-9
 MAX_COEFF_STEP = 0.1
 MIN_BETA_GAMMA = 0.1
@@ -656,6 +665,147 @@ def evaluate_gain_gate(
     }
 
 
+def evaluate_objective_gate(
+    current_score: float,
+    best_score: float,
+    *,
+    objective: str,
+    absolute_threshold: float,
+    relative_threshold: float,
+    epsilon: float = RELATIVE_GAIN_EPSILON,
+) -> dict[str, Any]:
+    """Evaluate only the selected primary objective; scores are optimization-oriented."""
+    if objective not in OBJECTIVES:
+        raise ValueError(f"unsupported objective: {objective}")
+    absolute_improvement = float(best_score - current_score)
+    relative_improvement = absolute_improvement / max(abs(float(current_score)), epsilon)
+    strict_improvement = bool(absolute_improvement > 0)
+    absolute_gate_pass = strict_improvement and absolute_improvement >= absolute_threshold
+    relative_gate_pass = strict_improvement and relative_improvement >= relative_threshold
+    gate_passed = (
+        absolute_gate_pass and relative_gate_pass
+        if objective == "throughput"
+        else absolute_gate_pass or relative_gate_pass
+    )
+    return {
+        "current_score": float(current_score),
+        "best_score": float(best_score),
+        "absolute_gain_bps": absolute_improvement,
+        "relative_gain": relative_improvement,
+        "gate_mode": "objective_aware",
+        "gate_policy": "objective_aware",
+        "objective": objective,
+        "min_delta_gain_bps": float(absolute_threshold),
+        "min_relative_gain": float(relative_threshold),
+        "strict_improvement": strict_improvement,
+        "absolute_gate_pass": absolute_gate_pass,
+        "relative_gate_pass": relative_gate_pass,
+        "would_apply": bool(gate_passed),
+    }
+
+
+def evaluate_policy_gate(
+    current_score: float,
+    best_score: float,
+    *,
+    gate_policy: str,
+    objective: str,
+    gate_mode: str,
+    absolute_threshold: float,
+    relative_threshold: float,
+) -> dict[str, Any]:
+    if gate_policy == "legacy":
+        return evaluate_gain_gate(
+            current_score,
+            best_score,
+            gate_mode=gate_mode,
+            min_delta_gain_bps=absolute_threshold,
+            min_relative_gain=relative_threshold,
+        )
+    if gate_policy == "objective_aware":
+        return evaluate_objective_gate(
+            current_score,
+            best_score,
+            objective=objective,
+            absolute_threshold=absolute_threshold,
+            relative_threshold=relative_threshold,
+        )
+    raise ValueError(f"unsupported gate policy: {gate_policy}")
+
+
+def _finite_or_none(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (int, np.integer)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        value = float(value)
+        return value if math.isfinite(value) else None
+    return value
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return _finite_or_none(value)
+
+
+def _objective_decision_units(target_mode: str) -> tuple[str, str]:
+    if target_mode == "delta_bw_1s":
+        return "bps", "bps"
+    if target_mode == "delta_owd_1s":
+        return "ms", "ms"
+    if target_mode == "loss_risk_1s":
+        return "ratio_0_to_1", "loss_risk_bytes"
+    if target_mode == "delta_loss_1s":
+        return "ratio_0_to_1", "loss_ratio"
+    return "", _score_unit(target_mode)
+
+
+def objective_decision_log_fields(
+    req: dict[str, Any],
+    *,
+    target_mode: str,
+    gate_policy: str,
+    gate_objective: str,
+    current_candidate_score: float | None,
+    best_candidate_score: float | None,
+    absolute_improvement: float | None,
+    relative_improvement: float | None,
+    gate_passed: bool,
+    actual_applied: bool,
+    skip_reason: str,
+) -> dict[str, Any]:
+    trigger_unit, candidate_unit = _objective_decision_units(target_mode)
+    return _json_safe({
+        "decision_stage": "primary_objective_gate",
+        "variant": str(req.get("controller_variant") or ""),
+        "path_id": int(req.get("path_id", 0) or 0),
+        "trigger_mode": str(req.get("trigger_mode") or req.get("reason") or ""),
+        "gate_policy": gate_policy,
+        "gate_objective": gate_objective,
+        "reference_value": req.get("reference_value"),
+        "current_value": req.get("current_value"),
+        "absolute_change": req.get("absolute_change"),
+        "relative_change": req.get("relative_change"),
+        "trigger_streak": int(req.get("trigger_streak", 0) or 0),
+        "triggered": bool(req.get("triggered", False)),
+        "current_candidate_score": current_candidate_score,
+        "best_candidate_score": best_candidate_score,
+        "absolute_improvement": absolute_improvement,
+        "relative_improvement": relative_improvement,
+        "gate_passed": bool(gate_passed),
+        "actual_applied": bool(actual_applied),
+        "skip_reason": skip_reason,
+        "trigger_value_unit": trigger_unit,
+        "candidate_score_unit": candidate_unit,
+        "absolute_improvement_unit": candidate_unit,
+        "secondary_guardrails": SECONDARY_GUARDRAILS_UNAVAILABLE,
+    })
+
+
 def _write_candidate_scores_csv(
     out_path: Path,
     *,
@@ -757,7 +907,7 @@ def _load_request_and_samples(
 
 
 def _worker_log_line(log_file: Path | None, payload: dict[str, Any]) -> None:
-    line = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    line = json.dumps(_json_safe(payload), separators=(",", ":"), sort_keys=True, allow_nan=False)
     if log_file is not None:
         log_file.parent.mkdir(parents=True, exist_ok=True)
         with log_file.open("a", encoding="utf-8") as f:
@@ -894,7 +1044,8 @@ def _process_multipath_request(
     *, req: dict[str, Any], samples: pd.DataFrame, request_id: str, model,
     coeffs_out: Path, response_out: Path, request_path: Path, archive_dir: Path, prev_coeffs_out: Path,
     target_mode: str, min_delta_gain_bps: float, min_relative_gain: float,
-    gate_mode: str, fixed_gamma: float | None, shadow: bool,
+    gate_mode: str, gate_policy: str, objective: str,
+    objective_relative_threshold: float, fixed_gamma: float | None, shadow: bool,
     log_file: Path | None, min_sender_byte_delta: int,
     changed_path_priority_shadow: bool,
     changed_path_ids: set[int],
@@ -920,6 +1071,19 @@ def _process_multipath_request(
         cur_gamma = float(req.get("current_gamma", cur_gamma) or cur_gamma)
 
     request_classification = _request_classification(req)
+    initial_decision_fields = objective_decision_log_fields(
+        req,
+        target_mode=target_mode,
+        gate_policy=gate_policy,
+        gate_objective=objective,
+        current_candidate_score=None,
+        best_candidate_score=None,
+        absolute_improvement=None,
+        relative_improvement=None,
+        gate_passed=False,
+        actual_applied=False,
+        skip_reason="decision_not_completed",
+    ) if gate_policy == "objective_aware" else {}
     base_response: dict[str, Any] = {
         "request_id": request_id,
         "timestamp_ms": int(time.time() * 1000),
@@ -927,6 +1091,8 @@ def _process_multipath_request(
         "target_mode": target_mode,
         "controller_variant": str(req.get("controller_variant") or ""),
         "objective": _objective_name(target_mode),
+        "gate_policy": gate_policy,
+        "primary_objective": objective,
         "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
         "score_unit": _score_unit(target_mode),
         "execution_mode": "shadow" if shadow else "active",
@@ -948,6 +1114,7 @@ def _process_multipath_request(
         "aggregate_control_method": "traffic_weighted",
         "changed_path_priority_shadow": bool(changed_path_priority_shadow),
         "changed_path_ids": sorted(changed_path_ids),
+        **initial_decision_fields,
     }
 
     if not eligible:
@@ -1058,13 +1225,16 @@ def _process_multipath_request(
     for row in aggregate_rows:
         row["equal_weight_gain"] = row["equal_weight_score"] - current_row["equal_weight_score"]
         row["byte_weighted_gain"] = row["byte_weighted_score"] - current_row["byte_weighted_score"]
-    equal_gate = evaluate_gain_gate(
-        current_row["equal_weight_score"], equal_best["equal_weight_score"], gate_mode=gate_mode,
-        min_delta_gain_bps=min_delta_gain_bps, min_relative_gain=min_relative_gain,
+    effective_relative_threshold = objective_relative_threshold if gate_policy == "objective_aware" else min_relative_gain
+    equal_gate = evaluate_policy_gate(
+        current_row["equal_weight_score"], equal_best["equal_weight_score"],
+        gate_policy=gate_policy, objective=objective, gate_mode=gate_mode,
+        absolute_threshold=min_delta_gain_bps, relative_threshold=effective_relative_threshold,
     )
-    weighted_gate = evaluate_gain_gate(
-        current_row["byte_weighted_score"], weighted_best["byte_weighted_score"], gate_mode=gate_mode,
-        min_delta_gain_bps=min_delta_gain_bps, min_relative_gain=min_relative_gain,
+    weighted_gate = evaluate_policy_gate(
+        current_row["byte_weighted_score"], weighted_best["byte_weighted_score"],
+        gate_policy=gate_policy, objective=objective, gate_mode=gate_mode,
+        absolute_threshold=min_delta_gain_bps, relative_threshold=effective_relative_threshold,
     )
 
     def coeffs(row: dict[str, Any]) -> dict[str, float]:
@@ -1094,7 +1264,7 @@ def _process_multipath_request(
     owner_ok = owner_roles == ["server_downlink_sender"]
     proposed_differs = any(abs(weighted_stepped[name] - current) > 1e-9 for name, current in
                            (("alpha", cur_alpha), ("beta", cur_beta), ("gamma", cur_gamma)))
-    phase_allowed = _active_phase_allowed(target_mode, request_classification)
+    phase_allowed = gate_policy == "objective_aware" or _active_phase_allowed(target_mode, request_classification)
     active_safety_ok = bool(
         not shadow
         and owner_ok
@@ -1105,17 +1275,36 @@ def _process_multipath_request(
     )
     actual_applied = bool(active_safety_ok and weighted_gate["would_apply"])
     active_skip_reason = ""
-    if not shadow and not actual_applied:
+    if shadow:
+        active_skip_reason = (
+            "shadow_mode" if weighted_gate["would_apply"]
+            else ("primary_gate_failed" if gate_policy == "objective_aware" else "aggregate_gate_not_met")
+        )
+    elif not actual_applied:
         if not phase_allowed:
-            active_skip_reason = "pre_deterioration_apply_disabled"
+            active_skip_reason = "target_not_allowed" if gate_policy == "objective_aware" else "pre_deterioration_apply_disabled"
         elif not owner_ok:
-            active_skip_reason = "owner_role_not_server_downlink_sender"
+            active_skip_reason = "owner_not_allowed" if gate_policy == "objective_aware" else "owner_role_not_server_downlink_sender"
         elif target_mode not in ACTIVE_TARGET_MODES:
-            active_skip_reason = "model_target_not_active_safe"
+            active_skip_reason = "target_not_allowed" if gate_policy == "objective_aware" else "model_target_not_active_safe"
         elif not proposed_differs:
-            active_skip_reason = "proposed_coefficients_unchanged"
+            active_skip_reason = "coefficients_unchanged" if gate_policy == "objective_aware" else "proposed_coefficients_unchanged"
         elif not weighted_gate["would_apply"]:
-            active_skip_reason = "aggregate_gate_not_met"
+            active_skip_reason = "primary_gate_failed" if gate_policy == "objective_aware" else "aggregate_gate_not_met"
+
+    decision_fields = objective_decision_log_fields(
+        req,
+        target_mode=target_mode,
+        gate_policy=gate_policy,
+        gate_objective=objective,
+        current_candidate_score=current_row["byte_weighted_prediction"],
+        best_candidate_score=weighted_best["byte_weighted_prediction"],
+        absolute_improvement=weighted_gate["absolute_gain_bps"],
+        relative_improvement=weighted_gate["relative_gain"],
+        gate_passed=bool(weighted_gate["would_apply"]),
+        actual_applied=actual_applied,
+        skip_reason=active_skip_reason,
+    ) if gate_policy == "objective_aware" else {}
 
     changed_path_priority = None
     changed_path_diagnoses: list[str] = []
@@ -1188,6 +1377,7 @@ def _process_multipath_request(
         "would_apply_under_gate": bool(weighted_gate["would_apply"]),
         "actual_applied": actual_applied,
         "skip_reason": active_skip_reason,
+        **decision_fields,
         "candidate_count": len(aggregate_rows),
         "unique_prediction_count": len({float(row["byte_weighted_score"]) for row in aggregate_rows}),
         "path_sender_byte_deltas": raw_weights,
@@ -1222,6 +1412,7 @@ def _process_multipath_request(
         "proposed_stepped_coefficients": equal_stepped if methods_agree else None,
         "applied_coefficients": weighted_stepped if actual_applied else {"alpha": cur_alpha, "beta": cur_beta, "gamma": cur_gamma},
         "gate_mode": gate_mode,
+        "gate_policy": gate_policy,
         "min_delta_gain_bps": min_delta_gain_bps,
         "min_relative_gain": min_relative_gain,
         "absolute_gain_bps": weighted_gate["absolute_gain_bps"],
@@ -1249,7 +1440,7 @@ def _process_multipath_request(
         aggregate_diagnoses.append("aggregate_blocks_below_threshold")
     step_limit_label = ""
     if weighted_raw != weighted_stepped:
-        stepped_gate = evaluate_gain_gate(
+        stepped_gate = evaluate_policy_gate(
             current_row["byte_weighted_score"],
             next(
                 (row["byte_weighted_score"] for row in aggregate_rows
@@ -1258,9 +1449,9 @@ def _process_multipath_request(
                  and abs(float(row["gamma"]) - weighted_stepped["gamma"]) < 1e-9),
                 weighted_best["byte_weighted_score"],
             ),
-            gate_mode=gate_mode,
-            min_delta_gain_bps=min_delta_gain_bps,
-            min_relative_gain=min_relative_gain,
+            gate_policy=gate_policy, objective=objective, gate_mode=gate_mode,
+            absolute_threshold=min_delta_gain_bps,
+            relative_threshold=effective_relative_threshold,
         )
         if bool(stepped_gate["would_apply"]) == bool(weighted_gate["would_apply"]):
             step_limit_label = "step_limit_not_decisive"
@@ -1356,6 +1547,9 @@ def _process_request(
     shadow: bool,
     aggregate_multipath: bool = False,
     gate_mode: str = "absolute",
+    gate_policy: str = "legacy",
+    objective: str = "throughput",
+    objective_relative_threshold: float = DEFAULT_OBJECTIVE_T_RELATIVE_GAIN,
     min_relative_gain: float = DEFAULT_MIN_RELATIVE_GAIN,
     fixed_gamma: float | None = None,
     log_file: Path | None = None,
@@ -1391,6 +1585,8 @@ def _process_request(
             archive_dir=archive_dir, prev_coeffs_out=prev_coeffs_out, target_mode=target_mode,
             min_delta_gain_bps=min_delta_gain_bps,
             min_relative_gain=min_relative_gain, gate_mode=gate_mode,
+            gate_policy=gate_policy, objective=objective,
+            objective_relative_threshold=objective_relative_threshold,
             fixed_gamma=fixed_gamma, shadow=shadow, log_file=log_file,
             min_sender_byte_delta=min_sender_byte_delta,
             changed_path_priority_shadow=changed_path_priority_shadow,
@@ -1426,14 +1622,35 @@ def _process_request(
     unique_prediction_count = len({float(row["mean_prediction"]) for row in candidates})
     best_non_current_gain = _objective_improvement(target_mode, pred_current, best_non_current["mean_prediction"])
 
-    improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
-        target_mode,
-        pred_current,
-        pred_best,
-        min_improvement_pct=min_improvement_pct,
-        min_delta_gain_bps=min_delta_gain_bps,
-        min_relative_delta_gain=min_relative_delta_gain,
-    )
+    if gate_policy == "objective_aware":
+        policy_gate = evaluate_policy_gate(
+            _optimization_score(target_mode, pred_current),
+            _optimization_score(target_mode, pred_best),
+            gate_policy=gate_policy,
+            objective=objective,
+            gate_mode=gate_mode,
+            absolute_threshold=min_delta_gain_bps,
+            relative_threshold=objective_relative_threshold,
+        )
+        improvement_ok = bool(policy_gate["would_apply"])
+        gate_type = "primary_objective_gate"
+        skip_reason = "primary_gate_failed"
+        gate_threshold = min_delta_gain_bps
+        score_gain_bps = policy_gate["absolute_gain_bps"]
+        gate_detail = (
+            f"absolute_threshold={min_delta_gain_bps:g} "
+            f"relative_threshold={objective_relative_threshold:g}"
+        )
+    else:
+        policy_gate = None
+        improvement_ok, gate_type, skip_reason, gate_threshold, score_gain_bps, gate_detail = _evaluate_gate(
+            target_mode,
+            pred_current,
+            pred_best,
+            min_improvement_pct=min_improvement_pct,
+            min_delta_gain_bps=min_delta_gain_bps,
+            min_relative_delta_gain=min_relative_delta_gain,
+        )
 
     applied_alpha = _apply_max_step(cur_alpha, best_alpha)
     applied_beta = max(MIN_BETA_GAMMA, _apply_max_step(cur_beta, best_beta))
@@ -1456,6 +1673,29 @@ def _process_request(
     n_samples = int(len(samples))
 
     execution_mode = "shadow" if shadow else "active"
+    decision_skip_reason = (
+        "" if active_update
+        else (
+            "shadow_mode" if shadow and improvement_ok
+            else ("primary_gate_failed" if gate_policy == "objective_aware" else skip_reason)
+        )
+    )
+    decision_fields = objective_decision_log_fields(
+        req,
+        target_mode=target_mode,
+        gate_policy=gate_policy,
+        gate_objective=objective,
+        current_candidate_score=pred_current,
+        best_candidate_score=pred_best,
+        absolute_improvement=score_gain,
+        relative_improvement=(
+            policy_gate["relative_gain"] if policy_gate is not None
+            else score_gain / max(abs(float(pred_current)), RELATIVE_GAIN_EPSILON)
+        ),
+        gate_passed=bool(improvement_ok),
+        actual_applied=bool(active_update),
+        skip_reason=decision_skip_reason,
+    ) if gate_policy == "objective_aware" else {}
     response: dict[str, Any] = {
         "request_id": request_id,
         "path_id": path_id,
@@ -1466,6 +1706,8 @@ def _process_request(
         "run_id": run_id,
         "target_mode": target_mode,
         "objective": _objective_name(target_mode),
+        "primary_objective": objective,
+        "gate_policy": gate_policy,
         "optimization_direction": "minimize" if target_mode in MINIMIZE_TARGETS else "maximize",
         "score_unit": _score_unit(target_mode),
         "execution_mode": execution_mode,
@@ -1506,8 +1748,9 @@ def _process_request(
         "mean_gain_after": mean_gain_after,
         "mean_backoff_before": mean_backoff_before,
         "mean_backoff_after": mean_backoff_after,
-        "skip_reason": "" if improvement_ok else skip_reason,
+        "skip_reason": decision_skip_reason,
         "fixed_gamma": fixed_gamma,
+        **decision_fields,
     }
 
     if target_mode == "delta_bw_1s":
@@ -1612,6 +1855,7 @@ def _process_request(
         _worker_log_line(
             log_file,
             {
+                **decision_fields,
                 "timestamp_ms": ts_ms,
                 "request_id": request_id,
                 "target_mode": target_mode,
@@ -1649,6 +1893,7 @@ def _process_request(
         _worker_log_line(
             log_file,
             {
+                **decision_fields,
                 "timestamp_ms": ts_ms,
                 "request_id": request_id,
                 "target_mode": target_mode,
@@ -1679,7 +1924,7 @@ def _process_request(
                 "score_gain": score_gain_bps if score_gain_bps is not None else score_gain,
                 "gate_threshold": gate_threshold,
                 "status": status,
-                "skip_reason": "" if improvement_ok else skip_reason,
+                "skip_reason": decision_skip_reason,
             },
         )
 
@@ -1744,13 +1989,24 @@ def main() -> None:
     ap.add_argument(
         "--min-objective-improvement",
         type=float,
-        default=0.0,
-        help="Minimum predicted reduction for delta_owd_1s, delta_loss_1s, or loss_risk_1s",
+        default=None,
+        help="Minimum predicted reduction; objective-aware defaults are D=10 ms and L=4096 bytes",
     )
     ap.add_argument("--gate-mode", choices=GATE_MODES, default="absolute")
+    ap.add_argument("--gate-policy", choices=GATE_POLICIES, default="legacy")
+    ap.add_argument(
+        "--objective", choices=OBJECTIVES, default=None,
+        help="Primary objective; defaults to the objective implied by --controller-variant",
+    )
     ap.add_argument(
         "--min-relative-gain", type=float, default=DEFAULT_MIN_RELATIVE_GAIN,
         help="Minimum (best-current)/max(abs(current), epsilon) for relative/hybrid gates (default: 0.03)",
+    )
+    ap.add_argument(
+        "--min-objective-relative-improvement",
+        type=float,
+        default=None,
+        help="Objective-aware relative threshold (T 0.05, D 0.10, L 0.25 by default)",
     )
     ap.add_argument(
         "--min-relative-delta-gain",
@@ -1845,6 +2101,29 @@ def main() -> None:
         help="Write a JSON readiness marker after startup validation succeeds",
     )
     args = ap.parse_args()
+    expected_objective = VARIANT_OBJECTIVES[args.controller_variant]
+    if args.objective is None:
+        args.objective = expected_objective
+    if args.objective != expected_objective:
+        ap.error(
+            f"controller variant {args.controller_variant} requires objective "
+            f"{expected_objective}, got {args.objective}"
+        )
+    if args.min_objective_relative_improvement is None:
+        args.min_objective_relative_improvement = {
+            "throughput": DEFAULT_OBJECTIVE_T_RELATIVE_GAIN,
+            "delay": DEFAULT_OBJECTIVE_D_RELATIVE_REDUCTION,
+            "loss": DEFAULT_OBJECTIVE_L_RELATIVE_REDUCTION,
+        }[args.objective]
+    if args.min_objective_improvement is None:
+        args.min_objective_improvement = (
+            {
+                "delay": DEFAULT_OBJECTIVE_D_REDUCTION_MS,
+                "loss": DEFAULT_OBJECTIVE_L_REDUCTION_BYTES,
+            }.get(args.objective, 0.0)
+            if args.gate_policy == "objective_aware"
+            else 0.0
+        )
     if args.target_mode not in VARIANT_TARGETS[args.controller_variant]:
         ap.error(
             f"controller variant {args.controller_variant} is incompatible with target {args.target_mode}"
@@ -1940,8 +2219,11 @@ def main() -> None:
             "fixed_gamma": fixed_gamma,
             "min_sender_byte_delta": args.min_sender_byte_delta,
             "gate_mode": args.gate_mode,
+            "gate_policy": args.gate_policy,
+            "primary_objective": args.objective,
             "min_delta_gain_bps": args.min_delta_gain_bps,
             "min_relative_gain": args.min_relative_gain,
+            "min_objective_relative_improvement": args.min_objective_relative_improvement,
             "changed_path_priority_shadow": bool(args.changed_path_priority_shadow),
             "changed_path_ids": list(args.changed_path_ids),
             "changed_path_gain_bps": args.changed_path_gain_bps,
@@ -1970,6 +2252,9 @@ def main() -> None:
             shadow=shadow,
             aggregate_multipath=args.aggregate_multipath,
             gate_mode=args.gate_mode,
+            gate_policy=args.gate_policy,
+            objective=args.objective,
+            objective_relative_threshold=args.min_objective_relative_improvement,
             min_relative_gain=args.min_relative_gain,
             fixed_gamma=fixed_gamma,
             log_file=log_file,

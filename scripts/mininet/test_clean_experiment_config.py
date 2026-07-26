@@ -136,8 +136,7 @@ class CleanExperimentConfigTests(unittest.TestCase):
                 text = (MININET_DIR / name).read_text(encoding="utf-8")
                 self.assertIn('SCENARIO="${SCENARIO:-clean_equal_paths}"', text)
                 self.assertIn('"$@"', text)
-                self.assertIn("QACCESS_GATE_POLICY=legacy", text)
-                self.assertIn("QACCESS_TRIGGER_MODE=legacy_buffer_full", text)
+                self.assertIn("QACCESS_GATE_POLICY", text)
                 for fragment in fragments:
                     self.assertIn(fragment, text)
         bandwidth_runner = (MININET_DIR / "run_qaccess_t_clean_bandwidth_eval.sh").read_text(
@@ -145,6 +144,43 @@ class CleanExperimentConfigTests(unittest.TestCase):
         )
         self.assertIn("TC_BW_FIXED_DELAY_MS=40", bandwidth_runner)
         self.assertIn("TC_BW_FIXED_LOSS_PERCENT=0", bandwidth_runner)
+
+    def test_clean_runner_objective_trigger_mapping(self) -> None:
+        expected = {
+            "run_qaccess_t_clean_bandwidth_eval.sh": ("objective_t", "throughput"),
+            "run_qaccess_d_clean_delay_eval.sh": ("objective_d", "delay"),
+            "run_qaccess_l_clean_loss_eval.sh": ("objective_l", "loss"),
+            "run_qaccess_t_clean_stability_eval.sh": ("objective_t", "throughput"),
+        }
+        for name, fragments in expected.items():
+            text = (MININET_DIR / name).read_text(encoding="utf-8")
+            for fragment in fragments:
+                self.assertIn(fragment, text)
+
+    def test_invalid_trigger_objective_combination_fails(self) -> None:
+        runner = MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh"
+        result = subprocess.run(
+            [str(runner), "--configuration-only"],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "PYTHONDONTWRITEBYTECODE": "1",
+                "QACCESS_EXPERIMENT_FAMILY": "clean_controlled",
+                "QACCESS_CONTROLLER_VARIANT": "qaccess_d",
+                "QACCESS_TARGET_MODE": "delta_owd_1s",
+                "QACCESS_WORKER_TARGET_MODE": "delta_owd_1s",
+                "QACCESS_PROFILE_KIND": "none",
+                "SCENARIO": "clean_equal_paths",
+                "QACCESS_GATE_POLICY": "objective_aware",
+                "QACCESS_TRIGGER_MODE": "objective_d",
+                "QACCESS_GATE_OBJECTIVE": "throughput",
+            },
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("incompatible", result.stderr)
 
     def test_all_clean_runners_support_configuration_only_validation(self) -> None:
         runners = (
@@ -222,6 +258,26 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertIn('--dynamic-delay-profile "$DETERIORATION_PROFILE"', text)
         self.assertIn('--dynamic-loss-profile "$DETERIORATION_PROFILE"', text)
         self.assertIn('ACTIVE_DYNAMIC_TIMEOUT="$TIMEOUT"', text)
+
+    def test_historical_runners_remain_legacy_by_default(self) -> None:
+        shared = (MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('GATE_POLICY="${QACCESS_GATE_POLICY:-legacy}"', shared)
+        self.assertIn('TRIGGER_MODE="${QACCESS_TRIGGER_MODE:-legacy_buffer_full}"', shared)
+        historical = (
+            "run_qaccess_d_delay_deterioration_eval.sh",
+            "run_qaccess_l_loss_deterioration_eval.sh",
+            "run_qaccess_t_baseline_vs_dynamic_hybrid.sh",
+            "run_qaccess_t_combined_deterioration_active.sh",
+            "run_qaccess_t_combined_deterioration_shadow.sh",
+            "run_qaccess_t_fig7_baseline_vs_dynamic_hybrid.sh",
+            "run_qaccess_t_no_deterioration_eval.sh",
+        )
+        for name in historical:
+            text = (MININET_DIR / name).read_text(encoding="utf-8")
+            self.assertNotIn("QACCESS_GATE_POLICY=objective_aware", text, name)
+            self.assertNotIn("QACCESS_TRIGGER_MODE=objective_", text, name)
 
     def _assert_invalid_profile(self, text: str, kind: str) -> None:
         with tempfile.TemporaryDirectory() as directory:

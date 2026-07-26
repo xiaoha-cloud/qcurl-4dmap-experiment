@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from clean_evaluator_presets import clean_windows, preset_from_metadata
+
 WINDOWS = [(0.0, 50.0), (50.0, 100.0), (100.0, 150.0), (150.0, 200.0)]
 RUNS = {
     "baseline": "no_deterioration_baseline",
@@ -127,6 +129,25 @@ def load_metadata(session: Path) -> dict[str, Any]:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def count_applied_updates(session: Path) -> int:
+    request_ids: set[str] = set()
+    anonymous = 0
+    for path in sorted(session.glob("**/worker.log")):
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("actual_applied") is not True:
+                continue
+            request_id = str(row.get("request_id") or "")
+            if request_id:
+                request_ids.add(request_id)
+            else:
+                anonymous += 1
+    return len(request_ids) + anonymous
 
 
 def ffprobe_json(path: Path, ffprobe_bin: str) -> dict[str, Any]:
@@ -484,6 +505,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--input-flv", type=Path, default=None)
     ap.add_argument("--windows", default="0:50,50:100,100:150,150:200")
+    ap.add_argument("--preset", choices=("auto", "historical", "stability_clean"), default="auto")
     ap.add_argument("--bin-seconds", type=float, default=1.0)
     ap.add_argument("--tshark-bin", default="tshark")
     ap.add_argument("--ffprobe-bin", default="ffprobe")
@@ -493,8 +515,16 @@ def main() -> None:
     session = args.session.resolve()
     out = args.out.resolve() if args.out else session / "evaluation_no_deterioration"
     out.mkdir(parents=True, exist_ok=True)
-    windows = parse_windows(args.windows)
     metadata = load_metadata(session)
+    selected_preset = args.preset
+    if selected_preset == "auto":
+        selected_preset = "stability_clean" if preset_from_metadata(metadata) == "stability_clean" else "historical"
+    clean = selected_preset == "stability_clean"
+    window_specs = clean_windows("stability_clean", metadata) if clean else None
+    windows = (
+        [(window.start_s, window.end_s) for window in window_specs]
+        if window_specs is not None else parse_windows(args.windows)
+    )
     input_flv = args.input_flv or (Path(metadata.get("input_flv")) if metadata.get("input_flv") else None)
 
     if shutil.which(args.tshark_bin) is None:
@@ -502,16 +532,25 @@ def main() -> None:
 
     by_method: dict[str, list[dict[str, float]]] = {}
     timeseries: list[dict[str, Any]] = []
-    for method, label in RUNS.items():
+    run_labels = dict(RUNS)
+    if clean:
+        run_labels = {
+            "baseline": str(metadata.get("baseline_label") or "clean_stability_baseline"),
+            "qaccess_t": str(metadata.get("active_label") or "clean_stability_qaccess_t"),
+        }
+    for method, label in run_labels.items():
         rows = pcap_series(session / label, args.tshark_bin, args.bin_seconds)
+        if clean:
+            rows = [row for row in rows if 0.0 <= row["time_s"] < 200.0]
         by_method[method] = rows
         for row in rows:
             timeseries.append({"method": method, **row})
 
     window_rows = []
+    update_count = count_applied_updates(session) if clean else 0
     for method, rows in by_method.items():
-        for lo, hi in windows:
-            window_rows.append({
+        for index, (lo, hi) in enumerate(windows):
+            row = {
                 "method": method,
                 "window": f"{lo:g}-{hi:g}",
                 "t_lo": lo,
@@ -519,17 +558,26 @@ def main() -> None:
                 "total_mbps_mean": mean_window(rows, "total_mbps", lo, hi),
                 "pathA_mbps_mean": mean_window(rows, "pathA_mbps", lo, hi),
                 "pathB_mbps_mean": mean_window(rows, "pathB_mbps", lo, hi),
-            })
+            }
+            if clean and window_specs is not None:
+                spec = window_specs[index]
+                row.update({
+                    "window_role": spec.role,
+                    "condition": spec.condition,
+                    "primary_metric": "throughput_and_update_count",
+                    "update_count": update_count if spec.role == "full_run" and method == "qaccess_t" else 0,
+                })
+            window_rows.append(row)
 
     compare_rows = []
-    for lo, hi in windows:
+    for index, (lo, hi) in enumerate(windows):
         b_total = mean_window(by_method["baseline"], "total_mbps", lo, hi)
         q_total = mean_window(by_method["qaccess_t"], "total_mbps", lo, hi)
         b_a = mean_window(by_method["baseline"], "pathA_mbps", lo, hi)
         q_a = mean_window(by_method["qaccess_t"], "pathA_mbps", lo, hi)
         b_b = mean_window(by_method["baseline"], "pathB_mbps", lo, hi)
         q_b = mean_window(by_method["qaccess_t"], "pathB_mbps", lo, hi)
-        compare_rows.append({
+        row = {
             "window": f"{lo:g}-{hi:g}",
             "baseline_total_mbps": b_total,
             "qaccess_t_total_mbps": q_total,
@@ -541,7 +589,16 @@ def main() -> None:
             "baseline_pathB_mbps": b_b,
             "qaccess_t_pathB_mbps": q_b,
             "pathB_change_pct": pct(q_b, b_b),
-        })
+        }
+        if clean and window_specs is not None:
+            spec = window_specs[index]
+            row.update({
+                "window_role": spec.role,
+                "condition": spec.condition,
+                "result_type": spec.role,
+                "qaccess_update_count": update_count if spec.role == "full_run" else 0,
+            })
+        compare_rows.append(row)
 
     qoe_rows = evaluate_video_qoe(session, input_flv, args.ffprobe_bin, args.ffmpeg_bin)
 
@@ -558,10 +615,13 @@ def main() -> None:
         "throughput_source": "path pcaps, all frames, no direction filter",
         "qoe_source": "output FLV + strict raw QoE event matching when available; qoe_from_events.py is not used",
         "windows": [{"start_s": lo, "end_s": hi} for lo, hi in windows],
+        "preset": selected_preset,
+        "update_count": update_count if clean else None,
     }
     (out / "evaluation_metadata.json").write_text(json.dumps(eval_meta, indent=2), encoding="utf-8")
 
     print(f"Session: {session}")
+    print(f"Evaluator preset: {selected_preset}")
     print(f"Throughput windows: {out / 'throughput_windows.csv'}")
     print(f"Throughput comparison: {out / 'throughput_comparison.csv'}")
     print(f"QoE summary: {out / 'qoe_summary.csv'}")

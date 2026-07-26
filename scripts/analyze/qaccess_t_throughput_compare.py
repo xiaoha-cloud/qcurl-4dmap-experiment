@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import shutil
 import subprocess
@@ -23,6 +24,8 @@ from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
+
+from clean_evaluator_presets import clean_windows, clip_to_clean_run, preset_from_metadata
 
 _REPO = Path(__file__).resolve().parents[2]
 if str(_REPO) not in sys.path:
@@ -174,11 +177,51 @@ def load_total_tp_mbps_from_pcaps(
     return pd.DataFrame(rows), pcaps
 
 
+def load_clean_path_tp_mbps_from_pcaps(
+    run_dir: Path,
+    tshark_bin: str = "tshark",
+    bin_seconds: float = 1.0,
+) -> tuple[pd.DataFrame, list[Path]]:
+    pcaps = _find_pcaps(run_dir)
+    if not pcaps:
+        return pd.DataFrame(), []
+    path_bytes: dict[str, dict[float, int]] = {
+        "path_a_mbps": defaultdict(int),
+        "path_b_mbps": defaultdict(int),
+        "unclassified_mbps": defaultdict(int),
+    }
+    for pcap in pcaps:
+        lowered = pcap.name.lower()
+        key = (
+            "path_a_mbps" if "patha" in lowered or "path_a" in lowered
+            else "path_b_mbps" if "pathb" in lowered or "path_b" in lowered
+            else "unclassified_mbps"
+        )
+        for timestamp, byte_count in _pcap_to_bytes_by_bin(
+            pcap, tshark_bin=tshark_bin, bin_seconds=bin_seconds,
+        ).items():
+            path_bytes[key][timestamp] += byte_count
+    timestamps = sorted({timestamp for values in path_bytes.values() for timestamp in values})
+    rows = []
+    for timestamp in timestamps:
+        a = path_bytes["path_a_mbps"].get(timestamp, 0) * 8.0 / bin_seconds / 1_000_000.0
+        b = path_bytes["path_b_mbps"].get(timestamp, 0) * 8.0 / bin_seconds / 1_000_000.0
+        unknown = path_bytes["unclassified_mbps"].get(timestamp, 0) * 8.0 / bin_seconds / 1_000_000.0
+        rows.append({
+            "time_s": timestamp,
+            "path_a_mbps": a,
+            "path_b_mbps": b,
+            "tp_mbps": a + b + unknown,
+        })
+    return pd.DataFrame(rows), pcaps
+
+
 def load_run_timeseries(
     run_dir: Path,
     source: str,
     tshark_bin: str,
     bin_seconds: float,
+    clean_per_path: bool = False,
 ) -> tuple[pd.DataFrame, str, str]:
     """
     Returns:
@@ -187,7 +230,8 @@ def load_run_timeseries(
       source_files string
     """
     if source in ("auto", "pcap"):
-        ts, pcaps = load_total_tp_mbps_from_pcaps(
+        loader = load_clean_path_tp_mbps_from_pcaps if clean_per_path else load_total_tp_mbps_from_pcaps
+        ts, pcaps = loader(
             run_dir,
             tshark_bin=tshark_bin,
             bin_seconds=bin_seconds,
@@ -226,6 +270,26 @@ def _mean_tp(ts: pd.DataFrame, lo: float, hi: float) -> float:
     return float(sub["tp_mbps"].mean())
 
 
+def _mean_column(ts: pd.DataFrame, column: str, lo: float, hi: float) -> float:
+    if ts.empty or column not in ts.columns:
+        return float("nan")
+    sub = ts[(ts["time_s"] >= lo) & (ts["time_s"] < hi)]
+    return float(sub[column].mean()) if not sub.empty else float("nan")
+
+
+def _load_evaluator_metadata(run_dirs: list[Path]) -> dict:
+    candidates: list[Path] = []
+    for run_dir in run_dirs:
+        candidates.extend((run_dir / "experiment_metadata.json", run_dir.parent / "experiment_metadata.json"))
+    for path in candidates:
+        if path.is_file():
+            try:
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+    return {}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Q-ACCeSS-T throughput vs baseline")
     ap.add_argument("-r", "--run", action="append", required=True, help="LABEL:run_dir")
@@ -234,6 +298,7 @@ def main() -> None:
     ap.add_argument("--source", choices=["auto", "pcap", "log"], default="auto")
     ap.add_argument("--bin-seconds", type=float, default=1.0)
     ap.add_argument("--tshark-bin", default="tshark")
+    ap.add_argument("--preset", choices=("auto", "historical", "bandwidth_clean"), default="auto")
     args = ap.parse_args()
 
     runs: dict[str, Path] = {}
@@ -244,6 +309,13 @@ def main() -> None:
     if args.baseline not in runs:
         print(f"[error] baseline label {args.baseline!r} not in runs", file=sys.stderr)
         sys.exit(1)
+
+    metadata = _load_evaluator_metadata(list(runs.values()))
+    selected_preset = args.preset
+    if selected_preset == "auto":
+        selected_preset = "bandwidth_clean" if preset_from_metadata(metadata) == "bandwidth_clean" else "historical"
+    clean = selected_preset == "bandwidth_clean"
+    windows = clean_windows("bandwidth_clean", metadata) if clean else WINDOWS
 
     out = args.out.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -256,6 +328,7 @@ def main() -> None:
             source=args.source,
             tshark_bin=args.tshark_bin,
             bin_seconds=args.bin_seconds,
+            clean_per_path=clean,
         )
 
         if ts.empty:
@@ -267,10 +340,16 @@ def main() -> None:
             continue
 
         ts = ts.sort_values("time_s")
+        if clean:
+            ts = clip_to_clean_run(ts)
         ts.to_csv(out / f"throughput_timeseries_{lab}.csv", index=False)
 
-        for wname, lo, hi in WINDOWS:
-            rows.append({
+        for window in windows:
+            if clean:
+                wname, lo, hi = window.name, window.start_s, window.end_s
+            else:
+                wname, lo, hi = window
+            row = {
                 "method": lab,
                 "window": wname,
                 "t_lo": lo,
@@ -278,7 +357,17 @@ def main() -> None:
                 "tp_mbps_mean": _mean_tp(ts, lo, hi),
                 "source": source_used,
                 "source_files": source_files,
-            })
+            }
+            if clean:
+                row.update({
+                    "window_role": window.role,
+                    "condition": window.condition,
+                    "primary_metric": "throughput",
+                    "total_mbps_mean": _mean_column(ts, "tp_mbps", lo, hi),
+                    "path_a_mbps_mean": _mean_column(ts, "path_a_mbps", lo, hi),
+                    "path_b_mbps_mean": _mean_column(ts, "path_b_mbps", lo, hi),
+                })
+            rows.append(row)
 
     if not rows:
         print(
@@ -315,6 +404,18 @@ def main() -> None:
                 "baseline_tp_mbps": b,
                 "enhanced_tp_mbps": e,
                 "improvement_pct": pct,
+                **({
+                    "window_role": str(sub.loc[wname, "window_role"]),
+                    "condition": str(sub.loc[wname, "condition"]),
+                    "baseline_total_mbps": b,
+                    "qaccess_total_mbps": e,
+                    "total_delta_mbps": e - b if math.isfinite(b) and math.isfinite(e) else float("nan"),
+                    "baseline_path_a_mbps": float(base_df.set_index("window").loc[wname, "path_a_mbps_mean"]),
+                    "qaccess_path_a_mbps": float(sub.loc[wname, "path_a_mbps_mean"]),
+                    "baseline_path_b_mbps": float(base_df.set_index("window").loc[wname, "path_b_mbps_mean"]),
+                    "qaccess_path_b_mbps": float(sub.loc[wname, "path_b_mbps_mean"]),
+                    "result_type": str(sub.loc[wname, "window_role"]),
+                } if clean else {}),
             })
 
     imp = pd.DataFrame(imp_rows)
@@ -325,9 +426,21 @@ def main() -> None:
     derived.mkdir(parents=True, exist_ok=True)
     shutil.copy2(windows_path, derived / "qaccess_t_throughput_windows.csv")
     shutil.copy2(imp_path, derived / "qaccess_t_improvement_vs_baseline.csv")
+    (out / "evaluation_metadata.json").write_text(json.dumps({
+        "preset": selected_preset,
+        "source_metadata": metadata,
+        "windows": [
+            {"name": window.name, "start_s": window.start_s, "end_s": window.end_s,
+             "role": window.role, "condition": window.condition}
+            for window in windows
+        ] if clean else [
+            {"name": name, "start_s": lo, "end_s": hi} for name, lo, hi in windows
+        ],
+    }, indent=2), encoding="utf-8")
 
     print(f"Wrote {windows_path}")
     print(f"Wrote {imp_path}")
+    print(f"Evaluator preset: {selected_preset}")
 
     if not imp.empty:
         print("\nImprovement vs baseline (%):")

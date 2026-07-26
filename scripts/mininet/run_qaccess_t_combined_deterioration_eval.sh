@@ -69,9 +69,32 @@ COOLDOWN_MS="${QACCESS_TRIGGER_COOLDOWN_MS:-60000}"
 GATE_BPS="${QACCESS_GATE_BPS:-${QACCESS_MIN_DELTA_GAIN_BPS:-500000}}"
 GATE_MODE="${QACCESS_GATE_MODE:-absolute}"
 MIN_RELATIVE_GAIN="${QACCESS_MIN_RELATIVE_GAIN:-0.03}"
-MIN_OBJECTIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_IMPROVEMENT:-0}"
+MIN_OBJECTIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_IMPROVEMENT:-}"
 GATE_POLICY="${QACCESS_GATE_POLICY:-legacy}"
 TRIGGER_MODE="${QACCESS_TRIGGER_MODE:-legacy_buffer_full}"
+case "$CONTROLLER_VARIANT" in
+  qaccess_t) DEFAULT_GATE_OBJECTIVE=throughput ;;
+  qaccess_d) DEFAULT_GATE_OBJECTIVE=delay ;;
+  qaccess_l) DEFAULT_GATE_OBJECTIVE=loss ;;
+esac
+GATE_OBJECTIVE="${QACCESS_GATE_OBJECTIVE:-$DEFAULT_GATE_OBJECTIVE}"
+case "$GATE_OBJECTIVE" in
+  throughput) DEFAULT_OBJECTIVE_RELATIVE_IMPROVEMENT=0.05 ;;
+  delay) DEFAULT_OBJECTIVE_RELATIVE_IMPROVEMENT=0.10 ;;
+  loss) DEFAULT_OBJECTIVE_RELATIVE_IMPROVEMENT=0.25 ;;
+esac
+MIN_OBJECTIVE_RELATIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_RELATIVE_IMPROVEMENT:-$DEFAULT_OBJECTIVE_RELATIVE_IMPROVEMENT}"
+if [[ -z "$MIN_OBJECTIVE_IMPROVEMENT" ]]; then
+  if [[ "$GATE_POLICY" == "objective_aware" ]]; then
+    case "$GATE_OBJECTIVE" in
+      delay) MIN_OBJECTIVE_IMPROVEMENT=10 ;;
+      loss) MIN_OBJECTIVE_IMPROVEMENT=4096 ;;
+      *) MIN_OBJECTIVE_IMPROVEMENT=0 ;;
+    esac
+  else
+    MIN_OBJECTIVE_IMPROVEMENT=0
+  fi
+fi
 SESSION_KIND="${QACCESS_SESSION_KIND:-combined_deterioration}"
 BASELINE_LABEL="${QACCESS_BASELINE_LABEL:-combined_baseline}"
 DYNAMIC_LABEL="${QACCESS_DYNAMIC_LABEL:-combined_${CONTROLLER_VARIANT}_dynamic}"
@@ -104,6 +127,22 @@ case "$GATE_MODE" in
   absolute|relative|hybrid) ;;
   *) echo "[error] QACCESS_GATE_MODE must be absolute, relative, or hybrid, got: $GATE_MODE" >&2; exit 2 ;;
 esac
+case "$GATE_POLICY" in
+  legacy|objective_aware) ;;
+  *) echo "[error] QACCESS_GATE_POLICY must be legacy or objective_aware, got: $GATE_POLICY" >&2; exit 2 ;;
+esac
+case "$TRIGGER_MODE:$GATE_OBJECTIVE" in
+  legacy_buffer_full:throughput|legacy_buffer_full:delay|legacy_buffer_full:loss|objective_t:throughput|objective_d:delay|objective_l:loss) ;;
+  *) echo "[error] incompatible trigger/objective: $TRIGGER_MODE / $GATE_OBJECTIVE" >&2; exit 2 ;;
+esac
+case "$CONTROLLER_VARIANT:$GATE_OBJECTIVE" in
+  qaccess_t:throughput|qaccess_d:delay|qaccess_l:loss) ;;
+  *) echo "[error] incompatible controller/objective: $CONTROLLER_VARIANT / $GATE_OBJECTIVE" >&2; exit 2 ;;
+esac
+if [[ "$GATE_POLICY" == "objective_aware" && "$TRIGGER_MODE" == "legacy_buffer_full" ]]; then
+  echo "[error] objective_aware gate policy requires an objective-specific trigger" >&2
+  exit 2
+fi
 case "$CONTROLLER_VARIANT:$WORKER_TARGET_MODE" in
   qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_l:delta_loss_1s|qaccess_l:loss_risk_1s) ;;
   *)
@@ -116,8 +155,7 @@ case "$PROFILE_KIND" in
   *) echo "[error] QACCESS_PROFILE_KIND must be combined, bandwidth, delay, loss, or none" >&2; exit 2 ;;
 esac
 if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]]; then
-  [[ "$GATE_POLICY" == "legacy" ]] || { echo "[error] Phase 2 clean runners require QACCESS_GATE_POLICY=legacy" >&2; exit 2; }
-  [[ "$TRIGGER_MODE" == "legacy_buffer_full" ]] || { echo "[error] Phase 2 clean runners require QACCESS_TRIGGER_MODE=legacy_buffer_full" >&2; exit 2; }
+  [[ "$GATE_POLICY" == "objective_aware" ]] || { echo "[error] clean runners require QACCESS_GATE_POLICY=objective_aware" >&2; exit 2; }
   [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "[error] clean experiment TIMEOUT must be an integer number of seconds" >&2; exit 2; }
   ((TIMEOUT >= 200)) || { echo "[error] clean experiment TIMEOUT must be at least 200 seconds" >&2; exit 2; }
   if [[ "$PROFILE_KIND" == "bandwidth" ]]; then
@@ -150,7 +188,10 @@ WORKER_CMD=(
   --min-delta-gain-bps "$GATE_BPS"
   --min-objective-improvement "$MIN_OBJECTIVE_IMPROVEMENT"
   --gate-mode "$GATE_MODE"
+  --gate-policy "$GATE_POLICY"
+  --objective "$GATE_OBJECTIVE"
   --min-relative-gain "$MIN_RELATIVE_GAIN"
+  --min-objective-relative-improvement "$MIN_OBJECTIVE_RELATIVE_IMPROVEMENT"
   --min-sender-byte-delta "$MIN_SENDER_BYTE_DELTA"
   --aggregate-multipath
 )
@@ -209,7 +250,7 @@ check_configuration() {
   echo "[check] gate_bps=$GATE_BPS"
   echo "[check] min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
   echo "[check] gate_mode=$GATE_MODE min_relative_gain=$MIN_RELATIVE_GAIN"
-  echo "[check] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE"
+  echo "[check] gate_policy=$GATE_POLICY objective=$GATE_OBJECTIVE trigger_mode=$TRIGGER_MODE"
   [[ -x "$WORKER_PYTHON" ]] || { echo "[FAIL] worker Python is not executable: $WORKER_PYTHON" >&2; return 1; }
   "$WORKER_PYTHON" scripts/analyze/qaccess_t_update_worker.py \
     --model "$WORKER_MODEL" \
@@ -239,7 +280,7 @@ check_clean_configuration_only() {
     echo "[configuration] qdisc_hierarchy=root_tbf_1_to_child_netem_10 fixed_delay_ms=$TC_BW_FIXED_DELAY_MS fixed_loss_percent=$TC_BW_FIXED_LOSS_PERCENT"
   fi
   validate_profile
-  echo "[configuration] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
+  echo "[configuration] gate_policy=$GATE_POLICY objective=$GATE_OBJECTIVE trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT min_objective_relative_improvement=$MIN_OBJECTIVE_RELATIVE_IMPROVEMENT"
   echo "[PASS] clean runner configuration is valid; production model validation was not requested"
 }
 
@@ -524,7 +565,7 @@ fi
 echo ""
 echo "[combined_deterioration] experiment_family=$EXPERIMENT_FAMILY scenario=$SCENARIO"
 echo "[combined_deterioration] model_target=$WORKER_TARGET_MODE model=$WORKER_MODEL metadata=$WORKER_MODEL_METADATA"
-echo "[combined_deterioration] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
+echo "[combined_deterioration] gate_policy=$GATE_POLICY objective=$GATE_OBJECTIVE trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT min_objective_relative_improvement=$MIN_OBJECTIVE_RELATIVE_IMPROVEMENT"
 
 echo "[combined_deterioration] validating worker model before starting Mininet"
 echo "[combined_deterioration] resolved worker model: $WORKER_MODEL"
@@ -563,6 +604,7 @@ run_one "$CONTROLLER_VARIANT" "$DYNAMIC_LABEL" "$ACTIVE_DYNAMIC_TIMEOUT" \
   QACCESS_COEFF_RELOAD_INTERVAL_MS="$COEFF_RELOAD_INTERVAL_MS" \
   QACCESS_COEFF_SMOOTHING="$COEFF_SMOOTHING" \
   QACCESS_TRIGGER_UPDATE=1 \
+  QACCESS_TRIGGER_MODE="$TRIGGER_MODE" \
   QACCESS_RUNTIME_SAMPLE_EXPORT=1 \
   QACCESS_TRIGGER_ON_BUFFER_FULL=1 \
   QACCESS_TRIGGER_ON_THROUGHPUT_DROP=0 \
@@ -671,8 +713,12 @@ meta = {
         'loss_risk_1s': 'per_path_sum_lost_retrans_bytes_within_next_1s',
     }.get('$WORKER_TARGET_MODE', ''),
     'gate_mode': '$GATE_MODE',
+    'gate_policy': '$GATE_POLICY',
+    'gate_objective': '$GATE_OBJECTIVE',
+    'trigger_mode': '$TRIGGER_MODE',
     'min_delta_gain_bps': float('$GATE_BPS'),
     'min_objective_improvement': float('$MIN_OBJECTIVE_IMPROVEMENT'),
+    'min_objective_relative_improvement': float('$MIN_OBJECTIVE_RELATIVE_IMPROVEMENT'),
     'min_relative_gain': float('$MIN_RELATIVE_GAIN'),
     'execution_mode': '$EXECUTION_MODE',
     'worker_shadow': '$EXECUTION_MODE' == 'shadow',

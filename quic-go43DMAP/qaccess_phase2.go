@@ -15,14 +15,24 @@ import (
 )
 
 const (
-	defaultCoeffReloadIntervalMs = 5000
-	defaultCoeffSmoothing        = 0.2
-	defaultTriggerDropPct        = 5.0
-	defaultTriggerCooldownMs     = 60000
-	defaultRuntimeBufferSize     = 5000
-	defaultMinSamplesPerPath     = 1
-	defaultTriggerAuditPath      = "derived/qaccess_trigger_audit.jsonl"
-	maxRoundBwHistory            = 32
+	defaultCoeffReloadIntervalMs  = 5000
+	defaultCoeffSmoothing         = 0.2
+	defaultTriggerDropPct         = 5.0
+	defaultTriggerCooldownMs      = 60000
+	defaultRuntimeBufferSize      = 5000
+	defaultMinSamplesPerPath      = 1
+	defaultTriggerAuditPath       = "derived/qaccess_trigger_audit.jsonl"
+	defaultTriggerMode            = "legacy_buffer_full"
+	defaultTriggerReferenceStart  = 10.0
+	defaultTriggerReferenceEnd    = 30.0
+	defaultTriggerActivateSamples = 3
+	defaultTriggerRecoverySamples = 5
+	defaultTriggerTAbsBps         = 500000.0
+	defaultTriggerTRelative       = 0.05
+	defaultTriggerDAbsMs          = 10.0
+	defaultTriggerDRelative       = 0.25
+	defaultTriggerLRatio          = 0.002
+	maxRoundBwHistory             = 32
 )
 
 type qaccessPhase2Config struct {
@@ -45,6 +55,18 @@ type qaccessPhase2Config struct {
 	minSamplesPerPath int64
 
 	triggerUpdate           bool
+	triggerMode             string
+	gatePolicy              string
+	gateObjective           string
+	triggerReferenceStart   float64
+	triggerReferenceEnd     float64
+	triggerActivateSamples  int
+	triggerRecoverySamples  int
+	triggerTAbsBps          float64
+	triggerTRelative        float64
+	triggerDAbsMs           float64
+	triggerDRelative        float64
+	triggerLRatio           float64
 	triggerOnBufferFull     bool
 	triggerOnThroughputDrop bool
 	triggerDropPct          float64
@@ -76,6 +98,18 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		minSamplesPerPath: int64(envInt("QACCESS_MIN_SAMPLES_PER_PATH", defaultMinSamplesPerPath)),
 
 		triggerUpdate:           envBool("QACCESS_TRIGGER_UPDATE", false),
+		triggerMode:             strings.TrimSpace(envString("QACCESS_TRIGGER_MODE", defaultTriggerMode)),
+		gatePolicy:              strings.TrimSpace(envString("QACCESS_GATE_POLICY", "legacy")),
+		gateObjective:           strings.TrimSpace(os.Getenv("QACCESS_GATE_OBJECTIVE")),
+		triggerReferenceStart:   envFloat("QACCESS_TRIGGER_REFERENCE_START_SEC", defaultTriggerReferenceStart),
+		triggerReferenceEnd:     envFloat("QACCESS_TRIGGER_REFERENCE_END_SEC", defaultTriggerReferenceEnd),
+		triggerActivateSamples:  envInt("QACCESS_TRIGGER_CONSECUTIVE_SAMPLES", defaultTriggerActivateSamples),
+		triggerRecoverySamples:  envInt("QACCESS_TRIGGER_RECOVERY_SAMPLES", defaultTriggerRecoverySamples),
+		triggerTAbsBps:          envFloat("QACCESS_TRIGGER_T_ABS_BPS", defaultTriggerTAbsBps),
+		triggerTRelative:        envFloat("QACCESS_TRIGGER_T_RELATIVE", defaultTriggerTRelative),
+		triggerDAbsMs:           envFloat("QACCESS_TRIGGER_D_ABS_MS", defaultTriggerDAbsMs),
+		triggerDRelative:        envFloat("QACCESS_TRIGGER_D_RELATIVE", defaultTriggerDRelative),
+		triggerLRatio:           envFloat("QACCESS_TRIGGER_L_RATIO", defaultTriggerLRatio),
 		triggerOnBufferFull:     envBool("QACCESS_TRIGGER_ON_BUFFER_FULL", true),
 		triggerOnThroughputDrop: envBool("QACCESS_TRIGGER_ON_THROUGHPUT_DROP", false),
 		triggerDropPct:          envFloat("QACCESS_TRIGGER_DROP_PCT", defaultTriggerDropPct),
@@ -87,6 +121,13 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		updateResponsePath:      resolveUpdateResponseJSONPath(),
 		triggerAuditPath:        resolveTriggerAuditPath(),
 	}
+}
+
+func envString(key, def string) string {
+	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+		return value
+	}
+	return def
 }
 
 func loadQAccessPhase2ConfigForSession(cfg Phase2SessionConfig, connectionID string) qaccessPhase2Config {
@@ -647,6 +688,10 @@ func (uc *UtilityController) maybeTriggerCoefficientUpdate(now time.Time) {
 	uc.maybeCheckUpdateResponse(now)
 
 	if !uc.phase2.runtimeExport || uc.runtimeExporter == nil {
+		return
+	}
+	if uc.objectiveTriggerEnabled() {
+		uc.maybeTriggerObjectiveUpdate(now)
 		return
 	}
 

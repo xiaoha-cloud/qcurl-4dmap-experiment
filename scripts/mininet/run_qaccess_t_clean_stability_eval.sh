@@ -17,6 +17,9 @@ export QACCESS_DYNAMIC_LABEL=clean_stability_qaccess_t
 export QACCESS_PHASE2_STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived/qaccess_clean_stability_runtime}"
 export QACCESS_EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-active}"
 export QACCESS_GATE_MODE="${QACCESS_GATE_MODE:-absolute}"
-export QACCESS_GATE_POLICY=legacy
-export QACCESS_TRIGGER_MODE=legacy_buffer_full
+export QACCESS_GATE_POLICY="${QACCESS_GATE_POLICY:-objective_aware}"
+export QACCESS_GATE_OBJECTIVE="${QACCESS_GATE_OBJECTIVE:-throughput}"
+export QACCESS_TRIGGER_MODE="${QACCESS_TRIGGER_MODE:-objective_t}"
+export QACCESS_GATE_BPS="${QACCESS_GATE_BPS:-500000}"
+export QACCESS_MIN_OBJECTIVE_RELATIVE_IMPROVEMENT="${QACCESS_MIN_OBJECTIVE_RELATIVE_IMPROVEMENT:-0.05}"
 exec "$ROOT/scripts/mininet/run_qaccess_t_combined_deterioration_eval.sh" "$@"

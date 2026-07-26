@@ -124,6 +124,7 @@ type UtilityController struct {
 	currentRoundTotalBwBps  float64
 	currentRoundActivePaths int
 	lastRoundActivePaths    int
+	objectiveTriggerStates  map[protocol.PathID]*objectiveTriggerState
 
 	// qaccess_collect
 	collectIdx     int
@@ -153,16 +154,17 @@ func (uc *UtilityController) logPrefix() string {
 
 func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Config) *UtilityController {
 	uc := &UtilityController{
-		Mode:            mode,
-		RunID:           runID,
-		Prev:            make(map[protocol.PathID]*PathState),
-		MinGain:         legacyGainMin,
-		MaxGain:         legacyGainMax,
-		MinBackoff:      legacyRetMin,
-		MaxBackoff:      legacyRetMax,
-		coeffs:          defaultQAccessTCoefficients(),
-		controlLawMode:  resolveControlLawMode(),
-		prevAppliedGain: make(map[protocol.PathID]float64),
+		Mode:                   mode,
+		RunID:                  runID,
+		Prev:                   make(map[protocol.PathID]*PathState),
+		MinGain:                legacyGainMin,
+		MaxGain:                legacyGainMax,
+		MinBackoff:             legacyRetMin,
+		MaxBackoff:             legacyRetMax,
+		coeffs:                 defaultQAccessTCoefficients(),
+		controlLawMode:         resolveControlLawMode(),
+		prevAppliedGain:        make(map[protocol.PathID]float64),
+		objectiveTriggerStates: make(map[protocol.PathID]*objectiveTriggerState),
 	}
 	switch mode {
 	case ModeQAccessT, ModeQAccessD, ModeQAccessL:
@@ -324,6 +326,9 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 
 	if isQAccessRuntimeMode(uc.Mode) {
 		uc.noteActivePathThroughput(pm)
+		if active {
+			uc.observeObjectiveTrigger(pm, now)
+		}
 	}
 
 	prev, ok := uc.Prev[pm.PathID]
