@@ -72,6 +72,17 @@ class DelayLossEvaluationTest(unittest.TestCase):
         self.assertEqual(result["method"].tolist(), ["loss_qaccess_l"])
         self.assertAlmostEqual(result["sample_loss_rate_mean"].iloc[0], 0.05)
 
+    def test_bandwidth_timeseries_selects_runtime_path_b_and_converts_to_mbps(self):
+        samples = pd.DataFrame([
+            {"path_id": 1, "remote_endpoint": "10.0.1.1:5000", "time_s": 1.2,
+             "bw_bps": 30_000_000},
+            {"path_id": 3, "remote_endpoint": "10.0.2.1:5001", "time_s": 1.2,
+             "bw_bps": 10_000_000},
+        ])
+        result = evaluation._per_second_bandwidth(samples, "qaccess_t")
+        self.assertEqual(result["method"].tolist(), ["qaccess_t"])
+        self.assertAlmostEqual(result["bw_mbps_mean"].iloc[0], 10.0)
+
     def test_delay_plot_falls_back_to_rtt_when_owd_missing(self):
         throughput = pd.DataFrame([
             {

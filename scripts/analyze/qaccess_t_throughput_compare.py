@@ -33,6 +33,12 @@ if str(_REPO) not in sys.path:
 if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
+from qaccess_delay_loss_eval_analyze import (  # noqa: E402
+    _per_second_bandwidth,
+    _plot_timeseries,
+    load_runtime_samples,
+)
+
 try:
     from fig7_throughput_compare import WINDOWS, _find_pull, mean_tp_in_window  # type: ignore
     from throughput_timeline_eval import load_total_tp_mbps_timeseries  # type: ignore
@@ -65,14 +71,42 @@ except Exception:
 DEFAULT_OUT = _REPO / "derived" / "qaccess_t_compare"
 
 
-def render_existing_comparison_plots(data_dir: Path) -> None:
-    """Render the established Q-ACCeSS-T figures from this evaluator's CSVs."""
-    plotter = Path(__file__).resolve().with_name("plot_qaccess_t_compare.py")
-    subprocess.run(
-        [sys.executable, str(plotter), "--dir", str(data_dir.resolve())],
-        cwd=_REPO,
-        check=True,
+def render_clean_bandwidth_timeseries(
+    runs: dict[str, Path],
+    timeseries: dict[str, pd.DataFrame],
+    out: Path,
+    windows,
+) -> Path:
+    """Reuse the established three-panel T/D/L time-series plot for clean T."""
+    throughput_parts: list[pd.DataFrame] = []
+    quality_parts: list[pd.DataFrame] = []
+    for method, run_dir in runs.items():
+        frame = timeseries.get(method, pd.DataFrame())
+        required = {"time_s", "tp_mbps", "path_a_mbps", "path_b_mbps"}
+        if not frame.empty and required.issubset(frame.columns):
+            plotted = frame[list(required)].rename(columns={
+                "tp_mbps": "total_quic_wire_mbps",
+                "path_a_mbps": "path_a_quic_wire_mbps",
+                "path_b_mbps": "path_b_quic_wire_mbps",
+            })
+            plotted.insert(0, "method", method)
+            throughput_parts.append(plotted)
+        samples = clip_to_clean_run(load_runtime_samples(run_dir))
+        quality = _per_second_bandwidth(samples, method)
+        if not quality.empty:
+            quality_parts.append(quality)
+
+    throughput = pd.concat(throughput_parts, ignore_index=True) if throughput_parts else pd.DataFrame()
+    quality = pd.concat(quality_parts, ignore_index=True) if quality_parts else pd.DataFrame()
+    _plot_timeseries(
+        throughput,
+        quality,
+        out,
+        "bandwidth_clean",
+        objective_kind="throughput",
+        windows=windows,
     )
+    return out / "bandwidth_clean_throughput_quality_over_time.png"
 
 
 def _parse_r(s: str) -> tuple[str, Path]:
@@ -337,6 +371,7 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
 
     rows: list[dict] = []
+    timeseries: dict[str, pd.DataFrame] = {}
 
     for lab, rdir in runs.items():
         ts, source_used, source_files = load_run_timeseries(
@@ -358,6 +393,7 @@ def main() -> None:
         ts = ts.sort_values("time_s")
         if clean:
             ts = clip_to_clean_run(ts)
+            timeseries[lab] = ts.copy()
         ts.to_csv(out / f"throughput_timeseries_{lab}.csv", index=False)
 
         for window in windows:
@@ -454,7 +490,8 @@ def main() -> None:
         ],
     }, indent=2), encoding="utf-8")
     if clean:
-        render_existing_comparison_plots(out)
+        plot_path = render_clean_bandwidth_timeseries(runs, timeseries, out, windows)
+        print(f"Time-series plot: {plot_path}")
 
     print(f"Wrote {windows_path}")
     print(f"Wrote {imp_path}")

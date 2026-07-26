@@ -428,6 +428,21 @@ def _per_second_loss(
     return result[columns].sort_values("time_s").reset_index(drop=True)
 
 
+def _per_second_bandwidth(samples: pd.DataFrame, method: str) -> pd.DataFrame:
+    """Build the Path B bandwidth-estimate series used by the shared T/D/L plot."""
+    columns = ["method", "time_s", "bw_mbps_mean"]
+    if samples.empty or "time_s" not in samples.columns or "bw_bps" not in samples.columns:
+        return pd.DataFrame(columns=columns)
+    work = _path_b_rows(samples, path_col="path_id").copy()
+    if work.empty:
+        return pd.DataFrame(columns=columns)
+    work["time_s"] = pd.to_numeric(work["time_s"], errors="coerce").floordiv(1)
+    work["bw_mbps"] = pd.to_numeric(work["bw_bps"], errors="coerce") / 1_000_000.0
+    result = work.groupby("time_s", as_index=False).agg(bw_mbps_mean=("bw_mbps", "mean"))
+    result.insert(0, "method", method)
+    return result[columns].sort_values("time_s").reset_index(drop=True)
+
+
 def _pct_change(baseline: float, dynamic: float, higher_is_better: bool) -> float:
     if not math.isfinite(baseline) or not math.isfinite(dynamic) or baseline == 0:
         return float("nan")
@@ -510,6 +525,7 @@ def _plot_timeseries(
     for method, group in throughput.groupby("method"):
         axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], label=method, linewidth=1.5)
     axes[0].set_ylabel("Throughput (Mbps)")
+    axes[0].set_title("Total throughput from all captured frames")
     axes[0].grid(alpha=0.25)
     axes[0].legend()
 
@@ -528,7 +544,14 @@ def _plot_timeseries(
 
     quality_column = ""
     quality_label = ""
-    if (objective_kind or prefix) == "delay":
+    if (objective_kind or prefix) == "throughput":
+        for candidate, label in (
+            ("bw_mbps_mean", "Path B bandwidth estimate (Mbps)"),
+        ):
+            if candidate in quality.columns and quality[candidate].notna().any():
+                quality_column, quality_label = candidate, label
+                break
+    elif (objective_kind or prefix) == "delay":
         for candidate, label in (
             ("owd_ms_mean", "Path B OWD (ms)"),
             ("rtt_ms_mean", "Path B RTT (ms)"),

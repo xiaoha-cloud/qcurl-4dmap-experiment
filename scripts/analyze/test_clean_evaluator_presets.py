@@ -48,18 +48,33 @@ class CleanEvaluatorPresetTest(unittest.TestCase):
 
         self.assertEqual(bins, {0.0: 100, 1.0: 200})
 
-    def test_clean_bandwidth_reuses_established_plotter(self) -> None:
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-            throughput_eval.subprocess, "run"
-        ) as run:
+    def test_clean_bandwidth_reuses_three_panel_objective_plot(self) -> None:
+        series = pd.DataFrame([{
+            "time_s": 1.0, "tp_mbps": 20.0,
+            "path_a_mbps": 10.0, "path_b_mbps": 10.0,
+        }])
+        samples = pd.DataFrame([{
+            "time_s": 1.0, "path_id": 3,
+            "remote_endpoint": "10.0.2.1:5000", "bw_bps": 10_000_000,
+        }])
+        windows = clean.clean_windows("bandwidth_clean")
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(throughput_eval, "load_runtime_samples", return_value=samples), \
+             patch.object(throughput_eval, "_plot_timeseries") as plot:
             output = Path(directory)
-            throughput_eval.render_existing_comparison_plots(output)
+            plot_path = throughput_eval.render_clean_bandwidth_timeseries(
+                {"baseline": Path("baseline")}, {"baseline": series}, output, windows,
+            )
 
-        command = run.call_args.args[0]
-        self.assertEqual(command[0], sys.executable)
-        self.assertEqual(Path(command[1]).name, "plot_qaccess_t_compare.py")
-        self.assertEqual(command[2:], ["--dir", str(output.resolve())])
-        self.assertTrue(run.call_args.kwargs["check"])
+        args, kwargs = plot.call_args
+        self.assertEqual(args[3], "bandwidth_clean")
+        self.assertEqual(kwargs["objective_kind"], "throughput")
+        self.assertEqual(kwargs["windows"], windows)
+        self.assertEqual(args[0]["total_quic_wire_mbps"].tolist(), [20.0])
+        self.assertEqual(args[0]["path_a_quic_wire_mbps"].tolist(), [10.0])
+        self.assertEqual(args[0]["path_b_quic_wire_mbps"].tolist(), [10.0])
+        self.assertEqual(args[1]["bw_mbps_mean"].tolist(), [10.0])
+        self.assertEqual(plot_path.name, "bandwidth_clean_throughput_quality_over_time.png")
 
     def test_all_clean_presets_have_required_windows(self) -> None:
         self.assertEqual(
