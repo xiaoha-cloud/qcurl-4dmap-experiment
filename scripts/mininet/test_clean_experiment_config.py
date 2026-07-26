@@ -23,7 +23,7 @@ from clean_experiment_config import (  # noqa: E402
     parse_profile,
     validate_scenario,
 )
-from mp_topo import scenario_link_kwargs  # noqa: E402
+from mp_topo import _experiment_exit_status, scenario_link_kwargs  # noqa: E402
 
 
 PROFILES = {
@@ -51,6 +51,12 @@ class CleanExperimentConfigTests(unittest.TestCase):
         links = scenario_link_kwargs("fig7")
         self.assertEqual(links["path_a"], {"bw": 20, "delay": "40ms", "loss": 0})
         self.assertEqual(links["path_b"], {"bw": 20, "delay": "20ms", "loss": 0.001})
+
+    def test_clean_profile_failure_is_fail_closed(self) -> None:
+        self.assertEqual(_experiment_exit_status("clean_equal_paths", 1), 1)
+        self.assertEqual(_experiment_exit_status("clean_equal_paths", 0), 0)
+        self.assertEqual(_experiment_exit_status("clean_equal_paths", None), 0)
+        self.assertEqual(_experiment_exit_status("fig7", 1), 0)
 
     def test_clean_profiles_parse_exact_transitions(self) -> None:
         expected = {

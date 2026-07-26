@@ -245,6 +245,13 @@ def _env_float(name, default):
         return default
 
 
+def _experiment_exit_status(scenario, tc_status):
+    """Fail clean runs when their dynamic-profile process rejects the qdisc state."""
+    if scenario == "clean_equal_paths" and tc_status not in (None, 0):
+        return 1
+    return 0
+
+
 def _open_log_file(path, save_logs):
     """Open a log destination; /dev/null keeps runs quiet when logs are disabled."""
     if save_logs:
@@ -367,6 +374,7 @@ def run_experiment(net, args):
     tc_proc = None
     tc_log_path = None
     tc_log_f = None
+    tc_exit_status = None
     tcpdump_a = None
     tcpdump_b = None
     tcpdump_a_log = None
@@ -775,6 +783,7 @@ def run_experiment(net, args):
     tc_was_running_at_cleanup = False
     if tc_proc is not None:
         tc_status = tc_proc.poll()
+        tc_exit_status = tc_status
         if tc_status is None:
             tc_was_running_at_cleanup = True
             _log("tc", "deterioration process was still running; terminating during cleanup")
@@ -954,6 +963,10 @@ def run_experiment(net, args):
         _log("exp", f"grep '[utility]'        {pull_log_path} | head -30")
         if tc_log_path:
             _log("exp", f"tc timeline log: {tc_log_path}")
+    status = _experiment_exit_status(scen, tc_exit_status)
+    if status:
+        _log("error", f"clean dynamic-profile process failed; exit_status={tc_exit_status}")
+    return status
 
 
 def main():
@@ -1092,7 +1105,9 @@ def main():
 
     if args.run_exp:
         try:
-            run_experiment(net, args)
+            status = run_experiment(net, args)
+            if status:
+                raise SystemExit(status)
         finally:
             net.stop()
     else:
