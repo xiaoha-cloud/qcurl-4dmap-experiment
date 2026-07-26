@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import json
+import subprocess
 import tempfile
 import unittest
 import sys
@@ -28,6 +29,25 @@ EXPECTED_WINDOWS = (
 
 
 class CleanEvaluatorPresetTest(unittest.TestCase):
+    def test_bandwidth_pcap_is_streamed_to_tshark_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            capture = Path(directory) / "capture.pcap"
+            capture.write_bytes(b"pcap-data")
+
+            def fake_run(command, **kwargs):
+                self.assertEqual(command[command.index("-r") + 1], "-")
+                self.assertEqual(kwargs["stdin"].read(), b"pcap-data")
+                return subprocess.CompletedProcess(
+                    command, 0, stdout="1000.0,100\n1001.0,200\n", stderr=""
+                )
+
+            with patch.object(throughput_eval.subprocess, "run", side_effect=fake_run):
+                bins = throughput_eval._pcap_to_bytes_by_bin(
+                    capture, tshark_bin="tshark", bin_seconds=1.0
+                )
+
+        self.assertEqual(bins, {0.0: 100, 1.0: 200})
+
     def test_all_clean_presets_have_required_windows(self) -> None:
         self.assertEqual(
             set(clean.CLEAN_PRESETS),

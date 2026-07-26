@@ -90,8 +90,9 @@ def _pcap_to_bytes_by_bin(pcap: Path, tshark_bin: str, bin_seconds: float) -> di
     """
     cmd = [
         tshark_bin,
+        "-n",
         "-r",
-        str(pcap),
+        "-",
         "-T",
         "fields",
         "-E",
@@ -103,13 +104,18 @@ def _pcap_to_bytes_by_bin(pcap: Path, tshark_bin: str, bin_seconds: float) -> di
     ]
 
     try:
-        proc = subprocess.run(
-            cmd,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        # Open the capture in Python and stream it to tshark. Some VM images
+        # confine tshark with AppArmor so it cannot open captures under the
+        # experiment repository even though the invoking user can read them.
+        with pcap.open("rb") as capture:
+            proc = subprocess.run(
+                cmd,
+                stdin=capture,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
     except FileNotFoundError as e:
         raise RuntimeError(
             f"tshark not found. Install it with: sudo apt install -y tshark"
