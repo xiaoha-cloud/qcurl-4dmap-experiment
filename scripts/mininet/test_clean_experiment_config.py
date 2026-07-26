@@ -134,6 +134,11 @@ class CleanExperimentConfigTests(unittest.TestCase):
                 self.assertIn("QACCESS_TRIGGER_MODE=legacy_buffer_full", text)
                 for fragment in fragments:
                     self.assertIn(fragment, text)
+        bandwidth_runner = (MININET_DIR / "run_qaccess_t_clean_bandwidth_eval.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("TC_BW_FIXED_DELAY_MS=40", bandwidth_runner)
+        self.assertIn("TC_BW_FIXED_LOSS_PERCENT=0", bandwidth_runner)
 
     def test_all_clean_runners_support_configuration_only_validation(self) -> None:
         runners = (
@@ -173,6 +178,36 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("at least 200 seconds", result.stderr)
 
+    def test_clean_bandwidth_uses_tbf_with_fixed_netem_child(self) -> None:
+        result, calls = self._run_bandwidth_script(composite=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "qdisc replace dev h2-eth1 root handle 1: tbf rate 20mbit burst 64kbit latency 400ms",
+            calls,
+        )
+        self.assertIn(
+            "qdisc replace dev h2-eth1 parent 1:1 handle 10: netem delay 40ms loss 0%",
+            calls,
+        )
+        self.assertEqual(calls.count("root handle 1: tbf"), 3)
+        self.assertEqual(calls.count("parent 1:1 handle 10: netem"), 3)
+        self.assertIn("-s qdisc show dev h2-eth1", calls)
+        self.assertIn("-s class show dev h2-eth1", calls)
+        self.assertIn("qdisc_state stage=before_first_step", result.stderr)
+        self.assertIn("qdisc_state stage=after_20mbit", result.stderr)
+        self.assertIn("verification_ok: root_tbf=1: child_netem=10: parent=1:1", result.stderr)
+
+    def test_legacy_bandwidth_command_remains_root_tbf_only(self) -> None:
+        result, calls = self._run_bandwidth_script(composite=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "qdisc replace dev h2-eth1 root tbf rate 20mbit burst 64kbit latency 400ms",
+            calls,
+        )
+        self.assertNotIn("parent 1:1 handle 10: netem", calls)
+        self.assertIn("qdisc_show:", result.stderr)
+        self.assertIn("qdisc_stats:", result.stderr)
+
     def test_shared_runner_uses_one_profile_for_both_legs(self) -> None:
         text = (MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh").read_text(encoding="utf-8")
         self.assertIn('run_one baseline "$BASELINE_LABEL" "$TIMEOUT"', text)
@@ -202,6 +237,73 @@ class CleanExperimentConfigTests(unittest.TestCase):
                 check=False,
             )
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def _run_bandwidth_script(self, *, composite: bool) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as directory:
+            temp_dir = Path(directory)
+            profile = temp_dir / "profile.env"
+            profile.write_text("IFACE=h2-eth1\n0 20\n0 30\n0 10\n", encoding="utf-8")
+            call_log = temp_dir / "tc_calls.log"
+            state = temp_dir / "tc_state"
+            fake_tc = temp_dir / "tc"
+            fake_tc.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> "$TC_CALL_LOG"
+if [[ "$*" == *"root handle 1: tbf"* ]]; then
+  printf 'root\\n' > "$TC_STATE"
+elif [[ "$*" == *"parent 1:1 handle 10: netem"* ]]; then
+  printf 'composite\\n' > "$TC_STATE"
+elif [[ "$*" == *"root tbf rate"* ]]; then
+  printf 'legacy\\n' > "$TC_STATE"
+fi
+current="$(cat "$TC_STATE" 2>/dev/null || true)"
+if [[ "$*" == *"qdisc show dev h2-eth1"* ]]; then
+  case "$current" in
+    composite)
+      printf 'qdisc netem 10: parent 1:1 limit 1000 delay 40ms loss 0%%\\n'
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\\n'
+      ;;
+    root)
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\\n'
+      ;;
+    legacy)
+      printf 'qdisc tbf 8001: root rate 20Mbit burst 8Kb lat 400ms\\n'
+      ;;
+    *)
+      printf 'qdisc netem 5: root limit 1000 delay 40ms loss 0%%\\n'
+      ;;
+  esac
+elif [[ "$*" == *"class show dev h2-eth1"* ]]; then
+  printf 'class tbf 1:1 parent 1: leaf 10: rate 20Mbit burst 8Kb\\n'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_tc.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{temp_dir}:{os.environ['PATH']}",
+                "TC_CALL_LOG": str(call_log),
+                "TC_STATE": str(state),
+            }
+            if composite:
+                environment.update(
+                    {"TC_BW_FIXED_DELAY_MS": "40", "TC_BW_FIXED_LOSS_PERCENT": "0"}
+                )
+            else:
+                environment.pop("TC_BW_FIXED_DELAY_MS", None)
+                environment.pop("TC_BW_FIXED_LOSS_PERCENT", None)
+            result = subprocess.run(
+                ["bash", str(MININET_DIR / "tc_bw_steps.sh"), str(profile)],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            calls = call_log.read_text(encoding="utf-8") if call_log.is_file() else ""
+            return result, calls
 
 
 if __name__ == "__main__":

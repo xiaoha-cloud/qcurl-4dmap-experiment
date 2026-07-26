@@ -120,6 +120,10 @@ if [[ "$EXPERIMENT_FAMILY" == "clean_controlled" ]]; then
   [[ "$TRIGGER_MODE" == "legacy_buffer_full" ]] || { echo "[error] Phase 2 clean runners require QACCESS_TRIGGER_MODE=legacy_buffer_full" >&2; exit 2; }
   [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || { echo "[error] clean experiment TIMEOUT must be an integer number of seconds" >&2; exit 2; }
   ((TIMEOUT >= 200)) || { echo "[error] clean experiment TIMEOUT must be at least 200 seconds" >&2; exit 2; }
+  if [[ "$PROFILE_KIND" == "bandwidth" ]]; then
+    [[ "${TC_BW_FIXED_DELAY_MS:-}" == "40" ]] || { echo "[error] clean bandwidth requires TC_BW_FIXED_DELAY_MS=40" >&2; exit 2; }
+    [[ "${TC_BW_FIXED_LOSS_PERCENT:-}" == "0" ]] || { echo "[error] clean bandwidth requires TC_BW_FIXED_LOSS_PERCENT=0" >&2; exit 2; }
+  fi
 fi
 
 export KEEP_PCAP="${KEEP_PCAP:-0}"
@@ -231,6 +235,9 @@ check_clean_configuration_only() {
   echo "[configuration] profile_kind=$PROFILE_KIND"
   echo "[configuration] profile=${DETERIORATION_PROFILE:-none}"
   echo "[configuration] duration_sec=$TIMEOUT"
+  if [[ "$PROFILE_KIND" == "bandwidth" ]]; then
+    echo "[configuration] qdisc_hierarchy=root_tbf_1_to_child_netem_10 fixed_delay_ms=$TC_BW_FIXED_DELAY_MS fixed_loss_percent=$TC_BW_FIXED_LOSS_PERCENT"
+  fi
   validate_profile
   echo "[configuration] gate_policy=$GATE_POLICY trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT"
   echo "[PASS] clean runner configuration is valid; production model validation was not requested"
@@ -715,6 +722,13 @@ if '$EXPERIMENT_FAMILY' == 'clean_controlled':
         'active_label': '$DYNAMIC_LABEL',
         'baseline_leg_configuration': baseline_leg_config,
         'active_leg_configuration': active_leg_config,
+        'bandwidth_qdisc': ({
+            'hierarchy': 'root_tbf_handle_1_child_netem_handle_10_parent_1_1',
+            'root_command': 'tc qdisc replace dev h2-eth1 root handle 1: tbf rate <profile_mbps>mbit burst 64kbit latency 400ms',
+            'child_command': 'tc qdisc replace dev h2-eth1 parent 1:1 handle 10: netem delay 40ms loss 0%',
+            'fixed_delay_ms': 40,
+            'fixed_loss_percent': 0,
+        } if '$PROFILE_KIND' == 'bandwidth' else None),
         'paired_leg_validation': {
             'same_scenario': baseline_leg_config['scenario'] == active_leg_config['scenario'],
             'same_profile': baseline_leg_config['profile_path'] == active_leg_config['profile_path'],
