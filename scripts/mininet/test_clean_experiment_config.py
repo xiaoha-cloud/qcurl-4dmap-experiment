@@ -144,6 +144,12 @@ class CleanExperimentConfigTests(unittest.TestCase):
         )
         self.assertIn("TC_BW_FIXED_DELAY_MS=40", bandwidth_runner)
         self.assertIn("TC_BW_FIXED_LOSS_PERCENT=0", bandwidth_runner)
+        delay_runner = (MININET_DIR / "run_qaccess_d_clean_delay_eval.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("TC_DELAY_FIXED_BW_MBIT=20", delay_runner)
+        self.assertIn("TC_DELAY_FIXED_LOSS_PERCENT=0", delay_runner)
+        self.assertIn('QACCESS_EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-active}"', delay_runner)
 
     def test_clean_runner_objective_trigger_mapping(self) -> None:
         expected = {
@@ -202,6 +208,21 @@ class CleanExperimentConfigTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertIn("clean runner configuration is valid", result.stdout)
 
+    def test_clean_delay_configuration_is_active_and_delay_objective(self) -> None:
+        result = subprocess.run(
+            [str(MININET_DIR / "run_qaccess_d_clean_delay_eval.sh"), "--configuration-only"],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("execution_mode=active", result.stdout)
+        self.assertIn("objective=delay", result.stdout)
+        self.assertIn("trigger_mode=objective_d", result.stdout)
+        self.assertIn("fixed_bw_mbit=20", result.stdout)
+
     def test_clean_runner_rejects_incorrect_interface(self) -> None:
         self._assert_runner_rejects_profile("IFACE=h1-eth1\n0 20\n50 30\n100 10\n")
 
@@ -249,6 +270,29 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertNotIn("parent 1:1 handle 10: netem", calls)
         self.assertIn("qdisc_show:", result.stderr)
         self.assertIn("qdisc_stats:", result.stderr)
+
+    def test_clean_delay_preserves_bandwidth_with_dynamic_netem_child(self) -> None:
+        result, calls = self._run_delay_script(composite=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "qdisc replace dev h2-eth1 root handle 1: tbf rate 20mbit burst 64kbit latency 400ms",
+            calls,
+        )
+        for delay in ("40ms", "80ms", "40ms"):
+            self.assertIn(
+                f"qdisc replace dev h2-eth1 parent 1:1 handle 10: netem delay {delay} loss 0%",
+                calls,
+            )
+        self.assertEqual(calls.count("root handle 1: tbf"), 3)
+        self.assertEqual(calls.count("parent 1:1 handle 10: netem"), 3)
+        self.assertIn("verification_ok: root_tbf=1: fixed_bw=20mbit", result.stderr)
+
+    def test_legacy_delay_command_remains_root_netem_only(self) -> None:
+        result, calls = self._run_delay_script(composite=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("qdisc replace dev h2-eth1 root netem delay 40ms", calls)
+        self.assertNotIn("root handle 1: tbf", calls)
+        self.assertNotIn("parent 1:1 handle 10: netem", calls)
 
     def test_shared_runner_uses_one_profile_for_both_legs(self) -> None:
         text = (MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh").read_text(encoding="utf-8")
@@ -369,6 +413,70 @@ fi
                 environment.pop("TC_BW_FIXED_LOSS_PERCENT", None)
             result = subprocess.run(
                 ["bash", str(MININET_DIR / "tc_bw_steps.sh"), str(profile)],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            calls = call_log.read_text(encoding="utf-8") if call_log.is_file() else ""
+            return result, calls
+
+    def _run_delay_script(self, *, composite: bool) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as directory:
+            temp_dir = Path(directory)
+            profile = temp_dir / "profile.env"
+            profile.write_text("IFACE=h2-eth1\n0 40\n0 80\n0 40\n", encoding="utf-8")
+            call_log = temp_dir / "tc_calls.log"
+            state = temp_dir / "tc_state"
+            fake_tc = temp_dir / "tc"
+            fake_tc.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$TC_CALL_LOG"
+if [[ "$*" == *"root handle 1: tbf"* ]]; then
+  printf 'root\n' > "$TC_STATE"
+elif [[ "$*" == *"parent 1:1 handle 10: netem"* ]]; then
+  printf 'composite\n' > "$TC_STATE"
+elif [[ "$*" == *"root netem delay"* ]]; then
+  printf 'legacy\n' > "$TC_STATE"
+fi
+current="$(cat "$TC_STATE" 2>/dev/null || true)"
+if [[ "$*" == *"qdisc show dev h2-eth1"* ]]; then
+  case "$current" in
+    composite)
+      printf 'qdisc netem 10: parent 1:1 limit 1000 delay 40ms loss 0%%\n'
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\n'
+      ;;
+    root)
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\n'
+      ;;
+    *)
+      printf 'qdisc netem 8001: root limit 1000 delay 40ms\n'
+      ;;
+  esac
+elif [[ "$*" == *"class show dev h2-eth1"* ]]; then
+  printf 'class tbf 1:1 parent 1: leaf 10: rate 20Mbit burst 8Kb\n'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_tc.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{temp_dir}:{os.environ['PATH']}",
+                "TC_CALL_LOG": str(call_log),
+                "TC_STATE": str(state),
+            }
+            if composite:
+                environment.update(
+                    {"TC_DELAY_FIXED_BW_MBIT": "20", "TC_DELAY_FIXED_LOSS_PERCENT": "0"}
+                )
+            else:
+                environment.pop("TC_DELAY_FIXED_BW_MBIT", None)
+                environment.pop("TC_DELAY_FIXED_LOSS_PERCENT", None)
+            result = subprocess.run(
+                ["bash", str(MININET_DIR / "tc_delay_steps.sh"), str(profile)],
                 cwd=ROOT,
                 env=environment,
                 text=True,

@@ -330,6 +330,7 @@ def _recovery_time_s(
 def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.DataFrame:
     columns = [
         "method", "time_s", "owd_ms_mean", "owd_ms_p95",
+        "rtt_latest_ms_mean", "rtt_latest_ms_p95",
         "rtt_ms_mean", "rtt_ms_p95", "jitter_ms_mean",
     ]
     pieces: list[pd.DataFrame] = []
@@ -355,6 +356,9 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
                 "rtt_ms_mean": ("rtt_smoothed_ms", "mean"),
                 "rtt_ms_p95": ("rtt_smoothed_ms", lambda s: s.quantile(0.95)),
             }
+            if "rtt_latest_ms" in m.columns:
+                agg["rtt_latest_ms_mean"] = ("rtt_latest_ms", "mean")
+                agg["rtt_latest_ms_p95"] = ("rtt_latest_ms", lambda s: s.quantile(0.95))
             if "rtt_mean_dev_ms" in m.columns:
                 agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
             pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
@@ -456,6 +460,8 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
         "owd_ms_p95": False,
         "rtt_ms_mean": False,
         "rtt_ms_p95": False,
+        "rtt_latest_ms_mean": False,
+        "rtt_latest_ms_p95": False,
         "jitter_ms_mean": False,
         "utility_loss_mean": False,
         "monitor_loss_mean": False,
@@ -581,6 +587,7 @@ def _plot_timeseries(
                 break
     elif (objective_kind or prefix) == "delay":
         for candidate, label in (
+            ("rtt_latest_ms_mean", "Path B raw RTT (ms)"),
             ("owd_ms_mean", "Path B OWD (ms)"),
             ("rtt_ms_mean", "Path B RTT (ms)"),
         ):
@@ -643,6 +650,8 @@ def _delay_window_metrics(
         "owd_ms_p95": _p95(ub["owd_ms"]) if "owd_ms" in ub.columns else float("nan"),
         "rtt_ms_mean": float(mb["rtt_smoothed_ms"].mean()) if "rtt_smoothed_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_ms_p95": _p95(mb["rtt_smoothed_ms"]) if "rtt_smoothed_ms" in mb.columns else float("nan"),
+        "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
+        "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
         "path_b_share_pct_mean": float(w["path_b_share_pct"].mean()) if "path_b_share_pct" in w.columns and len(w) else float("nan"),
         "secondary_total_quic_wire_mbps_mean": float(w["total_quic_wire_mbps"].mean()) if len(w) else float("nan"),

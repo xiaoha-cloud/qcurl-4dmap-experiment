@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pandas as pd
 
 import qaccess_delay_loss_eval_analyze as evaluation
+from parse_logs import load_pull_log
 
 
 class DelayLossEvaluationTest(unittest.TestCase):
@@ -122,6 +123,22 @@ class DelayLossEvaluationTest(unittest.TestCase):
             evaluation._plot_timeseries(throughput, quality, Path(td), "delay")
 
         text.assert_not_called()
+
+    def test_monitor_parser_and_delay_series_preserve_raw_latest_rtt(self):
+        line = (
+            "2026/07/26 15:00:00 [m]monitor path=2 "
+            "rtt_smoothed=160ms rtt_min=80ms rtt_latest=175ms "
+            "rtt_mean_dev=12ms owd=80ms bw=1250000B/s inflight=0B "
+            "cwnd_full=46720B cwnd_room=46720B loss=0 lost_B=0 serverinx=0\n"
+        )
+        with TemporaryDirectory() as td:
+            log = Path(td) / "pull.log"
+            log.write_text(line, encoding="utf-8")
+            _, monitor = load_pull_log(log)
+        self.assertEqual(monitor["rtt_latest_ms"].tolist(), [175.0])
+        self.assertEqual(monitor["rtt_mean_dev_ms"].tolist(), [12.0])
+        result = evaluation._per_second_delay(pd.DataFrame(), monitor, "qaccess_d")
+        self.assertEqual(result["rtt_latest_ms_mean"].tolist(), [175.0])
 
 
 if __name__ == "__main__":
