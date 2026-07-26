@@ -65,6 +65,16 @@ except Exception:
 DEFAULT_OUT = _REPO / "derived" / "qaccess_t_compare"
 
 
+def render_existing_comparison_plots(data_dir: Path) -> None:
+    """Render the established Q-ACCeSS-T figures from this evaluator's CSVs."""
+    plotter = Path(__file__).resolve().with_name("plot_qaccess_t_compare.py")
+    subprocess.run(
+        [sys.executable, str(plotter), "--dir", str(data_dir.resolve())],
+        cwd=_REPO,
+        check=True,
+    )
+
+
 def _parse_r(s: str) -> tuple[str, Path]:
     if ":" not in s:
         raise ValueError("expected LABEL:path")
@@ -443,6 +453,8 @@ def main() -> None:
             {"name": name, "start_s": lo, "end_s": hi} for name, lo, hi in windows
         ],
     }, indent=2), encoding="utf-8")
+    if clean:
+        render_existing_comparison_plots(out)
 
     print(f"Wrote {windows_path}")
     print(f"Wrote {imp_path}")

@@ -48,6 +48,19 @@ class CleanEvaluatorPresetTest(unittest.TestCase):
 
         self.assertEqual(bins, {0.0: 100, 1.0: 200})
 
+    def test_clean_bandwidth_reuses_established_plotter(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            throughput_eval.subprocess, "run"
+        ) as run:
+            output = Path(directory)
+            throughput_eval.render_existing_comparison_plots(output)
+
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertEqual(Path(command[1]).name, "plot_qaccess_t_compare.py")
+        self.assertEqual(command[2:], ["--dir", str(output.resolve())])
+        self.assertTrue(run.call_args.kwargs["check"])
+
     def test_all_clean_presets_have_required_windows(self) -> None:
         self.assertEqual(
             set(clean.CLEAN_PRESETS),
