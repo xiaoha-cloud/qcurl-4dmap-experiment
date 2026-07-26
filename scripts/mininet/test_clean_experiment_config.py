@@ -259,6 +259,17 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertIn('--dynamic-loss-profile "$DETERIORATION_PROFILE"', text)
         self.assertIn('ACTIVE_DYNAMIC_TIMEOUT="$TIMEOUT"', text)
 
+    def test_initial_preflight_defers_runtime_coefficients_until_after_reset(self) -> None:
+        text = (MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'preflight_worker_python "$(worker_process_log_file)" model_only', text
+        )
+        self.assertIn('local preflight_scope="${2:-runtime}"', text)
+        self.assertIn('preflight_worker_python "$process_log"', text)
+        self.assertIn("runtime_coefficients=deferred_until_post_reset", text)
+
     def test_historical_runners_remain_legacy_by_default(self) -> None:
         shared = (MININET_DIR / "run_qaccess_t_combined_deterioration_eval.sh").read_text(
             encoding="utf-8"

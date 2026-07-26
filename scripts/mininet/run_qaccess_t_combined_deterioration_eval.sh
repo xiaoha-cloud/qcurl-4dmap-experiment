@@ -362,13 +362,14 @@ worker_process_log_file() {
 
 preflight_worker_python() {
   local process_log="$1"
+  local preflight_scope="${2:-runtime}"
   echo "[combined_deterioration] worker python: $WORKER_PYTHON"
   if [[ ! -x "$WORKER_PYTHON" ]]; then
     echo "[error] WORKER_PYTHON is not executable: $WORKER_PYTHON" >&2
     return 1
   fi
   "$WORKER_PYTHON" --version 2>&1 | sed 's/^/[combined_deterioration] worker python version: /'
-  "$WORKER_PYTHON" - "$ROOT" "$WORKER_MODEL" "$WORKER_MODEL_METADATA" "$PHASE2_STATE_DIR" >"$process_log" 2>&1 <<'PY'
+  "$WORKER_PYTHON" - "$ROOT" "$WORKER_MODEL" "$WORKER_MODEL_METADATA" "$PHASE2_STATE_DIR" "$preflight_scope" >"$process_log" 2>&1 <<'PY'
 import sys
 from pathlib import Path
 
@@ -376,6 +377,7 @@ repo = Path(sys.argv[1])
 model_path = Path(sys.argv[2])
 metadata_path = Path(sys.argv[3])
 state_dir = Path(sys.argv[4])
+preflight_scope = sys.argv[5]
 if not model_path.is_absolute():
     model_path = repo / model_path
 if not metadata_path.is_absolute():
@@ -395,14 +397,19 @@ if not metadata_path.is_file():
     raise FileNotFoundError(f"missing model metadata {metadata_path}")
 print(f"[worker-preflight] model_metadata=ok path={metadata_path}", flush=True)
 
-if not state_dir.is_absolute():
-    raise ValueError(f"Phase 2 state dir must be absolute: {state_dir}")
-coeffs_path = state_dir / "qaccess_t_runtime_coefficients.json"
-if not coeffs_path.is_file():
-    raise FileNotFoundError(f"missing runtime coefficients {coeffs_path}")
-with coeffs_path.open("a", encoding="utf-8"):
-    pass
-print(f"[worker-preflight] coeffs_writable=ok path={coeffs_path}", flush=True)
+if preflight_scope == "runtime":
+    if not state_dir.is_absolute():
+        raise ValueError(f"Phase 2 state dir must be absolute: {state_dir}")
+    coeffs_path = state_dir / "qaccess_t_runtime_coefficients.json"
+    if not coeffs_path.is_file():
+        raise FileNotFoundError(f"missing runtime coefficients {coeffs_path}")
+    with coeffs_path.open("a", encoding="utf-8"):
+        pass
+    print(f"[worker-preflight] coeffs_writable=ok path={coeffs_path}", flush=True)
+elif preflight_scope == "model_only":
+    print("[worker-preflight] runtime_coefficients=deferred_until_post_reset", flush=True)
+else:
+    raise ValueError(f"unsupported preflight scope: {preflight_scope}")
 PY
   local rc=$?
   if [[ "$rc" -ne 0 ]]; then
@@ -570,7 +577,7 @@ echo "[combined_deterioration] gate_policy=$GATE_POLICY objective=$GATE_OBJECTIV
 echo "[combined_deterioration] validating worker model before starting Mininet"
 echo "[combined_deterioration] resolved worker model: $WORKER_MODEL"
 echo "[combined_deterioration] requested target mode: $WORKER_TARGET_MODE"
-preflight_worker_python "$(worker_process_log_file)"
+preflight_worker_python "$(worker_process_log_file)" model_only
 
 echo "[combined_deterioration] baseline leg (same deterioration profile, no qaccess, no worker)"
 QACCESS_PHASE2_STATE_DIR="$PHASE2_STATE_DIR" bash "$RESET"
