@@ -541,6 +541,8 @@ def _plot_timeseries(
     prefix: str,
     objective_kind: str | None = None,
     windows: tuple[WindowSpec, ...] | None = None,
+    quality_metric: str | None = None,
+    output_name: str | None = None,
 ) -> None:
     if throughput.empty and quality.empty:
         return
@@ -577,7 +579,16 @@ def _plot_timeseries(
 
     quality_column = ""
     quality_label = ""
-    if (objective_kind or prefix) == "throughput":
+    if quality_metric:
+        explicit_quality_labels = {
+            "owd_ms_mean": "Path B OWD proxy (SmoothedRTT()/2, ms)",
+            "rtt_latest_ms_mean": "Path B raw RTT (ms)",
+            "rtt_ms_mean": "Path B smoothed RTT (ms)",
+        }
+        if quality_metric in quality.columns and quality[quality_metric].notna().any():
+            quality_column = quality_metric
+            quality_label = explicit_quality_labels.get(quality_metric, quality_metric)
+    elif (objective_kind or prefix) == "throughput":
         for candidate, label in (
             ("path_b_throughput_mbps", "Path B throughput (Mbps)"),
             ("bw_mbps_mean", "Path B bandwidth estimate (Mbps)"),
@@ -628,7 +639,7 @@ def _plot_timeseries(
                 if window.role == "response":
                     axis.axvspan(window.start_s, window.end_s, color="tab:orange", alpha=0.10)
     fig.tight_layout()
-    fig.savefig(out / f"{prefix}_throughput_quality_over_time.png", dpi=180)
+    fig.savefig(out / (output_name or f"{prefix}_throughput_quality_over_time.png"), dpi=180)
     plt.close(fig)
 
 
@@ -885,6 +896,22 @@ def main() -> None:
         df_wire, df_quality, out, prefix, str(cfg["objective_kind"]),
         windows if clean_preset else None,
     )
+    owd_plot = out / f"{prefix}_throughput_owd_proxy_over_time.png"
+    if (
+        str(cfg["objective_kind"]) == "delay"
+        and "owd_ms_mean" in df_quality.columns
+        and df_quality["owd_ms_mean"].notna().any()
+    ):
+        _plot_timeseries(
+            df_wire,
+            df_quality,
+            out,
+            prefix,
+            str(cfg["objective_kind"]),
+            windows if clean_preset else None,
+            quality_metric="owd_ms_mean",
+            output_name=owd_plot.name,
+        )
 
     execution_mode = metadata.get("execution_mode", "unknown")
 
@@ -896,6 +923,8 @@ def main() -> None:
     print(f"Secondary TP:    {out / f'{prefix}_secondary_throughput_windows.csv'}")
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
     print(f"Time-series plot:{out / f'{prefix}_throughput_quality_over_time.png'}")
+    if owd_plot.is_file():
+        print(f"OWD-proxy plot:  {owd_plot}")
     print(f"\nWorker execution mode recorded by runner: {execution_mode}")
     print("Evaluation is read-only and does not start or stop the worker.")
     print(df_win.to_string(index=False, float_format="%.3f"))

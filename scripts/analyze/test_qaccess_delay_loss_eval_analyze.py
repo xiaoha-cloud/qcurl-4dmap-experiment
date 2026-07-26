@@ -124,6 +124,46 @@ class DelayLossEvaluationTest(unittest.TestCase):
 
         text.assert_not_called()
 
+    def test_delay_plot_can_explicitly_render_owd_proxy_without_replacing_rtt_plot(self):
+        throughput = pd.DataFrame([
+            {
+                "method": "baseline",
+                "time_s": 1,
+                "total_quic_wire_mbps": 10.0,
+                "path_a_quic_wire_mbps": 9.0,
+                "path_b_quic_wire_mbps": 1.0,
+            }
+        ])
+        quality = pd.DataFrame([
+            {
+                "method": "baseline",
+                "time_s": 1,
+                "owd_ms_mean": 80.0,
+                "rtt_latest_ms_mean": 175.0,
+            }
+        ])
+
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            evaluation._plot_timeseries(
+                throughput,
+                quality,
+                out,
+                "delay_clean",
+                "delay",
+            )
+            evaluation._plot_timeseries(
+                throughput,
+                quality,
+                out,
+                "delay_clean",
+                "delay",
+                quality_metric="owd_ms_mean",
+                output_name="delay_clean_throughput_owd_proxy_over_time.png",
+            )
+            self.assertTrue((out / "delay_clean_throughput_quality_over_time.png").is_file())
+            self.assertTrue((out / "delay_clean_throughput_owd_proxy_over_time.png").is_file())
+
     def test_monitor_parser_and_delay_series_preserve_raw_latest_rtt(self):
         line = (
             "2026/07/26 15:00:00 [m]monitor path=2 "
