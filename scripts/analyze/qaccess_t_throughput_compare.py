@@ -33,11 +33,7 @@ if str(_REPO) not in sys.path:
 if str(_REPO / "scripts" / "analyze") not in sys.path:
     sys.path.insert(0, str(_REPO / "scripts" / "analyze"))
 
-from qaccess_delay_loss_eval_analyze import (  # noqa: E402
-    _per_second_bandwidth,
-    _plot_timeseries,
-    load_runtime_samples,
-)
+from qaccess_delay_loss_eval_analyze import _plot_timeseries  # noqa: E402
 
 try:
     from fig7_throughput_compare import WINDOWS, _find_pull, mean_tp_in_window  # type: ignore
@@ -91,10 +87,11 @@ def render_clean_bandwidth_timeseries(
             })
             plotted.insert(0, "method", method)
             throughput_parts.append(plotted)
-        samples = clip_to_clean_run(load_runtime_samples(run_dir))
-        quality = _per_second_bandwidth(samples, method)
-        if not quality.empty:
-            quality_parts.append(quality)
+            path_b_zoom = frame[["time_s", "path_b_mbps"]].rename(
+                columns={"path_b_mbps": "path_b_throughput_mbps"},
+            )
+            path_b_zoom.insert(0, "method", method)
+            quality_parts.append(path_b_zoom)
 
     throughput = pd.concat(throughput_parts, ignore_index=True) if throughput_parts else pd.DataFrame()
     quality = pd.concat(quality_parts, ignore_index=True) if quality_parts else pd.DataFrame()

@@ -510,6 +510,24 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+_TOTAL_METHOD_COLORS = ("#0072B2", "#D55E00")
+_PER_PATH_COLORS = ("#009E73", "#CC79A7", "#E69F00", "#56B4E9")
+
+
+def _timeseries_color_maps(methods) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
+    """Return the fixed six-color mapping for a two-method evaluation plot."""
+    names = list(dict.fromkeys(str(method) for method in methods))
+    names.sort(key=lambda name: (name.strip().lower() != "baseline", name))
+    method_colors = {
+        method: color for method, color in zip(names, _TOTAL_METHOD_COLORS)
+    }
+    path_colors: dict[tuple[str, str], str] = {}
+    for index, method in enumerate(names[:2]):
+        path_colors[(method, "A")] = _PER_PATH_COLORS[index * 2]
+        path_colors[(method, "B")] = _PER_PATH_COLORS[index * 2 + 1]
+    return method_colors, path_colors
+
+
 def _plot_timeseries(
     throughput: pd.DataFrame,
     quality: pd.DataFrame,
@@ -521,9 +539,16 @@ def _plot_timeseries(
     if throughput.empty and quality.empty:
         return
 
+    method_colors, path_colors = _timeseries_color_maps(
+        list(throughput.get("method", pd.Series(dtype=str)))
+        + list(quality.get("method", pd.Series(dtype=str)))
+    )
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
     for method, group in throughput.groupby("method"):
-        axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], label=method, linewidth=1.5)
+        axes[0].plot(
+            group["time_s"], group["total_quic_wire_mbps"], label=method,
+            linewidth=1.5, color=method_colors.get(str(method)),
+        )
     axes[0].set_ylabel("Throughput (Mbps)")
     axes[0].set_title("Total throughput from all captured frames")
     axes[0].grid(alpha=0.25)
@@ -533,10 +558,12 @@ def _plot_timeseries(
         axes[1].plot(
             group["time_s"], group["path_a_quic_wire_mbps"],
             label=f"{method} Path A", linewidth=1.1,
+            color=path_colors.get((str(method), "A")),
         )
         axes[1].plot(
             group["time_s"], group["path_b_quic_wire_mbps"],
             label=f"{method} Path B", linewidth=1.1, linestyle="--",
+            color=path_colors.get((str(method), "B")),
         )
     axes[1].set_ylabel("Per-path (Mbps)")
     axes[1].grid(alpha=0.25)
@@ -546,6 +573,7 @@ def _plot_timeseries(
     quality_label = ""
     if (objective_kind or prefix) == "throughput":
         for candidate, label in (
+            ("path_b_throughput_mbps", "Path B throughput (Mbps)"),
             ("bw_mbps_mean", "Path B bandwidth estimate (Mbps)"),
         ):
             if candidate in quality.columns and quality[candidate].notna().any():
@@ -571,8 +599,13 @@ def _plot_timeseries(
 
     if quality_column and quality[quality_column].notna().any():
         for method, group in quality.groupby("method"):
-            axes[2].plot(group["time_s"], group[quality_column], label=method, linewidth=1.5)
+            axes[2].plot(
+                group["time_s"], group[quality_column], label=method,
+                linewidth=1.5, color=method_colors.get(str(method)),
+            )
         axes[2].set_ylabel(quality_label)
+        if quality_column == "path_b_throughput_mbps":
+            axes[2].set_title("Path B throughput (zoomed)")
         axes[2].legend()
     else:
         axes[2].text(0.5, 0.5, "No quality samples found", ha="center", va="center",

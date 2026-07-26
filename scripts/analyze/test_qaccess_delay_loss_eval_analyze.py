@@ -11,6 +11,22 @@ import qaccess_delay_loss_eval_analyze as evaluation
 
 
 class DelayLossEvaluationTest(unittest.TestCase):
+    def test_timeseries_plot_uses_six_distinct_line_colors(self):
+        method_colors, path_colors = evaluation._timeseries_color_maps(
+            ["qaccess_t", "baseline"],
+        )
+        self.assertEqual(set(method_colors), {"baseline", "qaccess_t"})
+        self.assertEqual(
+            set(path_colors),
+            {
+                ("baseline", "A"), ("baseline", "B"),
+                ("qaccess_t", "A"), ("qaccess_t", "B"),
+            },
+        )
+        all_colors = list(method_colors.values()) + list(path_colors.values())
+        self.assertEqual(len(all_colors), 6)
+        self.assertEqual(len(set(all_colors)), 6)
+
     def test_runtime_path_b_uses_endpoint_mapping(self):
         frame = pd.DataFrame([
             {"path_id": 1, "remote_endpoint": "10.0.1.1:5000"},
