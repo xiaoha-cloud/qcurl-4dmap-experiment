@@ -36,10 +36,66 @@ class DelayLossEvaluationTest(unittest.TestCase):
         selected = evaluation._path_b_rows(frame, path_col="path_id")
         self.assertEqual(selected["path_id"].tolist(), [3])
 
-    def test_pull_log_path_b_uses_path_two(self):
+    def test_current_pull_log_path_b_uses_path_three(self):
+        frame = pd.DataFrame([{"path": 1}, {"path": 3}])
+        selected = evaluation._path_b_rows(frame)
+        self.assertEqual(selected["path"].tolist(), [3])
+
+    def test_legacy_pull_log_path_b_falls_back_to_path_two(self):
         frame = pd.DataFrame([{"path": 1}, {"path": 2}])
         selected = evaluation._path_b_rows(frame)
         self.assertEqual(selected["path"].tolist(), [2])
+
+    def test_metric_source_uses_pull_and_never_combined_process_log(self):
+        with TemporaryDirectory() as td:
+            run = Path(td)
+            logs = run / "logs"
+            logs.mkdir()
+            pull = logs / "pull_test.log"
+            server = logs / "server_test.log"
+            combined = logs / "combined_test.log"
+            for path in (pull, server, combined):
+                path.write_text("test\n", encoding="utf-8")
+            self.assertEqual(evaluation._metric_log_candidates(run), [pull])
+
+    def test_monitor_time_is_aligned_to_tc_profile_start(self):
+        monitor_line = (
+            "2026/07/26 15:00:04 [m]monitor path=3 "
+            "rtt_smoothed=160ms rtt_min=80ms rtt_latest=175ms "
+            "rtt_mean_dev=12ms owd=80ms bw=1B/s inflight=0B "
+            "cwnd_full=1B cwnd_room=1B loss=0 lost_B=0 serverinx=0\n"
+        )
+        tc_line = (
+            "[2026-07-26T15:00:00+00:00] [tc_delay] "
+            "step 1/3 at=0s delay=40ms dev=h2-eth1\n"
+        )
+        with TemporaryDirectory() as td:
+            run = Path(td)
+            logs = run / "logs"
+            logs.mkdir()
+            (logs / "pull_test.log").write_text(monitor_line, encoding="utf-8")
+            (logs / "tc_delay_test.log").write_text(tc_line, encoding="utf-8")
+            _, monitor = evaluation.load_pull_frames(run)
+        self.assertEqual(monitor["t"].tolist(), [4])
+
+    def test_fixed_trailing_median_does_not_forward_fill_sparse_seconds(self):
+        raw = pd.DataFrame([
+            {"t": 0.0, "rtt_latest_ms": 10.0},
+            {"t": 2.0, "rtt_latest_ms": 30.0},
+            {"t": 4.0, "rtt_latest_ms": 50.0},
+        ])
+        result = evaluation._rtt_per_second(raw).set_index("time_s")
+        self.assertTrue(pd.isna(result.loc[1, "rtt_1s_median_ms"]))
+        self.assertTrue(pd.isna(result.loc[1, "rtt_3s_trailing_median_ms"]))
+        self.assertEqual(result.loc[2, "rtt_3s_trailing_median_ms"], 20.0)
+        self.assertEqual(result.loc[4, "rtt_3s_trailing_median_ms"], 40.0)
+
+    def test_rtt_audit_windows_cover_required_transitions(self):
+        self.assertEqual(
+            [name for name, _, _ in evaluation.RTT_AUDIT_WINDOWS],
+            ["0-50", "30-50", "50-60", "60-100", "80-100",
+             "100-110", "110-200", "130-160"],
+        )
 
     def test_improvement_sign_depends_on_metric_direction(self):
         frame = pd.DataFrame([

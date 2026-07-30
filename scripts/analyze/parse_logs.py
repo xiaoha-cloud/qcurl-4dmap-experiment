@@ -165,6 +165,7 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                 try:
                     row = {
                         "t": ts - t0,
+                        "wall_time_s": ts,
                         "path": int(mu["path"]),
                         "mode": mu["mode"],
                         "G": float(mu["G"]),
@@ -192,6 +193,7 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                 try:
                     row = {
                         "t": ts - t0,
+                        "wall_time_s": ts,
                         "path": int(mm["path"]),
                         "rtt_smoothed_ms": _parse_go_duration(mm["rtt_smoothed"]),
                         "rtt_min_ms": _parse_go_duration(mm["rtt_min"]),
