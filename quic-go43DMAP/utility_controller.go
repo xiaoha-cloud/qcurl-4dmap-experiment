@@ -45,6 +45,9 @@ type PathMetrics struct {
 	PathID            protocol.PathID
 	BWbps             float64
 	OWDms             float64
+	RTTLatestMs       float64
+	RTTSmoothedMs     float64
+	RTTMinMs          float64
 	DelayGradientMs   float64
 	LossRate          float64
 	LostBytesDelta    int64

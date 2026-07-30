@@ -75,12 +75,12 @@ FEATURES = [
     "backoff",
 ]
 
-TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s", "delta_owd_1s", "delta_loss_1s", "loss_risk_1s")
-MINIMIZE_TARGETS = {"delta_owd_1s", "delta_loss_1s", "loss_risk_1s"}
-ACTIVE_TARGET_MODES = {"delta_bw_1s", "delta_owd_1s", "delta_loss_1s", "loss_risk_1s"}
+TARGET_MODES = ("next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s", "delta_owd_1s", "candidate_post_rtt_median_ms", "delta_loss_1s", "loss_risk_1s")
+MINIMIZE_TARGETS = {"delta_owd_1s", "candidate_post_rtt_median_ms", "delta_loss_1s", "loss_risk_1s"}
+ACTIVE_TARGET_MODES = {"delta_bw_1s", "delta_owd_1s", "candidate_post_rtt_median_ms", "delta_loss_1s", "loss_risk_1s"}
 VARIANT_TARGETS = {
     "qaccess_t": {"next_bw_bps", "delta_bw_1s", "relative_delta_bw_1s"},
-    "qaccess_d": {"delta_owd_1s"},
+    "qaccess_d": {"delta_owd_1s", "candidate_post_rtt_median_ms"},
     "qaccess_l": {"delta_loss_1s", "loss_risk_1s"},
 }
 
@@ -191,6 +191,9 @@ def _load_model_provenance(model_path: Path, metadata_path: Path, model) -> dict
         "model_training_rows": training_rows,
         "model_features": feature_names,
         "model_metadata": str(metadata_path.resolve()),
+        "evaluation_readiness": str(metadata.get("evaluation_readiness") or ""),
+        "per_path_active_ready": metadata.get("per_path_active_ready") is True,
+        "aggregate_active_ready": metadata.get("aggregate_active_ready") is True,
     }
 
 
@@ -222,6 +225,20 @@ def validate_model_configuration(model_path: Path, metadata_path: Path, requeste
     }
 
 
+def validate_intervention_active_readiness(provenance: dict[str, Any], aggregate: bool) -> None:
+    """Require explicit reviewed readiness flags before the intervention target can mutate state."""
+    if not provenance.get("per_path_active_ready"):
+        raise ValueError(
+            "candidate_post_rtt_median_ms active execution requires "
+            "metadata per_path_active_ready=true after independent review"
+        )
+    if aggregate and not provenance.get("aggregate_active_ready"):
+        raise ValueError(
+            "candidate_post_rtt_median_ms aggregate active execution requires "
+            "an aggregate label and metadata aggregate_active_ready=true"
+        )
+
+
 def _optimization_score(target_mode: str, prediction: float) -> float:
     return -float(prediction) if target_mode in MINIMIZE_TARGETS else float(prediction)
 
@@ -236,13 +253,14 @@ def _score_unit(target_mode: str) -> str:
         "delta_bw_1s": "bps",
         "relative_delta_bw_1s": "ratio",
         "delta_owd_1s": "ms",
+        "candidate_post_rtt_median_ms": "ms",
         "delta_loss_1s": "loss_rate",
         "loss_risk_1s": "bytes",
     }[target_mode]
 
 
 def _objective_name(target_mode: str) -> str:
-    if target_mode == "delta_owd_1s":
+    if target_mode in {"delta_owd_1s", "candidate_post_rtt_median_ms"}:
         return "delay_aware"
     if target_mode in {"delta_loss_1s", "loss_risk_1s"}:
         return "loss_aware"
@@ -956,6 +974,7 @@ def _active_phase_allowed(target_mode: str, request_classification: str) -> bool
 def _normalize_objective_field_names(payload: Any, target_mode: str) -> Any:
     suffix = {
         "delta_owd_1s": "ms",
+        "candidate_post_rtt_median_ms": "ms",
         "delta_loss_1s": "loss_rate",
         "loss_risk_1s": "bytes",
     }.get(target_mode)
@@ -2163,6 +2182,11 @@ def main() -> None:
     if args.validate_model_only:
         print(json.dumps(provenance, sort_keys=True))
         return
+    if not shadow and args.target_mode == "candidate_post_rtt_median_ms":
+        try:
+            validate_intervention_active_readiness(provenance, args.aggregate_multipath)
+        except ValueError as exc:
+            ap.error(str(exc))
     if not shadow and not args.aggregate_multipath:
         ap.error("active execution requires --aggregate-multipath")
     _assert_runtime_coeffs_path(args.coeffs_out.resolve())

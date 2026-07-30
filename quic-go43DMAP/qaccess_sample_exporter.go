@@ -16,7 +16,7 @@ var qaccessSampleCSVHeader = []string{
 	"timestamp_ms", "run_id", "path_id",
 	"endpoint_role", "producer_pid", "connection_id", "rtmp_session_id", "stream_key",
 	"local_endpoint", "remote_endpoint", "phase2_state_dir", "sender_bytes_total",
-	"bw_bps", "owd_ms", "delay_gradient_ms", "loss_rate",
+	"bw_bps", "owd_ms", "rtt_latest_ms", "rtt_smoothed_ms", "rtt_min_ms", "delay_gradient_ms", "loss_rate",
 	"lost_bytes_delta", "retrans_bytes_delta",
 	"cwnd_bytes", "inflight_bytes", "cwnd_room",
 	"alpha", "beta", "gamma", "utility", "gain", "backoff",
@@ -444,6 +444,9 @@ func buildTrainRow(runID string, pm PathMetrics, sig ControlSignal, alpha, beta,
 	row["path_id"] = strconv.FormatUint(uint64(pm.PathID), 10)
 	row["bw_bps"] = fmt.Sprintf("%.0f", pm.BWbps)
 	row["owd_ms"] = fmt.Sprintf("%.4f", pm.OWDms)
+	row["rtt_latest_ms"] = fmt.Sprintf("%.4f", pm.RTTLatestMs)
+	row["rtt_smoothed_ms"] = fmt.Sprintf("%.4f", pm.RTTSmoothedMs)
+	row["rtt_min_ms"] = fmt.Sprintf("%.4f", pm.RTTMinMs)
 	row["delay_gradient_ms"] = fmt.Sprintf("%.4f", pm.DelayGradientMs)
 	row["loss_rate"] = fmt.Sprintf("%.6f", pm.LossRate)
 	row["lost_bytes_delta"] = strconv.FormatInt(pm.LostBytesDelta, 10)

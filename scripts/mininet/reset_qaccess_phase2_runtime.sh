@@ -84,6 +84,7 @@ metric_by_target = {
     "delta_bw_1s": "predicted_delta_bw_bps",
     "relative_delta_bw_1s": "predicted_relative_delta_bw_1s",
     "delta_owd_1s": "predicted_delta_owd_ms",
+    "candidate_post_rtt_median_ms": "predicted_candidate_post_rtt_median_ms",
     "delta_loss_1s": "predicted_delta_loss_rate",
     "loss_risk_1s": "predicted_loss_risk_bytes",
 }
@@ -91,6 +92,7 @@ unit_by_target = {
     "delta_bw_1s": "bps",
     "relative_delta_bw_1s": "ratio",
     "delta_owd_1s": "ms",
+    "candidate_post_rtt_median_ms": "ms",
     "delta_loss_1s": "loss_rate",
     "loss_risk_1s": "bytes",
 }

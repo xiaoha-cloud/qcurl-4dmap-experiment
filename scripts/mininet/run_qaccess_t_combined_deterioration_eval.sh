@@ -144,7 +144,7 @@ if [[ "$GATE_POLICY" == "objective_aware" && "$TRIGGER_MODE" == "legacy_buffer_f
   exit 2
 fi
 case "$CONTROLLER_VARIANT:$WORKER_TARGET_MODE" in
-  qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_l:delta_loss_1s|qaccess_l:loss_risk_1s) ;;
+  qaccess_t:delta_bw_1s|qaccess_d:delta_owd_1s|qaccess_d:candidate_post_rtt_median_ms|qaccess_l:delta_loss_1s|qaccess_l:loss_risk_1s) ;;
   *)
   echo "[error] incompatible controller/target: $CONTROLLER_VARIANT / $WORKER_TARGET_MODE" >&2
   exit 2
