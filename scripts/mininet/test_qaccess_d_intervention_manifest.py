@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from generate_qaccess_d_intervention_manifest import GRID, build_rows
 
@@ -19,6 +20,11 @@ class InterventionManifestTests(unittest.TestCase):
         ]
         self.assertNotEqual([row["candidate_id"] for row in first], ordered)
         self.assertEqual({row["intervention_s"] for row in first}, {65, 70, 75})
+
+    def test_collector_routes_clean_profile_to_delay_parser(self):
+        runner = (Path(__file__).resolve().parent / "run_qaccess_d_clean_intervention_collect.sh").read_text()
+        self.assertIn('--dynamic-delay-profile "$PROFILE"', runner)
+        self.assertNotIn('--dynamic-deterioration-profile "$PROFILE"', runner)
 
 
 if __name__ == "__main__":

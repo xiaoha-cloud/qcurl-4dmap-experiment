@@ -85,7 +85,7 @@ run_row() {
     TC_DELAY_FIXED_LOSS_PERCENT=0 KEEP_PCAP="${KEEP_PCAP:-0}" SAVE_OUTPUT_FLV=0 \
     python3 "$ROOT/scripts/mininet/mp_topo.py" --run-exp --scenario clean_equal_paths --utility-mode qaccess_d \
       --timeout "$TIMEOUT" --log-parent "$SESSION_DIR" --run-label "$label" \
-      --dynamic-deterioration-profile "$PROFILE" --input-flv "$INPUT_FLV" --log-control
+      --dynamic-delay-profile "$PROFILE" --input-flv "$INPUT_FLV" --log-control
   local run_status=$?; wait "$helper"; local helper_status=$?; set -e
   [[ -s "$STATE_DIR/qaccess_runtime_samples.csv" ]] && cp "$STATE_DIR/qaccess_runtime_samples.csv" "$leg/qaccess_runtime_samples.csv"
   ((run_status == 0 && helper_status == 0)) || { echo "[error] row $order failed: run=$run_status helper=$helper_status" >&2; return 1; }
