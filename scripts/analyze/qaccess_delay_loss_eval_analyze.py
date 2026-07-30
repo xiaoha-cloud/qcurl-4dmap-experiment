@@ -566,6 +566,17 @@ _TOTAL_METHOD_COLORS = ("#0072B2", "#D55E00")
 _PER_PATH_COLORS = ("#009E73", "#CC79A7", "#E69F00", "#56B4E9")
 
 
+def _plot_method_label(method: str, objective_kind: str | None) -> str:
+    """Use publication labels without changing method identifiers in CSV output."""
+    if method.strip().lower() == "baseline":
+        return "Baseline"
+    return {
+        "throughput": "Q-Access-T",
+        "delay": "Q-Access-D",
+        "loss": "Q-Access-L",
+    }.get(str(objective_kind), method)
+
+
 def _timeseries_color_maps(methods) -> tuple[dict[str, str], dict[tuple[str, str], str]]:
     """Return the fixed six-color mapping for a two-method evaluation plot."""
     names = list(dict.fromkeys(str(method) for method in methods))
@@ -589,6 +600,7 @@ def _plot_timeseries(
     windows: tuple[WindowSpec, ...] | None = None,
     quality_metric: str | None = None,
     output_name: str | None = None,
+    steady_rtt_medians: dict[str, list[tuple[float, float, float]]] | None = None,
 ) -> None:
     if throughput.empty and quality.empty:
         return
@@ -600,7 +612,8 @@ def _plot_timeseries(
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
     for method, group in throughput.groupby("method"):
         axes[0].plot(
-            group["time_s"], group["total_quic_wire_mbps"], label=method,
+            group["time_s"], group["total_quic_wire_mbps"],
+            label=_plot_method_label(str(method), objective_kind),
             linewidth=1.5, color=method_colors.get(str(method)),
         )
     axes[0].set_ylabel("Throughput (Mbps)")
@@ -611,12 +624,13 @@ def _plot_timeseries(
     for method, group in throughput.groupby("method"):
         axes[1].plot(
             group["time_s"], group["path_a_quic_wire_mbps"],
-            label=f"{method} Path A", linewidth=1.1,
+            label=f"{_plot_method_label(str(method), objective_kind)} Path A", linewidth=1.1,
             color=path_colors.get((str(method), "A")),
         )
         axes[1].plot(
             group["time_s"], group["path_b_quic_wire_mbps"],
-            label=f"{method} Path B", linewidth=1.1, linestyle="--",
+            label=f"{_plot_method_label(str(method), objective_kind)} Path B",
+            linewidth=1.1, linestyle="--",
             color=path_colors.get((str(method), "B")),
         )
     axes[1].set_ylabel("Per-path (Mbps)")
@@ -666,10 +680,29 @@ def _plot_timeseries(
     if quality_column and quality[quality_column].notna().any():
         for method, group in quality.groupby("method"):
             axes[2].plot(
-                group["time_s"], group[quality_column], label=method,
+                group["time_s"], group[quality_column],
+                label=_plot_method_label(str(method), objective_kind),
                 linewidth=1.5, color=method_colors.get(str(method)),
             )
-        axes[2].set_ylabel(quality_label)
+        if (objective_kind or prefix) == "delay" and quality_column == "rtt_latest_ms_median":
+            axes[2].set_title("Path B QUIC RTT")
+            axes[2].set_ylabel("Path B QUIC per-path RTT (ms)")
+            for method, group in quality.groupby("method"):
+                color = method_colors.get(str(method))
+                segments = (steady_rtt_medians or {}).get(str(method), [])
+                for lo, hi, median in segments:
+                    midpoint = (lo + hi) / 2.0
+                    axes[2].scatter(
+                        [midpoint], [median], color=color, s=24, marker="o",
+                        edgecolors="white", linewidths=0.6, zorder=4,
+                    )
+                    axes[2].annotate(
+                        f"{median:.2f} ms", xy=(midpoint, median),
+                        xytext=(0, 5), textcoords="offset points", ha="center",
+                        fontsize=7, color=color,
+                    )
+        else:
+            axes[2].set_ylabel(quality_label)
         if quality_column == "path_b_throughput_mbps":
             axes[2].set_title("Path B throughput (zoomed)")
         axes[2].legend()
@@ -990,6 +1023,17 @@ def analyze_run(
     recovery: dict[str, float] = {}
     ref_lo, ref_hi = reference_window
     if objective_kind == "delay":
+        if clean and not mon.empty and "rtt_latest_ms" in mon.columns:
+            path_b_monitor = _path_b_rows(mon)
+            for key, lo, hi in (
+                ("30_50", 30.0, 50.0),
+                ("80_100", 80.0, 100.0),
+                ("130_160", 130.0, 160.0),
+            ):
+                stable = _window_mask(path_b_monitor, lo, hi)
+                recovery[f"steady_rtt_median_ms_{key}"] = (
+                    float(stable["rtt_latest_ms"].median()) if not stable.empty else float("nan")
+                )
         if not util.empty and "owd_ms" in util.columns and util["owd_ms"].notna().any():
             ref_series = util.rename(columns={"t": "time_s"})
         elif not mon.empty and "owd_ms" in mon.columns and mon["owd_ms"].notna().any():
@@ -1148,9 +1192,24 @@ def main() -> None:
     dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
+    steady_rtt_medians: dict[str, list[tuple[float, float, float]]] = {}
+    if str(cfg["objective_kind"]) == "delay" and clean_preset:
+        for row in recovery_rows:
+            method = str(row["method"])
+            segments = []
+            for key, lo, hi in (
+                ("30_50", 30.0, 50.0),
+                ("80_100", 80.0, 100.0),
+                ("130_160", 130.0, 160.0),
+            ):
+                value = float(row.get(f"steady_rtt_median_ms_{key}", float("nan")))
+                if math.isfinite(value):
+                    segments.append((lo, hi, value))
+            steady_rtt_medians[method] = segments
     _plot_timeseries(
         df_wire, df_quality, out, prefix, str(cfg["objective_kind"]),
         windows if clean_preset else None,
+        steady_rtt_medians=steady_rtt_medians,
     )
     owd_plot = out / f"{prefix}_throughput_owd_proxy_over_time.png"
     if (

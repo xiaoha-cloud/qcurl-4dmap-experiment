@@ -12,6 +12,13 @@ from parse_logs import load_pull_log
 
 
 class DelayLossEvaluationTest(unittest.TestCase):
+    def test_publication_method_labels(self):
+        self.assertEqual(evaluation._plot_method_label("baseline", "delay"), "Baseline")
+        self.assertEqual(
+            evaluation._plot_method_label("clean_delay_qaccess_d", "delay"),
+            "Q-Access-D",
+        )
+
     def test_timeseries_plot_uses_six_distinct_line_colors(self):
         method_colors, path_colors = evaluation._timeseries_color_maps(
             ["qaccess_t", "baseline"],
