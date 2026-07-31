@@ -7,6 +7,7 @@ PROFILE="$ROOT/scripts/mininet/delay_profile.clean_40_80_40_200s.env"
 STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived/qaccess_d_intervention_collect_runtime}"
 INPUT_FLV="${INPUT_FLV:-/home/mininet/Videos/push_input.flv}"
 TIMEOUT="${TIMEOUT:-220}"
+SAMPLE_INTERVAL_MS="${QACCESS_RUNTIME_SAMPLE_INTERVAL_MS:-100}"
 LIMIT=0; START_INDEX=1; RESUME=0; CHECK_ONLY=0; CONFIRM_FULL=0; SESSION_DIR=""
 
 while (($#)); do
@@ -22,10 +23,11 @@ while (($#)); do
   esac
   shift
 done
-for value in "$TIMEOUT" "$LIMIT" "$START_INDEX"; do
+for value in "$TIMEOUT" "$LIMIT" "$START_INDEX" "$SAMPLE_INTERVAL_MS"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "[error] numeric arguments must be integers" >&2; exit 2; }
 done
 ((TIMEOUT >= 110 && START_INDEX >= 1)) || { echo "[error] TIMEOUT>=110 and start-index>=1 required" >&2; exit 2; }
+((SAMPLE_INTERVAL_MS >= 50)) || { echo "[error] intervention sampling interval must be at least 50 ms" >&2; exit 2; }
 [[ "$STATE_DIR" = /* ]] || { echo "[error] state directory must be absolute" >&2; exit 2; }
 for file in "$MANIFEST" "$PROFILE" "$ROOT/scripts/mininet/mp_topo.py" "$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh" "$ROOT/scripts/mininet/apply_qaccess_coefficients_at.py" "$ROOT/scripts/analyze/validate_qaccess_d_intervention_run.py"; do
   [[ -s "$file" ]] || { echo "[error] missing: $file" >&2; exit 1; }
@@ -44,6 +46,7 @@ echo "[check] repository_root=$ROOT"
 echo "[check] manifest=$MANIFEST rows=$manifest_rows profile=$PROFILE"
 echo "[check] production_data_source=VM_MININET_SENDER_RUNTIME_SAMPLES"
 echo "[check] target=candidate_post_rtt_median_ms"
+echo "[check] runtime_sample_interval_ms=$SAMPLE_INTERVAL_MS"
 if ((CHECK_ONLY)); then echo "[check] valid; no experiment or production data created"; exit 0; fi
 [[ "$(uname -s)" == Linux ]] || { echo "[error] real collection is VM/Linux only" >&2; exit 1; }
 ((EUID == 0)) || { echo "[error] run with sudo (Mininet needs root)" >&2; exit 1; }
@@ -82,6 +85,7 @@ run_row() {
   env QACCESS_PHASE2_STATE_DIR="$STATE_DIR" QACCESS_COEFFS_JSON="$runtime" QACCESS_COEFF_RELOAD=1 \
     QACCESS_COEFF_RELOAD_INTERVAL_MS=250 QACCESS_COEFF_SMOOTHING=1 QACCESS_TRIGGER_UPDATE=0 QACCESS_RUNTIME_SAMPLE_EXPORT=1 \
     QACCESS_RUNTIME_BUFFER_SIZE=0 \
+    QACCESS_RUNTIME_SAMPLE_INTERVAL_MS="$SAMPLE_INTERVAL_MS" \
     QACCESS_RUNTIME_SAMPLES_CSV="$STATE_DIR/qaccess_runtime_samples.csv" TC_DELAY_FIXED_BW_MBIT=20 \
     TC_DELAY_FIXED_LOSS_PERCENT=0 KEEP_PCAP="${KEEP_PCAP:-0}" SAVE_OUTPUT_FLV=0 \
     python3 "$ROOT/scripts/mininet/mp_topo.py" --run-exp --scenario clean_equal_paths --utility-mode qaccess_d \

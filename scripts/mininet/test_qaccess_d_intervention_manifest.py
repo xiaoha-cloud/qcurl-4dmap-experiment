@@ -26,6 +26,7 @@ class InterventionManifestTests(unittest.TestCase):
         self.assertIn('--dynamic-delay-profile "$PROFILE"', runner)
         self.assertNotIn('--dynamic-deterioration-profile "$PROFILE"', runner)
         self.assertIn("QACCESS_RUNTIME_BUFFER_SIZE=0", runner)
+        self.assertIn('QACCESS_RUNTIME_SAMPLE_INTERVAL_MS="$SAMPLE_INTERVAL_MS"', runner)
 
 
 if __name__ == "__main__":

@@ -49,10 +49,11 @@ type qaccessPhase2Config struct {
 	coeffSmoothing      float64
 	coeffJSONPath       string
 
-	runtimeExport     bool
-	runtimeSamples    string
-	runtimeBufferMax  int64
-	minSamplesPerPath int64
+	runtimeExport         bool
+	runtimeSamples        string
+	runtimeBufferMax      int64
+	runtimeSampleInterval time.Duration
+	minSamplesPerPath     int64
 
 	triggerUpdate           bool
 	triggerMode             string
@@ -92,10 +93,11 @@ func loadQAccessPhase2Config() qaccessPhase2Config {
 		coeffSmoothing:      envFloat("QACCESS_COEFF_SMOOTHING", defaultCoeffSmoothing),
 		coeffJSONPath:       resolveCoeffsJSONPath(),
 
-		runtimeExport:     envBool("QACCESS_RUNTIME_SAMPLE_EXPORT", false),
-		runtimeSamples:    resolveRuntimeSamplesCSVPath(),
-		runtimeBufferMax:  int64(envInt("QACCESS_RUNTIME_BUFFER_SIZE", defaultRuntimeBufferSize)),
-		minSamplesPerPath: int64(envInt("QACCESS_MIN_SAMPLES_PER_PATH", defaultMinSamplesPerPath)),
+		runtimeExport:         envBool("QACCESS_RUNTIME_SAMPLE_EXPORT", false),
+		runtimeSamples:        resolveRuntimeSamplesCSVPath(),
+		runtimeBufferMax:      int64(envInt("QACCESS_RUNTIME_BUFFER_SIZE", defaultRuntimeBufferSize)),
+		runtimeSampleInterval: time.Duration(envInt("QACCESS_RUNTIME_SAMPLE_INTERVAL_MS", 0)) * time.Millisecond,
+		minSamplesPerPath:     int64(envInt("QACCESS_MIN_SAMPLES_PER_PATH", defaultMinSamplesPerPath)),
 
 		triggerUpdate:           envBool("QACCESS_TRIGGER_UPDATE", false),
 		triggerMode:             strings.TrimSpace(envString("QACCESS_TRIGGER_MODE", defaultTriggerMode)),

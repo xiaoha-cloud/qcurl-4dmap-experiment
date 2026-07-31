@@ -134,7 +134,8 @@ type UtilityController struct {
 	trainCollector *qaccessTrainCollector
 
 	// qaccess_t runtime sample export (separate CSV from collect).
-	runtimeExporter *qaccessSampleExporter
+	runtimeExporter   *qaccessSampleExporter
+	lastRuntimeSample map[protocol.PathID]time.Time
 
 	controlLawMode  ControlLawMode
 	prevAppliedGain map[protocol.PathID]float64
@@ -168,6 +169,7 @@ func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Co
 		controlLawMode:         resolveControlLawMode(),
 		prevAppliedGain:        make(map[protocol.PathID]float64),
 		objectiveTriggerStates: make(map[protocol.PathID]*objectiveTriggerState),
+		lastRuntimeSample:      make(map[protocol.PathID]time.Time),
 	}
 	switch mode {
 	case ModeQAccessT, ModeQAccessD, ModeQAccessL:
@@ -203,6 +205,19 @@ func newUtilityController(mode UtilityMode, runID string, phase2 qaccessPhase2Co
 }
 
 func (uc *UtilityController) SetMode(mode UtilityMode) { uc.Mode = mode }
+
+func (uc *UtilityController) shouldExportRuntimeSample(pathID protocol.PathID, now time.Time) bool {
+	interval := uc.phase2.runtimeSampleInterval
+	if interval <= 0 {
+		return true
+	}
+	last := uc.lastRuntimeSample[pathID]
+	if !last.IsZero() && now.Sub(last) < interval {
+		return false
+	}
+	uc.lastRuntimeSample[pathID] = now
+	return true
+}
 
 func (uc *UtilityController) Coefficients() QAccessCoefficients { return uc.getCoefficients() }
 
@@ -402,7 +417,7 @@ func (uc *UtilityController) Compute(pm PathMetrics) ControlSignal {
 		}
 	}
 
-	if uc.phase2MutationAllowed() && active && uc.runtimeExporter != nil {
+	if uc.phase2MutationAllowed() && active && uc.runtimeExporter != nil && uc.shouldExportRuntimeSample(pm.PathID, now) {
 		pm.Timestamp = now
 		pm.Alpha, pm.Beta, pm.Gamma = alpha, beta, gamma
 		row := buildTrainRow(uc.RunID, pm, sig, alpha, beta, gamma, diag)

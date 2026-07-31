@@ -27,3 +27,28 @@ func TestBuildTrainRowIncludesSenderRTTMetrics(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeSampleIntervalIsOptInAndPerPath(t *testing.T) {
+	uc := &UtilityController{
+		phase2:            qaccessPhase2Config{runtimeSampleInterval: 100 * time.Millisecond},
+		lastRuntimeSample: make(map[protocol.PathID]time.Time),
+	}
+	start := time.Unix(100, 0)
+	if !uc.shouldExportRuntimeSample(1, start) {
+		t.Fatal("first Path 1 sample should be exported")
+	}
+	if uc.shouldExportRuntimeSample(1, start.Add(99*time.Millisecond)) {
+		t.Fatal("Path 1 sample inside interval should be suppressed")
+	}
+	if !uc.shouldExportRuntimeSample(3, start.Add(50*time.Millisecond)) {
+		t.Fatal("sampling interval state must be independent per path")
+	}
+	if !uc.shouldExportRuntimeSample(1, start.Add(100*time.Millisecond)) {
+		t.Fatal("Path 1 sample at interval boundary should be exported")
+	}
+
+	legacy := &UtilityController{lastRuntimeSample: make(map[protocol.PathID]time.Time)}
+	if !legacy.shouldExportRuntimeSample(1, start) || !legacy.shouldExportRuntimeSample(1, start) {
+		t.Fatal("default zero interval must preserve legacy unthrottled export")
+	}
+}
