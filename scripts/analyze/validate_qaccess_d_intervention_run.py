@@ -25,6 +25,8 @@ def validate(samples: Path, intervention: Path, output: Path, tolerance: float =
     qdisc_profile_valid = all(step in tc_text for step in expected_steps) and tc_text.count("verification_ok:") >= 3
     pre = post = matching = 0
     first_matching_ms = None
+    first_sample_ms = None
+    last_sample_ms = None
     with samples.open(newline="", encoding="utf-8") as handle:
         reader = csv.DictReader(handle)
         required = {"timestamp_ms", "path_id", "alpha", "beta", "gamma", "rtt_latest_ms"}
@@ -38,6 +40,8 @@ def validate(samples: Path, intervention: Path, output: Path, tolerance: float =
             rtt = float(row["rtt_latest_ms"])
             if not math.isfinite(rtt) or rtt <= 0:
                 continue
+            first_sample_ms = ts if first_sample_ms is None else min(first_sample_ms, ts)
+            last_sample_ms = ts if last_sample_ms is None else max(last_sample_ms, ts)
             coeffs = tuple(float(row[key]) for key in ("alpha", "beta", "gamma"))
             if ts < applied_ms:
                 pre += 1
@@ -46,19 +50,33 @@ def validate(samples: Path, intervention: Path, output: Path, tolerance: float =
                 if all(abs(left - right) <= tolerance for left, right in zip(coeffs, target)):
                     matching += 1
                     first_matching_ms = ts if first_matching_ms is None else min(first_matching_ms, ts)
+    failure_reasons = []
+    if not qdisc_profile_valid:
+        failure_reasons.append("qdisc_profile_invalid")
+    if pre < 3:
+        failure_reasons.append("insufficient_pre_intervention_samples")
+    if post < 3:
+        failure_reasons.append("runtime_samples_ended_before_post_intervention_window")
+    if matching < 3:
+        failure_reasons.append("candidate_coefficients_not_observed_post_intervention")
     result = {
-        "valid": qdisc_profile_valid and pre >= 3 and post >= 3 and matching >= 3,
+        "valid": not failure_reasons,
         "path_id": path_id,
         "candidate_id": meta["candidate_id"],
         "target_coefficients": dict(zip(("alpha", "beta", "gamma"), target)),
         "pre_intervention_valid_rtt_samples": pre,
         "post_intervention_valid_rtt_samples": post,
         "matching_post_intervention_samples": matching,
+        "first_valid_rtt_timestamp_ms": first_sample_ms,
+        "last_valid_rtt_timestamp_ms": last_sample_ms,
+        "runtime_sample_span_ms": None if first_sample_ms is None or last_sample_ms is None else last_sample_ms - first_sample_ms,
+        "runtime_samples_cover_intervention": last_sample_ms is not None and last_sample_ms >= applied_ms,
         "first_matching_timestamp_ms": first_matching_ms,
         "reload_ack_delay_ms": None if first_matching_ms is None else first_matching_ms - applied_ms,
         "qdisc_profile_valid": qdisc_profile_valid,
         "tc_log": str(tc_log),
         "validation_source": "sender_runtime_samples",
+        "failure_reasons": failure_reasons,
     }
     output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result
