@@ -84,7 +84,11 @@ class WorkflowTests(unittest.TestCase):
             root = Path(tmp)
             coeffs = root / "coeffs.json"
             runner.write_coefficients(coeffs, (0.6, 0.3, 0.1), "smoke")
-            self.assertEqual(json.loads(coeffs.read_text())["source"], "qserver_sender_sweep:smoke")
+            document = json.loads(coeffs.read_text())
+            self.assertEqual(document["version"], 1)
+            self.assertEqual(document["default"], {"alpha": 0.6, "beta": 0.3, "gamma": 0.1})
+            self.assertEqual(document["paths"], {})
+            self.assertEqual(document["source"], "qserver_sender_sweep:smoke")
             timeline = root / "owner.jsonl"
             timeline.write_text(json.dumps({"phase2_owner": True, "controller_created": True,
                                             "endpoint_role": "server_downlink_sender", "pid": 42}) + "\n")

@@ -48,7 +48,9 @@ def write_coefficients(path: Path, values: tuple[float, float, float], name: str
     alpha, beta, gamma = values
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({
-        "alpha": alpha, "beta": beta, "gamma": gamma,
+        "version": 1,
+        "default": {"alpha": alpha, "beta": beta, "gamma": gamma},
+        "paths": {},
         "source": f"qserver_sender_sweep:{name}",
         "metric": "fixed_collection_coefficients",
     }, indent=2) + "\n", encoding="utf-8")
