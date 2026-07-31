@@ -9,6 +9,7 @@ import gzip
 import itertools
 import json
 import os
+import random
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -41,6 +42,22 @@ def parse_tuples_file(path: Path) -> list[tuple[float, float, float]]:
         raise ValueError(f"no coefficient tuples in {path}")
     if len(set(rows)) != len(rows):
         raise ValueError(f"duplicate coefficient tuple in {path}")
+    return rows
+
+
+def select_tuples(
+    *,
+    smoke: bool,
+    tuples_file: Path | None,
+    seed: int,
+) -> list[tuple[float, float, float]]:
+    """Select run-level fixed tuples; randomize only the complete built-in grid order."""
+    if smoke:
+        return list(SMOKE)
+    if tuples_file is not None:
+        return parse_tuples_file(tuples_file)
+    rows = list(GRID)
+    random.Random(seed).shuffle(rows)
     return rows
 
 
@@ -145,6 +162,8 @@ def main() -> None:
     parser.add_argument("--scenario", choices=("fig7", "fig8", "clean_equal_paths"))
     parser.add_argument("--controller-variant", choices=("qaccess_t", "qaccess_d"), default="qaccess_t")
     parser.add_argument("--sample-interval-ms", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=20260801,
+                        help="reproducible run-order seed for the built-in 27-tuple grid")
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0 and not args.check_only:
@@ -153,7 +172,7 @@ def main() -> None:
         parser.error("choose either --smoke or --tuples-file")
     if args.sample_interval_ms < 50:
         parser.error("--sample-interval-ms must be at least 50")
-    tuples = list(SMOKE if args.smoke else (parse_tuples_file(args.tuples_file) if args.tuples_file else GRID))
+    tuples = select_tuples(smoke=args.smoke, tuples_file=args.tuples_file, seed=args.seed)
     if not args.input_flv.is_file() and not args.check_only:
         parser.error(f"missing input media: {args.input_flv}")
     profile_flag, default_profile = PROFILE_OPTIONS[args.profile_kind]
@@ -172,7 +191,8 @@ def main() -> None:
     )
     print(
         f"[qserver-sweep] scenario={scenario} profile_kind={args.profile_kind} "
-        f"transitions={transition_start_s},{transition_end_s} sample_interval_ms={args.sample_interval_ms}"
+        f"transitions={transition_start_s},{transition_end_s} sample_interval_ms={args.sample_interval_ms} "
+        f"run_order_seed={args.seed if not args.smoke and args.tuples_file is None else 'not_applied'}"
     )
     if args.check_only:
         input_state = "present" if args.input_flv.is_file() else "EXTERNAL_VM_INPUT"
@@ -186,7 +206,11 @@ def main() -> None:
     session.mkdir(parents=True)
     git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
     manifest = {"session": str(session), "partial": set(tuples) != set(GRID), "expected_tuple_count": 27,
-                "tuple_count": len(tuples), "git_commit": git_commit, "runs": []}
+                "tuple_count": len(tuples), "git_commit": git_commit,
+                "fixed_coefficient_per_run": True,
+                "run_order_randomized": not args.smoke and args.tuples_file is None,
+                "run_order_seed": args.seed if not args.smoke and args.tuples_file is None else None,
+                "runs": []}
     for index, values in enumerate(tuples, 1):
         name = tuple_id(values)
         run_dir = session / name
@@ -241,6 +265,8 @@ def main() -> None:
             "scenario": scenario,
             "deterioration_start_s": transition_start_s, "deterioration_end_s": transition_end_s,
             "runtime_sample_interval_ms": args.sample_interval_ms,
+            "run_order": index,
+            "run_order_seed": manifest["run_order_seed"],
             **fixed_sample_validation,
             "impaired_interface": "h2-eth1", "intended_physical_path": "Path B / 10.0.2.x",
             "physical_path_mapping": {"10.0.1.x": "Path A", "10.0.2.x": "Path B"},

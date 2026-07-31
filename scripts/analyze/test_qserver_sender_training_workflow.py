@@ -78,6 +78,16 @@ class WorkflowTests(unittest.TestCase):
             path = Path(tmp) / "tuples.csv"
             path.write_text("alpha,beta,gamma\n0.6,0.3,0.1\n0.7,0.3,0.2\n", encoding="utf-8")
             self.assertEqual(runner.parse_tuples_file(path), [(0.6, 0.3, 0.1), (0.7, 0.3, 0.2)])
+            self.assertEqual(
+                runner.select_tuples(smoke=False, tuples_file=path, seed=1),
+                [(0.6, 0.3, 0.1), (0.7, 0.3, 0.2)],
+            )
+        ordered = runner.select_tuples(smoke=False, tuples_file=None, seed=20260801)
+        repeated = runner.select_tuples(smoke=False, tuples_file=None, seed=20260801)
+        self.assertEqual(ordered, repeated)
+        self.assertEqual(set(ordered), set(runner.GRID))
+        self.assertNotEqual(ordered, list(runner.GRID))
+        self.assertEqual(runner.select_tuples(smoke=True, tuples_file=None, seed=1), list(runner.SMOKE))
 
     def test_metadata_helpers(self):
         with tempfile.TemporaryDirectory() as tmp:
