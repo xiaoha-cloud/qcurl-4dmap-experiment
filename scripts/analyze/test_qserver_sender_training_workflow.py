@@ -28,17 +28,19 @@ variant_builder = load("variant_builder", REPO / "scripts/analyze/build_qaccess_
 sys.path.insert(0, str(REPO / "scripts/analyze"))
 try:
     trainer = load("qserver_trainer", REPO / "scripts/analyze/train_qaccess_qserver_sender.py")
+    d_rtt_trainer = load("qaccess_d_rtt_trainer", REPO / "scripts/analyze/train_qaccess_d_rtt.py")
 except ModuleNotFoundError:
     trainer = None
+    d_rtt_trainer = None
 
 
-def write_fixture(root: Path, *, run_id: str = "run1", alpha: float = 0.6) -> Path:
+def write_fixture(root: Path, *, run_id: str = "run1", alpha: float = 0.6, seconds: int = 4, include_rtt: bool = False) -> Path:
     run = root / run_id
     run.mkdir(parents=True)
     rows = []
     for path_id, remote in [(1, "10.0.1.1:1"), (3, "10.0.2.1:1")]:
-        for second in range(4):
-            rows.append({
+        for second in range(seconds):
+            row = {
                 "timestamp_ms": 1_000_000 + second * 1000, "run_id": run_id, "path_id": path_id,
                 "alpha": alpha, "beta": 0.2, "gamma": 0.1, "endpoint_role": "server_downlink_sender",
                 "producer_pid": 12, "connection_id": f"c-{run_id}", "local_endpoint": "[::]:1935",
@@ -47,7 +49,14 @@ def write_fixture(root: Path, *, run_id: str = "run1", alpha: float = 0.6) -> Pa
                 "delay_gradient_ms": 1, "loss_rate": 0.001, "lost_bytes_delta": 0,
                 "retrans_bytes_delta": 0, "cwnd_bytes": 10000, "inflight_bytes": 5000,
                 "cwnd_room": 5000, "utility": 1, "gain": 1, "backoff": 1,
-            })
+            }
+            if include_rtt:
+                row.update({
+                    "rtt_latest_ms": 100 + second * 10,
+                    "rtt_smoothed_ms": 95 + second * 10,
+                    "rtt_min_ms": 80,
+                })
+            rows.append(row)
     samples = run / "qaccess_runtime_samples.csv"
     pd.DataFrame(rows).to_csv(samples, index=False)
     meta = {
@@ -84,6 +93,18 @@ class WorkflowTests(unittest.TestCase):
                 runner.runtime_samples_path(root / "phase2_state"),
                 root / "phase2_state/qaccess_runtime_samples.csv",
             )
+            samples = root / "fixed.csv"
+            samples.write_text(
+                "path_id,alpha,beta,gamma\n3,0.6,0.3,0.1\n1,0.6,0.3,0.1\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                runner.validate_fixed_samples(samples, (0.6, 0.3, 0.1)),
+                {"runtime_sample_rows": 2, "runtime_sample_path_ids": [1, 3]},
+            )
+            profile = root / "delay.env"
+            profile.write_text("IFACE=h2-eth1\n0 40\n50 80\n100 40\n")
+            self.assertEqual(runner.profile_transition_times(profile), (50, 100))
 
     def test_non_sudo_ownership_restore_is_noop(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -108,6 +129,39 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue((result.delta_loss_1s == 0).all())
             self.assertEqual(result.groupby(["run_id", "path_id"]).size().to_dict(),
                              {("one", 1): 3, ("one", 3): 3, ("two", 1): 3, ("two", 3): 3})
+
+    def test_clean_d_rtt_rows_use_causal_history_and_complete_future_median(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            frame = builder.build_run(write_fixture(Path(tmp), seconds=8, include_rtt=True))
+            path = frame[frame.path_id == 3].sort_values("time_s")
+            row = path[path.time_s == 2].iloc[0]
+            self.assertEqual(row.rtt_latest_median_ms, 120)
+            self.assertEqual(row.rtt_history_median_3s_ms, 110)
+            self.assertEqual(row.rtt_delta_1s_ms, 10)
+            self.assertEqual(row.rtt_slope_3s_ms_per_s, 10)
+            self.assertEqual(row.future_path_rtt_median_3s_ms, 140)
+            self.assertEqual(row.delta_path_rtt_median_3s_ms, 20)
+            self.assertEqual(row.rtt_future_window_sample_count, 3)
+            self.assertTrue(path[path.time_s >= 5].future_path_rtt_median_3s_ms.isna().all())
+
+    def test_clean_d_rtt_target_rejects_nonconsecutive_seconds(self):
+        frame = pd.DataFrame({
+            "run_id": ["run"] * 5,
+            "connection_id": ["connection"] * 5,
+            "endpoint_role": ["server_downlink_sender"] * 5,
+            "path_id": [3] * 5,
+            "alpha": [0.6] * 5,
+            "beta": [0.2] * 5,
+            "gamma": [0.1] * 5,
+            "time_s": [0, 1, 2, 4, 5],
+            "rtt_latest_median_ms": [100, 110, 120, 140, 150],
+        })
+        result = builder.add_rtt_history_and_target(
+            frame,
+            ["run_id", "connection_id", "endpoint_role", "path_id", "alpha", "beta", "gamma"],
+        )
+        self.assertTrue(result.future_path_rtt_median_3s_ms.isna().all())
+        self.assertTrue(pd.isna(result.loc[result.time_s == 4, "rtt_history_median_3s_ms"]).all())
 
     def test_audit_failures_and_partial_success(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,6 +229,37 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(filtered.path_id.unique().tolist(), [3])
         self.assertEqual(len(filtered), 3)
         self.assertEqual(summary["excluded_path_ids"], [0])
+
+    @unittest.skipIf(d_rtt_trainer is None, "training dependencies are unavailable")
+    def test_clean_d_rtt_trainer_filters_complete_active_rows_and_rescores_candidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = pd.concat([
+                builder.build_run(write_fixture(root, run_id="one", alpha=0.6, seconds=9, include_rtt=True)),
+                builder.build_run(write_fixture(root, run_id="two", alpha=0.7, seconds=9, include_rtt=True)),
+            ])
+            source = root / "clean_d.csv"
+            frame.to_csv(source, index=False)
+            loaded = d_rtt_trainer.load_frame(source)
+            self.assertGreater(len(loaded), 0)
+            self.assertFalse(loaded[d_rtt_trainer.FEATURES + [builder.RTT_TARGET]].isna().any().any())
+            candidate = d_rtt_trainer.candidate_frame(loaded.head(2), 0.8, 0.3, 0.2)
+            self.assertEqual(candidate.columns.tolist(), d_rtt_trainer.FEATURES)
+            self.assertTrue((candidate.alpha == 0.8).all())
+            self.assertTrue((candidate.beta == 0.3).all())
+            self.assertTrue((candidate.gamma == 0.2).all())
+
+    @unittest.skipIf(d_rtt_trainer is None, "training dependencies are unavailable")
+    def test_clean_d_rtt_trainer_rejects_coefficient_change_within_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            frame = builder.build_run(write_fixture(root, run_id="one", seconds=9, include_rtt=True))
+            complete = frame.dropna(subset=[builder.RTT_TARGET]).copy()
+            complete.loc[complete.index[-1], "alpha"] = 0.8
+            source = root / "invalid.csv"
+            complete.to_csv(source, index=False)
+            with self.assertRaisesRegex(ValueError, "coefficient changed within runs"):
+                d_rtt_trainer.load_frame(source)
 
 
 if __name__ == "__main__":

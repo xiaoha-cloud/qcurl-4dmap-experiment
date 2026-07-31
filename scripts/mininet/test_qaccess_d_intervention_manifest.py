@@ -31,6 +31,13 @@ class InterventionManifestTests(unittest.TestCase):
         self.assertIn("local -a log_args=(--disable-logs)", runner)
         self.assertIn("QACCESS_INTERVENTION_VERBOSE_LOGS", runner)
 
+    def test_fixed_sweep_wrapper_selects_clean_d_without_replacing_smoke(self):
+        wrapper = (Path(__file__).resolve().parent / "run_qaccess_d_clean_fixed_sweep_collect.sh").read_text()
+        self.assertIn("--controller-variant qaccess_d", wrapper)
+        self.assertIn("--profile-kind delay_clean", wrapper)
+        self.assertIn("--scenario clean_equal_paths", wrapper)
+        self.assertIn("run_qaccess_qserver_sender_sweep.py", wrapper)
+
 
 if __name__ == "__main__":
     unittest.main()

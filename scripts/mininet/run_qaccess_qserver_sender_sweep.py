@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Collect fixed-coefficient qserver sender samples under the 90-150s profile."""
+"""Collect fixed-coefficient qserver sender samples for offline RF training."""
 
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ PROFILE = REPO / "scripts/mininet/combined_deterioration_profile_90_150.env"
 PROFILE_OPTIONS = {
     "combined": ("--dynamic-deterioration-profile", PROFILE),
     "delay": ("--dynamic-delay-profile", REPO / "scripts/mininet/delay_profile.pathB_200s.env"),
+    "delay_clean": ("--dynamic-delay-profile", REPO / "scripts/mininet/delay_profile.clean_40_80_40_200s.env"),
     "loss": ("--dynamic-loss-profile", REPO / "scripts/mininet/loss_profile.pathB_200s.env"),
 }
 GRID = tuple(itertools.product((0.6, 0.7, 0.8), (0.1, 0.2, 0.3), (0.1, 0.2, 0.3)))
@@ -58,6 +59,50 @@ def runtime_samples_path(state_dir: Path) -> Path:
     return state_dir / "qaccess_runtime_samples.csv"
 
 
+def validate_fixed_samples(
+    samples: Path,
+    expected: tuple[float, float, float],
+) -> dict[str, object]:
+    """Fail closed if a supposedly fixed run exported any other coefficients."""
+    rows = 0
+    path_ids: set[int] = set()
+    with samples.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        required = {"path_id", "alpha", "beta", "gamma"}
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise RuntimeError(f"{samples}: missing fixed-run fields {sorted(missing)}")
+        for row in reader:
+            rows += 1
+            observed = tuple(float(row[name]) for name in ("alpha", "beta", "gamma"))
+            if any(abs(actual - wanted) > 1e-6 for actual, wanted in zip(observed, expected)):
+                raise RuntimeError(
+                    f"{samples}: coefficient changed in fixed run; expected={expected} observed={observed}"
+                )
+            path_ids.add(int(row["path_id"]))
+    if rows == 0:
+        raise RuntimeError(f"{samples}: no runtime samples")
+    return {"runtime_sample_rows": rows, "runtime_sample_path_ids": sorted(path_ids)}
+
+
+def profile_transition_times(path: Path) -> tuple[int, int]:
+    """Return the first two non-zero profile step times."""
+    steps: list[int] = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" in line:
+            continue
+        try:
+            at = int(line.split()[0])
+        except (IndexError, ValueError) as exc:
+            raise ValueError(f"unsupported profile row in {path}: {raw!r}") from exc
+        if at > 0:
+            steps.append(at)
+    if len(steps) < 2:
+        raise ValueError(f"profile requires at least two non-zero transitions: {path}")
+    return steps[0], steps[1]
+
+
 def restore_sudo_ownership(path: Path) -> None:
     uid_text, gid_text = os.environ.get("SUDO_UID"), os.environ.get("SUDO_GID")
     if not uid_text or not gid_text:
@@ -90,34 +135,52 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tuples-file", type=Path)
     parser.add_argument("--smoke", action="store_true")
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_ROOT)
+    parser.add_argument("--output-root", type=Path)
     parser.add_argument("--timeout", type=int, default=220)
     parser.add_argument("--input-flv", type=Path, default=Path("/home/mininet/Videos/push_input.flv"))
     parser.add_argument("--profile-kind", choices=sorted(PROFILE_OPTIONS), default="combined")
     parser.add_argument("--profile", type=Path)
-    parser.add_argument("--scenario", choices=("fig7", "fig8"))
+    parser.add_argument("--scenario", choices=("fig7", "fig8", "clean_equal_paths"))
+    parser.add_argument("--controller-variant", choices=("qaccess_t", "qaccess_d"), default="qaccess_t")
+    parser.add_argument("--sample-interval-ms", type=int, default=100)
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
     if os.geteuid() != 0 and not args.check_only:
         parser.error("run collection with sudo; Mininet requires root")
     if args.smoke and args.tuples_file:
         parser.error("choose either --smoke or --tuples-file")
+    if args.sample_interval_ms < 50:
+        parser.error("--sample-interval-ms must be at least 50")
     tuples = list(SMOKE if args.smoke else (parse_tuples_file(args.tuples_file) if args.tuples_file else GRID))
-    if not args.input_flv.is_file():
+    if not args.input_flv.is_file() and not args.check_only:
         parser.error(f"missing input media: {args.input_flv}")
     profile_flag, default_profile = PROFILE_OPTIONS[args.profile_kind]
     profile = (args.profile or default_profile).resolve()
-    scenario = args.scenario or ("fig8" if args.profile_kind == "combined" else "fig7")
+    scenario = args.scenario or ("clean_equal_paths" if args.profile_kind == "delay_clean" else ("fig8" if args.profile_kind == "combined" else "fig7"))
+    output_root = (args.output_root or (
+        REPO / "derived/qaccess_d_rtt_fixed_sweep/sweeps"
+        if args.controller_variant == "qaccess_d" else DEFAULT_ROOT
+    )).resolve()
     if not profile.is_file():
         parser.error(f"missing deterioration profile: {profile}")
-    print(f"[qserver-sweep] tuples={len(tuples)} complete_grid={set(tuples) == set(GRID)} shadow_only=true")
+    transition_start_s, transition_end_s = profile_transition_times(profile)
+    print(
+        f"[qserver-sweep] variant={args.controller_variant} tuples={len(tuples)} "
+        f"complete_grid={set(tuples) == set(GRID)} fixed_coefficients=true"
+    )
+    print(
+        f"[qserver-sweep] scenario={scenario} profile_kind={args.profile_kind} "
+        f"transitions={transition_start_s},{transition_end_s} sample_interval_ms={args.sample_interval_ms}"
+    )
     if args.check_only:
+        input_state = "present" if args.input_flv.is_file() else "EXTERNAL_VM_INPUT"
+        print(f"[qserver-sweep] input_media={args.input_flv} state={input_state}")
         for values in tuples:
             print(tuple_id(values), *values)
         return
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    session = args.output_root.resolve() / f"sweep_{stamp}"
+    session = output_root / f"sweep_{stamp}"
     session.mkdir(parents=True)
     git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
     manifest = {"session": str(session), "partial": set(tuples) != set(GRID), "expected_tuple_count": 27,
@@ -136,10 +199,12 @@ def main() -> None:
             "QACCESS_COEFF_RELOAD": "0", "QACCESS_TRIGGER_UPDATE": "0",
             "QACCESS_RUNTIME_SAMPLE_EXPORT": "1",
             "QACCESS_RUNTIME_BUFFER_SIZE": "0", "QACCESS_LABEL_INTERVAL_MS": "100",
+            "QACCESS_RUNTIME_SAMPLE_INTERVAL_MS": str(args.sample_interval_ms),
+            "QACCESS_RETAIN_TC_LOG": "1",
             "KEEP_PCAP": "0", "SAVE_OUTPUT_FLV": "0",
         })
         cmd = [sys.executable, str(REPO / "scripts/mininet/mp_topo.py"), "--run-exp",
-               "--scenario", scenario, "--utility-mode", "qaccess_t", "--timeout", str(args.timeout),
+               "--scenario", scenario, "--utility-mode", args.controller_variant, "--timeout", str(args.timeout),
                "--log-parent", str(session), "--run-label", name,
                profile_flag, str(profile), "--input-flv", str(args.input_flv),
                "--disable-logs"]
@@ -149,6 +214,7 @@ def main() -> None:
             raise RuntimeError(
                 f"missing qserver runtime samples under explicit Phase2StateDir: {samples}"
             )
+        fixed_sample_validation = validate_fixed_samples(samples, values)
         with samples.open(encoding="utf-8") as source:
             header = source.readline()
             tail = deque(source, maxlen=10_000)
@@ -166,11 +232,14 @@ def main() -> None:
             "schema_version": 1, "sweep_name": name, "coefficient_tuple_id": name,
             "alpha": values[0], "beta": values[1], "gamma": values[2], "run_id": run_id,
             "endpoint_role": "server_downlink_sender", "owner_pid": owner.get("pid"),
-            "phase2_owner": True, "phase2_state_dir": str(state_dir), "execution_mode": "fixed_shadow_collection",
+            "phase2_owner": True, "phase2_state_dir": str(state_dir), "execution_mode": "fixed_offline_collection",
             "active_updates_enabled": False, "worker_used": False, "deterioration_profile": str(profile),
             "profile_kind": args.profile_kind,
+            "controller_variant": args.controller_variant,
             "scenario": scenario,
-            "deterioration_start_s": 90, "deterioration_end_s": 150,
+            "deterioration_start_s": transition_start_s, "deterioration_end_s": transition_end_s,
+            "runtime_sample_interval_ms": args.sample_interval_ms,
+            **fixed_sample_validation,
             "impaired_interface": "h2-eth1", "intended_physical_path": "Path B / 10.0.2.x",
             "physical_path_mapping": {"10.0.1.x": "Path A", "10.0.2.x": "Path B"},
             "runtime_samples": str(samples), "timeline": str(timelines[-1]), "owner_audit": str(owner_audit),
@@ -179,7 +248,7 @@ def main() -> None:
         (run_dir / "sweep_metadata.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         manifest["runs"].append(metadata)
         (session / "sweep_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-    ownership_root = DEFAULT_ROOT.parent if args.output_root.resolve() == DEFAULT_ROOT.resolve() else session
+    ownership_root = output_root.parent if output_root in (DEFAULT_ROOT, REPO / "derived/qaccess_d_rtt_fixed_sweep/sweeps") else session
     restore_sudo_ownership(ownership_root)
     print(f"[qserver-sweep] complete: {session}")
 

@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 
 MEAN = ["bw_bps", "owd_ms", "delay_gradient_ms", "loss_rate", "cwnd_bytes", "inflight_bytes", "cwnd_room", "utility", "gain", "backoff"]
+RTT_MEDIAN = ["rtt_latest_ms", "rtt_smoothed_ms", "rtt_min_ms"]
 SUM = ["lost_bytes_delta", "retrans_bytes_delta"]
 IDENTITY = ["endpoint_role", "producer_pid", "connection_id", "local_endpoint", "remote_endpoint"]
 TARGET_SPECS = {
@@ -23,6 +24,17 @@ TARGET_SPECS = {
         "per_path_sum_lost_retrans_bytes_within_next_1s",
     ),
 }
+RTT_TARGET = "future_path_rtt_median_3s_ms"
+RTT_DELTA_TARGET = "delta_path_rtt_median_3s_ms"
+RTT_HISTORY_FEATURES = [
+    "rtt_latest_median_ms",
+    "rtt_smoothed_median_ms",
+    "rtt_min_median_ms",
+    "rtt_history_median_3s_ms",
+    "rtt_history_std_3s_ms",
+    "rtt_delta_1s_ms",
+    "rtt_slope_3s_ms_per_s",
+]
 
 
 def physical_path(endpoint: str) -> str:
@@ -108,6 +120,33 @@ def add_future_delta_targets(
     return pd.concat(pieces, ignore_index=True) if pieces else frame.copy()
 
 
+def add_rtt_history_and_target(frame: pd.DataFrame, group_columns: list[str]) -> pd.DataFrame:
+    """Add causal RTT history and a complete future 1-3 s median target."""
+    if "rtt_latest_median_ms" not in frame.columns:
+        return frame
+    pieces: list[pd.DataFrame] = []
+    for _, group in frame.groupby(group_columns, sort=False, dropna=False):
+        work = group.sort_values("time_s").copy()
+        time_s = pd.to_numeric(work["time_s"], errors="coerce")
+        current = pd.to_numeric(work["rtt_latest_median_ms"], errors="coerce")
+        consecutive_history = (time_s - time_s.shift(1) == 1) & (time_s - time_s.shift(2) == 2)
+        work["rtt_history_median_3s_ms"] = current.rolling(3, min_periods=3).median().where(consecutive_history)
+        work["rtt_history_std_3s_ms"] = current.rolling(3, min_periods=3).std(ddof=0).where(consecutive_history)
+        work["rtt_delta_1s_ms"] = current.diff(1).where(time_s - time_s.shift(1) == 1)
+        work["rtt_slope_3s_ms_per_s"] = ((current - current.shift(2)) / 2.0).where(consecutive_history)
+        future_values = [current.shift(-offset) for offset in (1, 2, 3)]
+        future_times = [time_s.shift(-offset) for offset in (1, 2, 3)]
+        future = pd.concat(future_values, axis=1)
+        complete = future.notna().sum(axis=1) == 3
+        for offset, shifted_time in enumerate(future_times, 1):
+            complete &= shifted_time == time_s + offset
+        work[RTT_TARGET] = future.median(axis=1).where(complete)
+        work[RTT_DELTA_TARGET] = work[RTT_TARGET] - current
+        work["rtt_future_window_sample_count"] = future.notna().sum(axis=1).where(complete, 0).astype(int)
+        pieces.append(work)
+    return pd.concat(pieces, ignore_index=True) if pieces else frame.copy()
+
+
 def build_run(metadata_path: Path) -> pd.DataFrame:
     meta = json.loads(metadata_path.read_text(encoding="utf-8"))
     raw = pd.read_csv(meta["runtime_samples"])
@@ -120,6 +159,7 @@ def build_run(metadata_path: Path) -> pd.DataFrame:
     raw["time_s"] = np.floor((raw.timestamp_ms - run_start) / 1000).astype(int)
     group = ["path_id", "time_s"]
     agg = {name: (name, "mean") for name in MEAN if name in raw}
+    agg.update({f"{name.removesuffix('_ms')}_median_ms": (name, "median") for name in RTT_MEDIAN if name in raw})
     agg.update({name: (name, "sum") for name in SUM if name in raw})
     agg.update({name: (name, "first") for name in IDENTITY})
     agg.update({"timestamp_ms": ("timestamp_ms", "min"),
@@ -141,6 +181,7 @@ def build_run(metadata_path: Path) -> pd.DataFrame:
     out["sender_byte_delta"] = out.groupby(label_group, sort=False).sender_bytes_total.diff().clip(lower=0).fillna(0)
     out["interval_sender_bytes"] = out.sender_byte_delta
     out = add_future_delta_targets(out, label_group)
+    out = add_rtt_history_and_target(out, label_group)
     return out.dropna(subset=["future_bw_1s"]).reset_index(drop=True)
 
 
