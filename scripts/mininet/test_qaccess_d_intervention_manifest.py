@@ -27,6 +27,9 @@ class InterventionManifestTests(unittest.TestCase):
         self.assertNotIn('--dynamic-deterioration-profile "$PROFILE"', runner)
         self.assertIn("QACCESS_RUNTIME_BUFFER_SIZE=0", runner)
         self.assertIn('QACCESS_RUNTIME_SAMPLE_INTERVAL_MS="$SAMPLE_INTERVAL_MS"', runner)
+        self.assertIn("QACCESS_RETAIN_TC_LOG=1", runner)
+        self.assertIn("local -a log_args=(--disable-logs)", runner)
+        self.assertIn("QACCESS_INTERVENTION_VERBOSE_LOGS", runner)
 
 
 if __name__ == "__main__":

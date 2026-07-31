@@ -371,6 +371,7 @@ def run_experiment(net, args):
     h1 = net.get("h1")
     h2 = net.get("h2")
     save_logs = not getattr(args, "disable_logs", False)
+    retain_tc_log = _env_flag("QACCESS_RETAIN_TC_LOG", False)
     tc_proc = None
     tc_log_path = None
     tc_log_f = None
@@ -483,7 +484,12 @@ def run_experiment(net, args):
     _log("exp", f"RUN_ID  = {run_id}")
     _log("exp", f"LOGDIR  = {logdir}")
     if not save_logs:
-        _log("exp", "runtime logs disabled (--disable-logs); role/tc/tcpdump/tshark logs go to /dev/null")
+        tc_log_state = "retained" if retain_tc_log else "sent to /dev/null"
+        _log(
+            "exp",
+            "runtime logs disabled (--disable-logs); "
+            f"role/tcpdump/tshark logs go to /dev/null; tc profile log {tc_log_state}",
+        )
     if log_parent or run_label:
         _log("exp", f"log_parent = {log_parent!r}  run_label = {run_label!r}")
     cfg = SCENARIOS[scen]
@@ -511,7 +517,7 @@ def run_experiment(net, args):
             _log("error", f"tc_bw_steps.sh not found: {TC_BW_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_bw_{run_id}.log")
-        tc_log_f = _open_log_file(tc_log_path, save_logs)
+        tc_log_f = _open_log_file(tc_log_path, save_logs or retain_tc_log)
         cmd = f"bash {shlex.quote(TC_BW_SCRIPT)} {shlex.quote(prof_path)}"
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)
@@ -527,7 +533,7 @@ def run_experiment(net, args):
             _log("error", f"tc_delay_steps.sh not found: {TC_DELAY_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_delay_{run_id}.log")
-        tc_log_f = _open_log_file(tc_log_path, save_logs)
+        tc_log_f = _open_log_file(tc_log_path, save_logs or retain_tc_log)
         cmd = f"bash {shlex.quote(TC_DELAY_SCRIPT)} {shlex.quote(prof_path)}"
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)
@@ -543,7 +549,7 @@ def run_experiment(net, args):
             _log("error", f"tc_loss_steps.sh not found: {TC_LOSS_SCRIPT}")
             return
         tc_log_path = os.path.join(logs_dir, f"tc_loss_{run_id}.log")
-        tc_log_f = _open_log_file(tc_log_path, save_logs)
+        tc_log_f = _open_log_file(tc_log_path, save_logs or retain_tc_log)
         cmd = f"bash {shlex.quote(TC_LOSS_SCRIPT)} {shlex.quote(prof_path)}"
         tc_node = _tc_bw_host_for_profile(prof_path)
         tc_h = net.get(tc_node)

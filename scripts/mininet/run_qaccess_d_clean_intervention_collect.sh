@@ -8,6 +8,7 @@ STATE_DIR="${QACCESS_PHASE2_STATE_DIR:-$ROOT/derived/qaccess_d_intervention_coll
 INPUT_FLV="${INPUT_FLV:-/home/mininet/Videos/push_input.flv}"
 TIMEOUT="${TIMEOUT:-220}"
 SAMPLE_INTERVAL_MS="${QACCESS_RUNTIME_SAMPLE_INTERVAL_MS:-100}"
+VERBOSE_RUNTIME_LOGS="${QACCESS_INTERVENTION_VERBOSE_LOGS:-0}"
 LIMIT=0; START_INDEX=1; RESUME=0; CHECK_ONLY=0; CONFIRM_FULL=0; SESSION_DIR=""
 
 while (($#)); do
@@ -26,6 +27,7 @@ done
 for value in "$TIMEOUT" "$LIMIT" "$START_INDEX" "$SAMPLE_INTERVAL_MS"; do
   [[ "$value" =~ ^[0-9]+$ ]] || { echo "[error] numeric arguments must be integers" >&2; exit 2; }
 done
+[[ "$VERBOSE_RUNTIME_LOGS" =~ ^[01]$ ]] || { echo "[error] QACCESS_INTERVENTION_VERBOSE_LOGS must be 0 or 1" >&2; exit 2; }
 ((TIMEOUT >= 110 && START_INDEX >= 1)) || { echo "[error] TIMEOUT>=110 and start-index>=1 required" >&2; exit 2; }
 ((SAMPLE_INTERVAL_MS >= 50)) || { echo "[error] intervention sampling interval must be at least 50 ms" >&2; exit 2; }
 [[ "$STATE_DIR" = /* ]] || { echo "[error] state directory must be absolute" >&2; exit 2; }
@@ -47,6 +49,11 @@ echo "[check] manifest=$MANIFEST rows=$manifest_rows profile=$PROFILE"
 echo "[check] production_data_source=VM_MININET_SENDER_RUNTIME_SAMPLES"
 echo "[check] target=candidate_post_rtt_median_ms"
 echo "[check] runtime_sample_interval_ms=$SAMPLE_INTERVAL_MS"
+if ((VERBOSE_RUNTIME_LOGS)); then
+  echo "[check] runtime_verbose_logs=enabled (diagnostic mode)"
+else
+  echo "[check] runtime_verbose_logs=disabled tc_profile_log=retained"
+fi
 if ((CHECK_ONLY)); then echo "[check] valid; no experiment or production data created"; exit 0; fi
 [[ "$(uname -s)" == Linux ]] || { echo "[error] real collection is VM/Linux only" >&2; exit 1; }
 ((EUID == 0)) || { echo "[error] run with sudo (Mininet needs root)" >&2; exit 1; }
@@ -70,6 +77,8 @@ run_row() {
   local label
   label="$(printf 'd_intervention_%03d_%s_r%s' "$order" "$candidate" "$replicate")"
   local leg="$SESSION_DIR/$label" validation="$SESSION_DIR/$label/intervention_validation.json"
+  local -a log_args=(--disable-logs)
+  if ((VERBOSE_RUNTIME_LOGS)); then log_args=(--log-control); fi
   if ((RESUME)) && [[ -s "$validation" ]] && python3 -c "import json; assert json.load(open('$validation'))['valid']" 2>/dev/null; then echo "[collect] skip validated row $order"; return; fi
   mkdir -p "$leg"
   QACCESS_PHASE2_STATE_DIR="$STATE_DIR" QACCESS_WORKER_TARGET_MODE=delta_owd_1s bash "$ROOT/scripts/mininet/reset_qaccess_phase2_runtime.sh"
@@ -86,11 +95,12 @@ run_row() {
     QACCESS_COEFF_RELOAD_INTERVAL_MS=250 QACCESS_COEFF_SMOOTHING=1 QACCESS_TRIGGER_UPDATE=0 QACCESS_RUNTIME_SAMPLE_EXPORT=1 \
     QACCESS_RUNTIME_BUFFER_SIZE=0 \
     QACCESS_RUNTIME_SAMPLE_INTERVAL_MS="$SAMPLE_INTERVAL_MS" \
+    QACCESS_RETAIN_TC_LOG=1 \
     QACCESS_RUNTIME_SAMPLES_CSV="$STATE_DIR/qaccess_runtime_samples.csv" TC_DELAY_FIXED_BW_MBIT=20 \
     TC_DELAY_FIXED_LOSS_PERCENT=0 KEEP_PCAP="${KEEP_PCAP:-0}" SAVE_OUTPUT_FLV=0 \
     python3 "$ROOT/scripts/mininet/mp_topo.py" --run-exp --scenario clean_equal_paths --utility-mode qaccess_d \
       --timeout "$TIMEOUT" --log-parent "$SESSION_DIR" --run-label "$label" \
-      --dynamic-delay-profile "$PROFILE" --input-flv "$INPUT_FLV" --log-control
+      --dynamic-delay-profile "$PROFILE" --input-flv "$INPUT_FLV" "${log_args[@]}"
   local run_status=$?; wait "$helper"; local helper_status=$?; set -e
   [[ -s "$STATE_DIR/qaccess_runtime_samples.csv" ]] && cp "$STATE_DIR/qaccess_runtime_samples.csv" "$leg/qaccess_runtime_samples.csv"
   ((run_status == 0 && helper_status == 0)) || { echo "[error] row $order failed: run=$run_status helper=$helper_status" >&2; return 1; }
