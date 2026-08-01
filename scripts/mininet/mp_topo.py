@@ -372,6 +372,7 @@ def run_experiment(net, args):
     h2 = net.get("h2")
     save_logs = not getattr(args, "disable_logs", False)
     retain_tc_log = _env_flag("QACCESS_RETAIN_TC_LOG", False)
+    retain_monitor_log = _env_flag("QACCESS_RETAIN_MONITOR_LOG", False)
     tc_proc = None
     tc_log_path = None
     tc_log_f = None
@@ -485,10 +486,12 @@ def run_experiment(net, args):
     _log("exp", f"LOGDIR  = {logdir}")
     if not save_logs:
         tc_log_state = "retained" if retain_tc_log else "sent to /dev/null"
+        monitor_log_state = "retained" if retain_monitor_log else "sent to /dev/null"
         _log(
             "exp",
             "runtime logs disabled (--disable-logs); "
-            f"role/tcpdump/tshark logs go to /dev/null; tc profile log {tc_log_state}",
+            f"pull monitor log {monitor_log_state}; other role/tcpdump/tshark logs go to /dev/null; "
+            f"tc profile log {tc_log_state}",
         )
     if log_parent or run_label:
         _log("exp", f"log_parent = {log_parent!r}  run_label = {run_label!r}")
@@ -680,7 +683,7 @@ def run_experiment(net, args):
 
     # ---- Start pull on h1 --------------------------------------------------
     pull_log_path = os.path.join(logs_dir, f"pull_{run_id}.log")
-    pull_log = _open_log_file(pull_log_path, save_logs)
+    pull_log = _open_log_file(pull_log_path, save_logs or retain_monitor_log)
     if save_output_flv:
         open(outfile, "w").close()  # touch
     # 4dmap (main.go) takes the rtmp URL as the last os.Args element; all flags (including

@@ -155,6 +155,8 @@ class CleanExperimentConfigTests(unittest.TestCase):
         )
         self.assertIn("TC_LOSS_FIXED_BW_MBIT=20", loss_runner)
         self.assertIn("TC_LOSS_FIXED_DELAY_MS=40", loss_runner)
+        self.assertIn("QACCESS_RETAIN_MONITOR_LOG=1", loss_runner)
+        self.assertIn("QACCESS_RETAIN_TC_LOG=1", loss_runner)
         self.assertIn('QACCESS_EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-active}"', loss_runner)
 
     def test_clean_runner_objective_trigger_mapping(self) -> None:

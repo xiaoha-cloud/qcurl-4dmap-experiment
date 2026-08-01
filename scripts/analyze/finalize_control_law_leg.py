@@ -457,6 +457,7 @@ def _cleanup_leg_dir(
     keep_pcap: bool,
     save_flv: bool,
     keep_logs: bool,
+    keep_monitor_logs: bool = False,
 ) -> list[str]:
     if not throughput_ok:
         return sorted(str(p.relative_to(leg_dir)) for p in leg_dir.rglob("*") if p.is_file())
@@ -467,8 +468,20 @@ def _cleanup_leg_dir(
     if not save_flv:
         for flv in leg_dir.glob("output_*.flv"):
             flv.unlink(missing_ok=True)
-    if not keep_logs and (leg_dir / "logs").is_dir():
-        shutil.rmtree(leg_dir / "logs", ignore_errors=True)
+    logs_dir = leg_dir / "logs"
+    if not keep_logs and logs_dir.is_dir():
+        if keep_monitor_logs:
+            for path in logs_dir.iterdir():
+                if path.is_file() and (
+                    path.name.startswith("pull_") or path.name.startswith("tc_")
+                ):
+                    continue
+                if path.is_dir():
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    path.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(logs_dir, ignore_errors=True)
     if (leg_dir / "csv").is_dir():
         shutil.rmtree(leg_dir / "csv", ignore_errors=True)
     if (leg_dir / "derived_snapshots").is_dir():
@@ -530,6 +543,7 @@ def finalize_leg(
     save_flv: bool,
     keep_all_buffers: bool,
     keep_logs: bool,
+    keep_monitor_logs: bool = False,
 ) -> dict:
     leg_dir = leg_dir.resolve()
     repo = repo.resolve()
@@ -582,6 +596,7 @@ def finalize_leg(
         keep_pcap=keep_pcap,
         save_flv=save_flv,
         keep_logs=keep_logs,
+        keep_monitor_logs=keep_monitor_logs,
     )
 
     pcap_retained = any(leg_dir.rglob("*.pcap"))
@@ -623,6 +638,11 @@ def main() -> int:
     ap.add_argument("--save-output-flv", type=int, default=int(os.environ.get("SAVE_OUTPUT_FLV", "0")))
     ap.add_argument("--keep-logs", type=int, default=int(os.environ.get("SAVE_VERBOSE_LOGS", "0")))
     ap.add_argument(
+        "--keep-monitor-logs",
+        type=int,
+        default=int(os.environ.get("QACCESS_RETAIN_MONITOR_LOG", "0")),
+    )
+    ap.add_argument(
         "--keep-all-processed-buffers",
         type=int,
         default=int(os.environ.get("KEEP_ALL_PROCESSED_BUFFERS", "0")),
@@ -639,6 +659,7 @@ def main() -> int:
         save_flv=bool(args.save_output_flv),
         keep_all_buffers=bool(args.keep_all_processed_buffers),
         keep_logs=bool(args.keep_logs),
+        keep_monitor_logs=bool(args.keep_monitor_logs),
     )
 
     print(f"[finalize] leg={summary['leg_dir']}")
