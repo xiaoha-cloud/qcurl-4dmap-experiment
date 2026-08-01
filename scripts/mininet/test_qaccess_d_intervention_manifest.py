@@ -37,6 +37,10 @@ class InterventionManifestTests(unittest.TestCase):
         self.assertIn("--profile-kind delay_clean", wrapper)
         self.assertIn("--scenario clean_equal_paths", wrapper)
         self.assertIn("run_qaccess_qserver_sender_sweep.py", wrapper)
+        collector = (Path(__file__).resolve().parent / "run_qaccess_qserver_sender_sweep.py").read_text()
+        self.assertIn('"TC_DELAY_FIXED_BW_MBIT": "20"', collector)
+        self.assertIn('"TC_DELAY_FIXED_LOSS_PERCENT": "0"', collector)
+        self.assertIn("validate_clean_delay_tc_log(run_dir)", collector)
 
 
 if __name__ == "__main__":

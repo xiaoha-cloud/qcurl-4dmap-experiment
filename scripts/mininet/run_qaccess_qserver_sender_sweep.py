@@ -104,6 +104,32 @@ def validate_fixed_samples(
     return {"runtime_sample_rows": rows, "runtime_sample_path_ids": sorted(path_ids)}
 
 
+def validate_clean_delay_tc_log(run_dir: Path) -> dict[str, object]:
+    """Verify every clean-D step preserved fixed TBF bandwidth and zero loss."""
+    logs = sorted((run_dir / "logs").glob("tc_delay_*.log"))
+    if len(logs) != 1:
+        raise RuntimeError(f"{run_dir}: expected one retained tc_delay log, found {logs}")
+    path = logs[0]
+    content = path.read_text(encoding="utf-8", errors="replace")
+    expected = [
+        "profile_step[0] at=0s delay=40ms",
+        "profile_step[1] at=50s delay=80ms",
+        "profile_step[2] at=100s delay=40ms",
+        "composite_qdisc=1 fixed_bw_mbit=20 fixed_loss_percent=0",
+        "root_tbf=1: fixed_bw=20mbit",
+        "fixed_loss=0%",
+        "finished all steps",
+    ]
+    missing = [item for item in expected if item not in content]
+    if content.count("verification_ok:") < 3:
+        missing.append("three hierarchy verifications")
+    if "verification_failed:" in content:
+        missing.append("verification_failed present")
+    if missing:
+        raise RuntimeError(f"{path}: clean delay qdisc validation failed: {missing}")
+    return {"qdisc_profile_valid": True, "tc_log": str(path)}
+
+
 def profile_transition_times(path: Path) -> tuple[int, int]:
     """Return the first two non-zero profile step times."""
     steps: list[int] = []
@@ -172,6 +198,18 @@ def main() -> None:
         parser.error("choose either --smoke or --tuples-file")
     if args.sample_interval_ms < 50:
         parser.error("--sample-interval-ms must be at least 50")
+    if args.profile_kind == "delay_clean":
+        required_clean_env = {
+            "TC_DELAY_FIXED_BW_MBIT": "20",
+            "TC_DELAY_FIXED_LOSS_PERCENT": "0",
+        }
+        conflicts = {
+            key: os.environ[key]
+            for key, expected in required_clean_env.items()
+            if key in os.environ and os.environ[key] != expected
+        }
+        if conflicts:
+            parser.error(f"clean delay requires fixed bandwidth/loss {required_clean_env}; conflicting env={conflicts}")
     tuples = select_tuples(smoke=args.smoke, tuples_file=args.tuples_file, seed=args.seed)
     if not args.input_flv.is_file() and not args.check_only:
         parser.error(f"missing input media: {args.input_flv}")
@@ -229,6 +267,11 @@ def main() -> None:
             "QACCESS_RETAIN_TC_LOG": "1",
             "KEEP_PCAP": "0", "SAVE_OUTPUT_FLV": "0",
         })
+        if args.profile_kind == "delay_clean":
+            env.update({
+                "TC_DELAY_FIXED_BW_MBIT": "20",
+                "TC_DELAY_FIXED_LOSS_PERCENT": "0",
+            })
         cmd = [sys.executable, str(REPO / "scripts/mininet/mp_topo.py"), "--run-exp",
                "--scenario", scenario, "--utility-mode", args.controller_variant, "--timeout", str(args.timeout),
                "--log-parent", str(session), "--run-label", name,
@@ -241,6 +284,10 @@ def main() -> None:
                 f"missing qserver runtime samples under explicit Phase2StateDir: {samples}"
             )
         fixed_sample_validation = validate_fixed_samples(samples, values)
+        qdisc_validation = (
+            validate_clean_delay_tc_log(run_dir)
+            if args.profile_kind == "delay_clean" else {}
+        )
         with samples.open(encoding="utf-8") as source:
             header = source.readline()
             tail = deque(source, maxlen=10_000)
@@ -268,6 +315,7 @@ def main() -> None:
             "run_order": index,
             "run_order_seed": manifest["run_order_seed"],
             **fixed_sample_validation,
+            **qdisc_validation,
             "impaired_interface": "h2-eth1", "intended_physical_path": "Path B / 10.0.2.x",
             "physical_path_mapping": {"10.0.1.x": "Path A", "10.0.2.x": "Path B"},
             "runtime_samples": str(samples), "timeline": str(timelines[-1]), "owner_audit": str(owner_audit),

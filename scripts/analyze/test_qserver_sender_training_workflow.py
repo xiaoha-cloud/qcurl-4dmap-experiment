@@ -116,6 +116,26 @@ class WorkflowTests(unittest.TestCase):
                 runner.validate_fixed_samples(samples, (0.6, 0.3, 0.1)),
                 {"runtime_sample_rows": 2, "runtime_sample_path_ids": [1, 3]},
             )
+            tc_logs = root / "run/logs"
+            tc_logs.mkdir(parents=True)
+            tc_log = tc_logs / "tc_delay_test.log"
+            tc_log.write_text(
+                "\n".join([
+                    "profile_step[0] at=0s delay=40ms",
+                    "profile_step[1] at=50s delay=80ms",
+                    "profile_step[2] at=100s delay=40ms",
+                    "composite_qdisc=1 fixed_bw_mbit=20 fixed_loss_percent=0",
+                    "verification_ok: root_tbf=1: fixed_bw=20mbit child_netem=10: parent=1:1 dynamic_delay fixed_loss=0%",
+                    "verification_ok: root_tbf=1: fixed_bw=20mbit child_netem=10: parent=1:1 dynamic_delay fixed_loss=0%",
+                    "verification_ok: root_tbf=1: fixed_bw=20mbit child_netem=10: parent=1:1 dynamic_delay fixed_loss=0%",
+                    "finished all steps",
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                runner.validate_clean_delay_tc_log(root / "run"),
+                {"qdisc_profile_valid": True, "tc_log": str(tc_log)},
+            )
             profile = root / "delay.env"
             profile.write_text("IFACE=h2-eth1\n0 40\n50 80\n100 40\n")
             self.assertEqual(runner.profile_transition_times(profile), (50, 100))
