@@ -65,6 +65,44 @@ class DelayLossEvaluationTest(unittest.TestCase):
                 path.write_text("test\n", encoding="utf-8")
             self.assertEqual(evaluation._metric_log_candidates(run), [pull])
 
+    def test_wire_timeseries_falls_back_to_retained_throughput_csvs(self):
+        with TemporaryDirectory() as td:
+            run = Path(td)
+            for filename, values in (
+                ("throughput_all_down.csv", [10.0, 12.0]),
+                ("throughput_pathA_down.csv", [8.0, 9.0]),
+                ("throughput_pathB_down.csv", [2.0, 3.0]),
+            ):
+                pd.DataFrame({
+                    "elapsed_s": [0.0, 1.0],
+                    "throughput_mbps": values,
+                    "bytes": [0, 0],
+                    "packets": [0, 0],
+                }).to_csv(run / filename, index=False)
+
+            result = evaluation.load_wire_timeseries(run)
+
+        self.assertEqual(result["time_s"].tolist(), [0.0, 1.0])
+        self.assertEqual(result["total_quic_wire_mbps"].tolist(), [10.0, 12.0])
+        self.assertEqual(result["path_a_quic_wire_mbps"].tolist(), [8.0, 9.0])
+        self.assertEqual(result["path_b_quic_wire_mbps"].tolist(), [2.0, 3.0])
+        self.assertEqual(result["path_b_share_pct"].tolist(), [20.0, 25.0])
+
+    def test_timeseries_plot_does_not_crash_without_throughput(self):
+        quality = pd.DataFrame([{
+            "method": "baseline",
+            "time_s": 1.0,
+            "monitor_loss_mean": 0.01,
+        }])
+        with TemporaryDirectory() as td:
+            out = Path(td)
+            evaluation._plot_timeseries(
+                pd.DataFrame(), quality, out, "loss_clean", "loss",
+            )
+            self.assertTrue(
+                (out / "loss_clean_throughput_quality_over_time.png").is_file()
+            )
+
     def test_monitor_time_is_aligned_to_tc_profile_start(self):
         monitor_line = (
             "2026/07/26 15:00:04 [m]monitor path=3 "

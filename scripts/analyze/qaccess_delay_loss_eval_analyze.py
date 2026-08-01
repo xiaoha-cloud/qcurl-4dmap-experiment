@@ -214,7 +214,7 @@ def load_wire_timeseries(run_dir: Path) -> pd.DataFrame:
     pcap_dir = run_dir / "pcaps"
     pcaps = sorted(pcap_dir.glob("pathA_*.pcap")) + sorted(pcap_dir.glob("pathB_*.pcap"))
     if not pcaps:
-        return pd.DataFrame()
+        return _load_wire_timeseries_csv(run_dir)
 
     epochs = [epoch for p in pcaps if (epoch := _first_pcap_epoch(p)) is not None]
     if not epochs:
@@ -241,6 +241,41 @@ def load_wire_timeseries(run_dir: Path) -> pd.DataFrame:
             "path_b_share_pct": (bb / total * 100.0) if total > 0 else float("nan"),
         })
     return pd.DataFrame(rows)
+
+
+def _load_wire_timeseries_csv(run_dir: Path) -> pd.DataFrame:
+    """Read the per-second CSVs generated before KEEP_PCAP=0 removes pcaps."""
+    paths = {
+        "total_quic_wire_mbps": run_dir / "throughput_all_down.csv",
+        "path_a_quic_wire_mbps": run_dir / "throughput_pathA_down.csv",
+        "path_b_quic_wire_mbps": run_dir / "throughput_pathB_down.csv",
+    }
+    if not all(path.is_file() and path.stat().st_size > 0 for path in paths.values()):
+        return pd.DataFrame()
+
+    series: list[pd.DataFrame] = []
+    for output_column, path in paths.items():
+        frame = pd.read_csv(path)
+        time_column = "elapsed_s" if "elapsed_s" in frame.columns else "time_s"
+        value_column = (
+            "throughput_mbps" if "throughput_mbps" in frame.columns
+            else output_column
+        )
+        if time_column not in frame.columns or value_column not in frame.columns:
+            return pd.DataFrame()
+        work = frame[[time_column, value_column]].copy()
+        work.columns = ["time_s", output_column]
+        work["time_s"] = pd.to_numeric(work["time_s"], errors="coerce")
+        work[output_column] = pd.to_numeric(work[output_column], errors="coerce")
+        series.append(work.dropna(subset=["time_s"]))
+
+    result = series[0]
+    for frame in series[1:]:
+        result = result.merge(frame, on="time_s", how="outer")
+    total = result["total_quic_wire_mbps"]
+    result["path_b_share_pct"] = result["path_b_quic_wire_mbps"].div(total).mul(100.0)
+    result.loc[total <= 0, "path_b_share_pct"] = float("nan")
+    return result.sort_values("time_s").reset_index(drop=True)
 
 
 def _metric_log_candidates(run_dir: Path) -> list[Path]:
@@ -610,7 +645,17 @@ def _plot_timeseries(
         + list(quality.get("method", pd.Series(dtype=str)))
     )
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
-    for method, group in throughput.groupby("method"):
+    throughput_available = (
+        not throughput.empty
+        and "method" in throughput.columns
+        and "time_s" in throughput.columns
+    )
+    if throughput_available:
+        throughput_groups = list(throughput.groupby("method"))
+    else:
+        throughput_groups = []
+
+    for method, group in throughput_groups:
         axes[0].plot(
             group["time_s"], group["total_quic_wire_mbps"],
             label=_plot_method_label(str(method), objective_kind),
@@ -619,9 +664,15 @@ def _plot_timeseries(
     axes[0].set_ylabel("Throughput (Mbps)")
     axes[0].set_title("Total throughput from all captured frames")
     axes[0].grid(alpha=0.25)
-    axes[0].legend()
+    if throughput_groups:
+        axes[0].legend()
+    else:
+        axes[0].text(
+            0.5, 0.5, "Throughput data unavailable",
+            ha="center", va="center", transform=axes[0].transAxes,
+        )
 
-    for method, group in throughput.groupby("method"):
+    for method, group in throughput_groups:
         axes[1].plot(
             group["time_s"], group["path_a_quic_wire_mbps"],
             label=f"{_plot_method_label(str(method), objective_kind)} Path A", linewidth=1.1,
@@ -635,7 +686,13 @@ def _plot_timeseries(
         )
     axes[1].set_ylabel("Per-path (Mbps)")
     axes[1].grid(alpha=0.25)
-    axes[1].legend(ncol=2, fontsize=8)
+    if throughput_groups:
+        axes[1].legend(ncol=2, fontsize=8)
+    else:
+        axes[1].text(
+            0.5, 0.5, "Per-path throughput data unavailable",
+            ha="center", va="center", transform=axes[1].transAxes,
+        )
 
     quality_column = ""
     quality_label = ""
