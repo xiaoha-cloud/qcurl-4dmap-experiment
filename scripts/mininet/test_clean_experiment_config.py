@@ -29,7 +29,7 @@ from mp_topo import _experiment_exit_status, scenario_link_kwargs  # noqa: E402
 PROFILES = {
     "bandwidth": MININET_DIR / "bw_profile.clean_20_30_10_200s.env",
     "delay": MININET_DIR / "delay_profile.clean_40_80_40_200s.env",
-    "loss": MININET_DIR / "loss_profile.clean_0_1_0_200s.env",
+    "loss": MININET_DIR / "loss_profile.clean_0_0p5_0_200s.env",
 }
 HISTORICAL_SHA256 = {
     "bw_profile.fig7_200s.env": "3d569c4a7dd42818f8739a15cf30f4515e6116ffb075e474047f67fd4174727a",
@@ -62,7 +62,7 @@ class CleanExperimentConfigTests(unittest.TestCase):
         expected = {
             "bandwidth": [20, 30, 10],
             "delay": [40, 80, 40],
-            "loss": [0, 1, 0],
+            "loss": [0, 0.5, 0],
         }
         for kind, path in PROFILES.items():
             with self.subTest(kind=kind):
@@ -73,8 +73,8 @@ class CleanExperimentConfigTests(unittest.TestCase):
 
     def test_loss_values_are_tc_percentages(self) -> None:
         parsed = parse_profile(PROFILES["loss"], "loss")
-        self.assertEqual(parsed["tc_values"], ["0%", "1%", "0%"])
-        self.assertEqual(format_loss_percent(1), "1%")
+        self.assertEqual(parsed["tc_values"], ["0%", "0.5%", "0%"])
+        self.assertEqual(format_loss_percent(0.5), "0.5%")
         self.assertEqual(format_loss_percent(0.01), "0.01%")
 
     def test_incorrect_interface_is_rejected(self) -> None:
@@ -150,6 +150,12 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertIn("TC_DELAY_FIXED_BW_MBIT=20", delay_runner)
         self.assertIn("TC_DELAY_FIXED_LOSS_PERCENT=0", delay_runner)
         self.assertIn('QACCESS_EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-active}"', delay_runner)
+        loss_runner = (MININET_DIR / "run_qaccess_l_clean_loss_eval.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("TC_LOSS_FIXED_BW_MBIT=20", loss_runner)
+        self.assertIn("TC_LOSS_FIXED_DELAY_MS=40", loss_runner)
+        self.assertIn('QACCESS_EXECUTION_MODE="${QACCESS_EXECUTION_MODE:-active}"', loss_runner)
 
     def test_clean_runner_objective_trigger_mapping(self) -> None:
         expected = {
@@ -223,6 +229,23 @@ class CleanExperimentConfigTests(unittest.TestCase):
         self.assertIn("trigger_mode=objective_d", result.stdout)
         self.assertIn("fixed_bw_mbit=20", result.stdout)
 
+    def test_clean_loss_configuration_is_active_and_loss_objective(self) -> None:
+        result = subprocess.run(
+            [str(MININET_DIR / "run_qaccess_l_clean_loss_eval.sh"), "--configuration-only"],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("execution_mode=active", result.stdout)
+        self.assertIn("objective=loss", result.stdout)
+        self.assertIn("trigger_mode=objective_l", result.stdout)
+        self.assertIn("model_target=loss_risk_1s", result.stdout)
+        self.assertIn("fixed_bw_mbit=20", result.stdout)
+        self.assertIn("fixed_delay_ms=40", result.stdout)
+
     def test_clean_runner_rejects_incorrect_interface(self) -> None:
         self._assert_runner_rejects_profile("IFACE=h1-eth1\n0 20\n50 30\n100 10\n")
 
@@ -291,6 +314,29 @@ class CleanExperimentConfigTests(unittest.TestCase):
         result, calls = self._run_delay_script(composite=False)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("qdisc replace dev h2-eth1 root netem delay 40ms", calls)
+        self.assertNotIn("root handle 1: tbf", calls)
+        self.assertNotIn("parent 1:1 handle 10: netem", calls)
+
+    def test_clean_loss_preserves_bandwidth_and_delay_with_dynamic_netem_child(self) -> None:
+        result, calls = self._run_loss_script(composite=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "qdisc replace dev h2-eth1 root handle 1: tbf rate 20mbit burst 64kbit latency 400ms",
+            calls,
+        )
+        for loss in ("0%", "0.5%", "0%"):
+            self.assertIn(
+                f"qdisc replace dev h2-eth1 parent 1:1 handle 10: netem delay 40ms loss {loss}",
+                calls,
+            )
+        self.assertEqual(calls.count("root handle 1: tbf"), 3)
+        self.assertEqual(calls.count("parent 1:1 handle 10: netem"), 3)
+        self.assertIn("verification_ok: root_tbf=1: fixed_bw=20mbit", result.stderr)
+
+    def test_legacy_loss_command_remains_root_netem_only(self) -> None:
+        result, calls = self._run_loss_script(composite=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("qdisc replace dev h2-eth1 root netem loss 0.5%", calls)
         self.assertNotIn("root handle 1: tbf", calls)
         self.assertNotIn("parent 1:1 handle 10: netem", calls)
 
@@ -477,6 +523,70 @@ fi
                 environment.pop("TC_DELAY_FIXED_LOSS_PERCENT", None)
             result = subprocess.run(
                 ["bash", str(MININET_DIR / "tc_delay_steps.sh"), str(profile)],
+                cwd=ROOT,
+                env=environment,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            calls = call_log.read_text(encoding="utf-8") if call_log.is_file() else ""
+            return result, calls
+
+    def _run_loss_script(self, *, composite: bool) -> tuple[subprocess.CompletedProcess[str], str]:
+        with tempfile.TemporaryDirectory() as directory:
+            temp_dir = Path(directory)
+            profile = temp_dir / "profile.env"
+            profile.write_text("IFACE=h2-eth1\n0 0\n0 0.5\n0 0\n", encoding="utf-8")
+            call_log = temp_dir / "tc_calls.log"
+            state = temp_dir / "tc_state"
+            fake_tc = temp_dir / "tc"
+            fake_tc.write_text(
+                """#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$TC_CALL_LOG"
+if [[ "$*" == *"root handle 1: tbf"* ]]; then
+  printf 'root\n' > "$TC_STATE"
+elif [[ "$*" == *"parent 1:1 handle 10: netem"* ]]; then
+  printf 'composite\n' > "$TC_STATE"
+elif [[ "$*" == *"root netem loss"* ]]; then
+  printf 'legacy\n' > "$TC_STATE"
+fi
+current="$(cat "$TC_STATE" 2>/dev/null || true)"
+if [[ "$*" == *"qdisc show dev h2-eth1"* ]]; then
+  case "$current" in
+    composite)
+      printf 'qdisc netem 10: parent 1:1 limit 1000 delay 40ms loss 0.5%%\n'
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\n'
+      ;;
+    root)
+      printf 'qdisc tbf 1: root rate 20Mbit burst 8Kb lat 400ms\n'
+      ;;
+    *)
+      printf 'qdisc netem 8001: root limit 1000 loss 0.5%%\n'
+      ;;
+  esac
+elif [[ "$*" == *"class show dev h2-eth1"* ]]; then
+  printf 'class tbf 1:1 parent 1: leaf 10: rate 20Mbit burst 8Kb\n'
+fi
+""",
+                encoding="utf-8",
+            )
+            fake_tc.chmod(0o755)
+            environment = {
+                **os.environ,
+                "PATH": f"{temp_dir}:{os.environ['PATH']}",
+                "TC_CALL_LOG": str(call_log),
+                "TC_STATE": str(state),
+            }
+            if composite:
+                environment.update(
+                    {"TC_LOSS_FIXED_BW_MBIT": "20", "TC_LOSS_FIXED_DELAY_MS": "40"}
+                )
+            else:
+                environment.pop("TC_LOSS_FIXED_BW_MBIT", None)
+                environment.pop("TC_LOSS_FIXED_DELAY_MS", None)
+            result = subprocess.run(
+                ["bash", str(MININET_DIR / "tc_loss_steps.sh"), str(profile)],
                 cwd=ROOT,
                 env=environment,
                 text=True,

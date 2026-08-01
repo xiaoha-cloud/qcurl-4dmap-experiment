@@ -119,6 +119,10 @@ class CleanEvaluatorPresetTest(unittest.TestCase):
         self.assertIn("recovery", delay.condition)
         self.assertEqual(loss.role, "recovery")
         self.assertIn("recovery", loss.condition)
+        self.assertEqual(
+            clean.clean_windows("loss_clean")[2].condition,
+            "stable 0.5% configured loss",
+        )
 
     def test_historical_window_constants_are_unchanged(self) -> None:
         self.assertEqual(delay_loss_eval.EVAL_WINDOWS, [
