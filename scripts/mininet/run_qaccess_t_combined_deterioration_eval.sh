@@ -288,7 +288,7 @@ check_clean_configuration_only() {
   elif [[ "$PROFILE_KIND" == "delay" ]]; then
     echo "[configuration] qdisc_hierarchy=root_tbf_1_to_child_netem_10 fixed_bw_mbit=$TC_DELAY_FIXED_BW_MBIT fixed_loss_percent=$TC_DELAY_FIXED_LOSS_PERCENT"
   elif [[ "$PROFILE_KIND" == "loss" ]]; then
-    echo "[configuration] qdisc_hierarchy=root_tbf_1_to_child_netem_10 fixed_bw_mbit=$TC_LOSS_FIXED_BW_MBIT fixed_delay_ms=$TC_LOSS_FIXED_DELAY_MS dynamic_loss_percent=0_to_0.5_to_0"
+    echo "[configuration] qdisc_hierarchy=root_tbf_1_to_child_netem_10 fixed_bw_mbit=$TC_LOSS_FIXED_BW_MBIT fixed_delay_ms=$TC_LOSS_FIXED_DELAY_MS dynamic_loss_profile=metadata_driven"
   fi
   validate_profile
   echo "[configuration] gate_policy=$GATE_POLICY objective=$GATE_OBJECTIVE trigger_mode=$TRIGGER_MODE gate_mode=$GATE_MODE min_delta_gain_bps=$GATE_BPS min_relative_gain=$MIN_RELATIVE_GAIN min_objective_improvement=$MIN_OBJECTIVE_IMPROVEMENT min_objective_relative_improvement=$MIN_OBJECTIVE_RELATIVE_IMPROVEMENT"

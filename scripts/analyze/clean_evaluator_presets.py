@@ -46,9 +46,9 @@ CLEAN_PRESETS: dict[str, dict[str, Any]] = {
         "primary_metric": "loss_risk_or_loss",
         "conditions": (
             "stable 0% configured loss",
-            "response to 0 -> 0.5% configured loss",
-            "stable 0.5% configured loss",
-            "response to 0.5 -> 0% configured loss",
+            "response to 0 -> 1% configured loss",
+            "stable 1% configured loss",
+            "response to 1 -> 0% configured loss",
             "recovery 0% configured loss",
             "full run",
         ),

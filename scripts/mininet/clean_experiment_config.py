@@ -19,7 +19,7 @@ CLEAN_PATH = {"bandwidth_mbps": 20, "delay_ms": 40, "loss_percent": 0}
 EXPECTED_PROFILES: dict[str, tuple[list[int], list[int | float]]] = {
     "bandwidth": ([0, 50, 100], [20, 30, 10]),
     "delay": ([0, 50, 100], [40, 80, 40]),
-    "loss": ([0, 50, 100], [0, 0.5, 0]),
+    "loss": ([0, 50, 100], [0, 1, 0]),
 }
 
 
