@@ -29,7 +29,7 @@ from mp_topo import _experiment_exit_status, scenario_link_kwargs  # noqa: E402
 PROFILES = {
     "bandwidth": MININET_DIR / "bw_profile.clean_20_30_10_200s.env",
     "delay": MININET_DIR / "delay_profile.clean_40_80_40_200s.env",
-    "loss": MININET_DIR / "loss_profile.clean_0_1_0_200s.env",
+    "loss": MININET_DIR / "loss_profile.clean_0_0p5_0_200s.env",
 }
 HISTORICAL_SHA256 = {
     "bw_profile.fig7_200s.env": "3d569c4a7dd42818f8739a15cf30f4515e6116ffb075e474047f67fd4174727a",
@@ -62,7 +62,7 @@ class CleanExperimentConfigTests(unittest.TestCase):
         expected = {
             "bandwidth": [20, 30, 10],
             "delay": [40, 80, 40],
-            "loss": [0, 1, 0],
+            "loss": [0, 0.5, 0],
         }
         for kind, path in PROFILES.items():
             with self.subTest(kind=kind):
@@ -73,8 +73,8 @@ class CleanExperimentConfigTests(unittest.TestCase):
 
     def test_loss_values_are_tc_percentages(self) -> None:
         parsed = parse_profile(PROFILES["loss"], "loss")
-        self.assertEqual(parsed["tc_values"], ["0%", "1%", "0%"])
-        self.assertEqual(format_loss_percent(1), "1%")
+        self.assertEqual(parsed["tc_values"], ["0%", "0.5%", "0%"])
+        self.assertEqual(format_loss_percent(0.5), "0.5%")
         self.assertEqual(format_loss_percent(0.01), "0.01%")
 
     def test_incorrect_interface_is_rejected(self) -> None:
