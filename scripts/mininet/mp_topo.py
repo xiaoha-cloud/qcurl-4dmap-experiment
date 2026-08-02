@@ -77,14 +77,14 @@ TC_BW_SCRIPT = os.path.join(MININET_DIR, "tc_bw_steps.sh")
 # Static TCLink presets: path A = h1–s1–h2 (10.0.1.0/24), path B = h1–s2–h2 (10.0.2.0/24).
 # Each path: (bw Mbps, delay string, loss %). Independent of 4D-MAP utility-mode selection.
 SCENARIOS = {
-    # Paper Fig.7-like baseline:
-    #   Link1(path_a): 20Mbps, 40ms, 0%
-    #   Link2(path_b): 20Mbps, 20ms, 0.001%
+    # Clean loss validation baseline:
+    #   Link1(path_a): 20Mbps, 0ms, 0%
+    #   Link2(path_b): 20Mbps, 0ms, 0%
     # Combine with dynamic TBF on h2-eth1 (server egress) + bw_profile.fig7_200s.env so
     # pull (h2→h1) media is shaped; h1-eth1 egress would only limit ACKs, not goodput.
     "fig7": {
-        "path_a": (20, "40ms", 0),
-        "path_b": (20, "20ms", 0.001),
+        "path_a": (20, "0ms", 0),
+        "path_b": (20, "0ms", 0),
     },
     # Fig.8-style combined deterioration (heterogeneous paths):
     #   Path A: 20 Mbps, 40 ms, 0%
