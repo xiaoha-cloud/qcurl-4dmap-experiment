@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -373,11 +374,34 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
     return pd.DataFrame(rows)
 
 
+def _loss_span_from_tc_logs(session: Path) -> tuple[float, float] | None:
+    steps: list[tuple[float, float]] = []
+    pattern = re.compile(r"profile_step\[\d+\] at=([0-9.]+)s loss=([0-9.]+)%")
+    for log_path in sorted(session.glob("*/logs/tc_loss_*.log")):
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = pattern.search(line)
+            if match:
+                steps.append((float(match.group(1)), float(match.group(2))))
+        if steps:
+            break
+    if len(steps) < 2:
+        return None
+    steps = sorted(steps)
+    for idx, (start, loss_pct) in enumerate(steps):
+        if loss_pct <= 0:
+            continue
+        end = steps[idx + 1][0] if idx + 1 < len(steps) else start
+        if end > start:
+            return start, end
+    return None
+
+
 def _plot_timeseries(
     throughput: pd.DataFrame,
     delay: pd.DataFrame,
     out: Path,
     prefix: str,
+    impairment_span: tuple[float, float] | None = None,
 ) -> None:
     if throughput.empty and delay.empty:
         return
@@ -414,8 +438,9 @@ def _plot_timeseries(
         axes[2].set_ylabel("Path B OWD (ms)")
     axes[2].set_xlabel("Time (s)")
     axes[2].grid(alpha=0.25)
+    span = impairment_span or ((90.0, 150.0) if prefix == "delay" else (90.0, 100.0))
     for axis in axes:
-        axis.axvspan(90, 150 if prefix == "delay" else 100, color="tab:red", alpha=0.08)
+        axis.axvspan(span[0], span[1], color="tab:red", alpha=0.08)
     fig.tight_layout()
     fig.savefig(out / f"{prefix}_throughput_delay_over_time.png", dpi=180)
     plt.close(fig)
@@ -633,7 +658,8 @@ def main() -> None:
     dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
-    _plot_timeseries(df_wire, df_delay, out, prefix)
+    impairment_span = _loss_span_from_tc_logs(session) if args.preset == "loss" else None
+    _plot_timeseries(df_wire, df_delay, out, prefix, impairment_span)
 
     metadata_path = session / "experiment_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
