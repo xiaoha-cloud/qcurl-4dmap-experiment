@@ -924,18 +924,7 @@ def run_experiment(net, args):
         _log("pcap", "KEEP_PCAP=1: retaining pcaps")
 
     if save_logs:
-        combined_log_path = os.path.join(logs_dir, f"combined_{run_id}.log")
-        combined_inputs = [
-            ("SERVER", server_log_path),
-            ("PULL", pull_log_path),
-            ("PUSH", push_log_path),
-            ("TCPDUMP_PATH_A", tcpdump_a_log_path),
-            ("TCPDUMP_PATH_B", tcpdump_b_log_path),
-        ]
-        if tc_log_path and os.path.isfile(tc_log_path):
-            combined_inputs.append(("TC", tc_log_path))
-        _write_combined_log(combined_log_path, combined_inputs)
-        _log("exp", f"combined log -> {combined_log_path}")
+        _log("exp", "combined log disabled; role logs are retained separately")
     elif tc_log_path and os.path.isfile(tc_log_path):
         _log("exp", f"tc deterioration log -> {tc_log_path}")
     if timeline_path and os.path.isfile(timeline_path):
