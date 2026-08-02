@@ -644,15 +644,18 @@ def _plot_timeseries(
     axes[1].legend(ncol=2, fontsize=8)
 
     if prefix == "loss":
-        if not loss_tc.empty and loss_tc["tc_loss_rate"].notna().any():
+        if not loss_tc.empty and "tc_dropped_delta" in loss_tc.columns and loss_tc["tc_dropped_delta"].notna().any():
             for method, group in loss_tc.groupby("method"):
                 style = line_styles.get(f"{method}_total", {"label": method})
+                group = group.sort_values("time_s").copy()
+                group["tc_dropped_cumulative"] = group["tc_dropped_delta"].fillna(0).cumsum()
                 axes[2].plot(
-                    group["time_s"], group["tc_loss_rate"],
-                    label=f"{method_labels.get(method, method)} Path B tc loss rate",
+                    group["time_s"], group["tc_dropped_cumulative"],
+                    label=f"{method_labels.get(method, method)} Path B cumulative dropped packets",
                     linewidth=1.5, color=style.get("color"),
                 )
-            axes[2].set_ylabel("Path B tc loss rate")
+            axes[2].set_ylabel("Path B dropped packets")
+            axes[2].set_title("Path B cumulative tc-dropped packets over time")
             axes[2].legend()
         elif not loss_monitor.empty and loss_monitor["path_b_monitor_loss_mean"].notna().any():
             for method, group in loss_monitor.groupby("method"):
@@ -703,8 +706,8 @@ def _plot_timeseries(
     for axis in axes:
         axis.axvspan(span[0], span[1], color="tab:red", alpha=0.08)
     fig.tight_layout()
-    if prefix == "loss" and not loss_tc.empty and loss_tc["tc_loss_rate"].notna().any():
-        plot_name = f"{prefix}_throughput_tc_loss_over_time.png"
+    if prefix == "loss" and not loss_tc.empty and "tc_dropped_delta" in loss_tc.columns and loss_tc["tc_dropped_delta"].notna().any():
+        plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
     else:
         plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
@@ -1000,8 +1003,8 @@ def main() -> None:
     print(f"Recovery times:  {out / f'{prefix}_recovery_times.csv'}")
     print(f"Secondary TP:    {out / f'{prefix}_secondary_throughput_windows.csv'}")
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
-    if prefix == "loss" and not df_loss_tc.empty and df_loss_tc["tc_loss_rate"].notna().any():
-        plot_name = f"{prefix}_throughput_tc_loss_over_time.png"
+    if prefix == "loss" and not df_loss_tc.empty and "tc_dropped_delta" in df_loss_tc.columns and df_loss_tc["tc_dropped_delta"].notna().any():
+        plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
     else:
         plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
     print(f"Time-series plot:{out / plot_name}")
