@@ -166,6 +166,19 @@ def resolve_repo_path(path):
     return os.path.join(ROOT, path)
 
 
+def _iface_for_profile(prof_path: str) -> str:
+    """Return IFACE= from a tc profile, or an empty string if unavailable."""
+    try:
+        with open(prof_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.split("#", 1)[0].strip()
+                if line.startswith("IFACE="):
+                    return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return ""
+
+
 def _tc_bw_host_for_profile(prof_path: str) -> str:
     """
     Mininet host on which to run ``tc_bw_steps.sh``: ``IFACE=`` in the profile must
@@ -365,6 +378,11 @@ def run_experiment(net, args):
     tcpdump_b = None
     tcpdump_a_log = None
     tcpdump_b_log = None
+    tc_qdisc_proc = None
+    tc_qdisc_log = None
+    tc_qdisc_log_path = None
+    tc_qdisc_iface = ""
+    tc_qdisc_node = ""
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
 
@@ -536,6 +554,8 @@ def run_experiment(net, args):
         _log("tc", f"starting loss steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+        tc_qdisc_iface = _iface_for_profile(prof_path)
+        tc_qdisc_node = tc_node
     elif deterioration_prof:
         prof_path = expand_user_path(deterioration_prof)
         if not os.path.isfile(prof_path):
@@ -566,6 +586,29 @@ def run_experiment(net, args):
             profile=prof_path,
         )
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+
+    if loss_prof and tc_qdisc_iface and tc_qdisc_node:
+        tc_qdisc_log_path = os.path.join(logs_dir, f"tc_qdisc_stats_pathB_{run_id}.log")
+        tc_qdisc_log = _open_log_file(tc_qdisc_log_path, save_logs)
+        qdisc_cmd = (
+            "while true; do "
+            "date +%s.%N; "
+            f"tc -s -d qdisc show dev {shlex.quote(tc_qdisc_iface)}; "
+            "sleep 1; "
+            "done"
+        )
+        tc_qdisc_host = net.get(tc_qdisc_node)
+        _log("tc", f"starting qdisc sampler on {tc_qdisc_node}:{tc_qdisc_iface} -> {tc_qdisc_log_path}")
+        _append_timeline(
+            timeline_path,
+            "tc_qdisc_sampler_start",
+            run_id=run_id,
+            run_label=run_label or "",
+            tc_node=tc_qdisc_node,
+            iface=tc_qdisc_iface,
+            tc_qdisc_log=tc_qdisc_log_path,
+        )
+        tc_qdisc_proc = tc_qdisc_host.popen(qdisc_cmd, shell=True, stdout=tc_qdisc_log, stderr=tc_qdisc_log)
 
     iperf_procs = []
     iperf_aux_files = []
@@ -801,6 +844,8 @@ def run_experiment(net, args):
     procs = list(iperf_procs) + [push_proc, pull_proc, server_proc]
     if tc_proc is not None:
         procs.append(tc_proc)
+    if tc_qdisc_proc is not None:
+        procs.append(tc_qdisc_proc)
     for proc in procs:
         try:
             if proc.poll() is None:
@@ -827,6 +872,9 @@ def run_experiment(net, args):
     if tc_log_f is not None:
         tc_log_f.flush()
         tc_log_f.close()
+    if tc_qdisc_log is not None:
+        tc_qdisc_log.flush()
+        tc_qdisc_log.close()
     for f in [tcpdump_a_log, tcpdump_b_log]:
         if f is not None:
             try:
@@ -937,6 +985,8 @@ def run_experiment(net, args):
         _log("exp", f"grep '[utility]'        {pull_log_path} | head -30")
         if tc_log_path:
             _log("exp", f"tc timeline log: {tc_log_path}")
+        if tc_qdisc_log_path:
+            _log("exp", f"tc qdisc sampler log: {tc_qdisc_log_path}")
 
 
 def main():
