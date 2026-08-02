@@ -282,7 +282,7 @@ def _recovery_time_s(
 def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.DataFrame:
     columns = [
         "method", "time_s", "owd_ms_mean", "owd_ms_p95",
-        "rtt_ms_mean", "rtt_ms_p95", "jitter_ms_mean",
+        "rtt_ms_mean", "rtt_ms_p95", "rtt_latest_ms_mean", "rtt_latest_ms_p95", "jitter_ms_mean",
     ]
     pieces: list[pd.DataFrame] = []
     if not util.empty and "owd_ms" in util.columns:
@@ -295,16 +295,19 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
                 u.groupby("time_s", as_index=False)["owd_ms"]
                 .agg(owd_ms_mean="mean", owd_ms_p95=lambda s: s.quantile(0.95))
             )
-    if not mon.empty and "rtt_smoothed_ms" in mon.columns:
+    if not mon.empty and ("rtt_smoothed_ms" in mon.columns or "rtt_latest_ms" in mon.columns):
         m = mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon.copy()
         m = _path_b_rows(m)
         if not m.empty:
             m = m.copy()
             m["time_s"] = pd.to_numeric(m["time_s"], errors="coerce").floordiv(1)
-            agg: dict[str, object] = {
-                "rtt_ms_mean": ("rtt_smoothed_ms", "mean"),
-                "rtt_ms_p95": ("rtt_smoothed_ms", lambda s: s.quantile(0.95)),
-            }
+            agg: dict[str, object] = {}
+            if "rtt_smoothed_ms" in m.columns:
+                agg["rtt_ms_mean"] = ("rtt_smoothed_ms", "mean")
+                agg["rtt_ms_p95"] = ("rtt_smoothed_ms", lambda s: s.quantile(0.95))
+            if "rtt_latest_ms" in m.columns:
+                agg["rtt_latest_ms_mean"] = ("rtt_latest_ms", "mean")
+                agg["rtt_latest_ms_p95"] = ("rtt_latest_ms", lambda s: s.quantile(0.95))
             if "rtt_mean_dev_ms" in m.columns:
                 agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
             pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
@@ -321,6 +324,130 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
     return result[columns].sort_values("time_s").reset_index(drop=True)
 
 
+_RE_RETRANS_BYTES = re.compile(
+    r"(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}).*?\[m\]retransBytes:(?P<bytes>[^\s]+)"
+)
+
+
+def _hms_to_seconds(time_str: str) -> int:
+    h, m, sec = map(int, time_str.split(":"))
+    return h * 3600 + m * 60 + sec
+
+
+def _bytes_value(value: str) -> float:
+    value = value.rstrip("/s")
+    if value.endswith("B"):
+        value = value[:-1]
+    try:
+        return float(value)
+    except ValueError:
+        return float("nan")
+
+
+def _parse_retrans_log(path: Path, method: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    t0: int | None = None
+    last_path: int | None = None
+    monitor_head = re.compile(
+        r"(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}).*?\[m\]monitor path=(?P<path>\d+)"
+    )
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            monitor_match = monitor_head.search(line)
+            if monitor_match:
+                ts = _hms_to_seconds(monitor_match["time"])
+                if t0 is None:
+                    t0 = ts
+                last_path = int(monitor_match["path"])
+                continue
+
+            retrans_match = _RE_RETRANS_BYTES.search(line)
+            if retrans_match and last_path is not None:
+                ts = _hms_to_seconds(retrans_match["time"])
+                if t0 is None:
+                    t0 = ts
+                rows.append({
+                    "method": method,
+                    "time_s": float(ts - t0),
+                    "path": last_path,
+                    "retrans_bytes_total": _bytes_value(retrans_match["bytes"]),
+                })
+    return pd.DataFrame(rows)
+
+
+def _per_second_retrans_delta(run_dir: Path, method: str) -> pd.DataFrame:
+    columns = ["method", "time_s", "path_b_retrans_bytes_delta_sum", "n_samples"]
+    best = pd.DataFrame()
+    best_score = -1
+    for candidate in _metric_log_candidates(run_dir):
+        parsed = _parse_retrans_log(candidate, method)
+        score = len(parsed)
+        if score > best_score:
+            best = parsed
+            best_score = score
+    if best.empty:
+        return pd.DataFrame(columns=columns)
+
+    path_b = _path_b_rows(best)
+    if path_b.empty:
+        return pd.DataFrame(columns=columns)
+
+    path_b = path_b.copy().sort_values("time_s")
+    path_b["time_s"] = pd.to_numeric(path_b["time_s"], errors="coerce").floordiv(1)
+    path_b["retrans_bytes_total"] = pd.to_numeric(path_b["retrans_bytes_total"], errors="coerce")
+    path_b = path_b.dropna(subset=["time_s", "retrans_bytes_total"])
+    if path_b.empty:
+        return pd.DataFrame(columns=columns)
+
+    # retransBytes is cumulative in the raw log. Convert it to positive per-sample deltas,
+    # then sum deltas into one-second bins.
+    path_b["retrans_delta"] = path_b["retrans_bytes_total"].diff()
+    path_b.loc[path_b["retrans_delta"] < 0, "retrans_delta"] = 0
+    path_b["retrans_delta"] = path_b["retrans_delta"].fillna(0)
+    result = (
+        path_b.groupby("time_s", as_index=False)["retrans_delta"]
+        .agg(path_b_retrans_bytes_delta_sum="sum", n_samples="count")
+        .sort_values("time_s")
+        .reset_index(drop=True)
+    )
+    result.insert(0, "method", method)
+    return result[columns]
+
+
+def _per_second_loss_monitor(mon: pd.DataFrame, method: str) -> pd.DataFrame:
+    columns = [
+        "method", "time_s", "path_b_monitor_loss_mean",
+        "path_b_monitor_loss_p95", "n_samples",
+    ]
+    if mon.empty or "loss" not in mon.columns:
+        return pd.DataFrame(columns=columns)
+
+    m = mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon.copy()
+    m = _path_b_rows(m)
+    if m.empty or "time_s" not in m.columns:
+        return pd.DataFrame(columns=columns)
+
+    m = m.copy()
+    m["time_s"] = pd.to_numeric(m["time_s"], errors="coerce").floordiv(1)
+    m["loss"] = pd.to_numeric(m["loss"], errors="coerce")
+    m = m.dropna(subset=["time_s", "loss"])
+    if m.empty:
+        return pd.DataFrame(columns=columns)
+
+    result = (
+        m.groupby("time_s", as_index=False)["loss"]
+        .agg(
+            path_b_monitor_loss_mean="mean",
+            path_b_monitor_loss_p95=lambda series: series.quantile(0.95),
+            n_samples="count",
+        )
+        .sort_values("time_s")
+        .reset_index(drop=True)
+    )
+    result.insert(0, "method", method)
+    return result[columns]
+
+
 def _pct_change(baseline: float, dynamic: float, higher_is_better: bool) -> float:
     if not math.isfinite(baseline) or not math.isfinite(dynamic) or baseline == 0:
         return float("nan")
@@ -334,6 +461,8 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
         "owd_ms_p95": False,
         "rtt_ms_mean": False,
         "rtt_ms_p95": False,
+        "rtt_latest_ms_mean": False,
+        "rtt_latest_ms_p95": False,
         "jitter_ms_mean": False,
         "secondary_total_quic_wire_mbps_mean": True,
         "secondary_path_a_quic_wire_mbps_mean": True,
@@ -399,50 +528,113 @@ def _loss_span_from_tc_logs(session: Path) -> tuple[float, float] | None:
 def _plot_timeseries(
     throughput: pd.DataFrame,
     delay: pd.DataFrame,
+    loss_monitor: pd.DataFrame,
+    loss_retrans: pd.DataFrame,
     out: Path,
     prefix: str,
     impairment_span: tuple[float, float] | None = None,
 ) -> None:
-    if throughput.empty and delay.empty:
+    if throughput.empty and delay.empty and loss_monitor.empty and loss_retrans.empty:
         return
+
+    method_labels = {"baseline": "Baseline", "loss_qaccess_l": "Q-Access-L"}
+    line_styles = {
+        "baseline_total": {"color": "#1f77b4", "label": "Baseline total"},
+        "loss_qaccess_l_total": {"color": "#ff7f0e", "label": "Q-Access-L total"},
+        "baseline_path_a": {"color": "#2ca02c", "label": "Baseline Path A"},
+        "baseline_path_b": {"color": "#d62728", "label": "Baseline Path B", "linestyle": "--"},
+        "loss_qaccess_l_path_a": {"color": "#9467bd", "label": "Q-Access-L Path A"},
+        "loss_qaccess_l_path_b": {"color": "#8c564b", "label": "Q-Access-L Path B", "linestyle": "--"},
+    }
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
     for method, group in throughput.groupby("method"):
-        axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], label=method, linewidth=1.5)
+        style = line_styles.get(f"{method}_total", {"label": method})
+        axes[0].plot(group["time_s"], group["total_quic_wire_mbps"], linewidth=1.5, **style)
     axes[0].set_ylabel("Throughput (Mbps)")
     axes[0].set_title("Total throughput from all captured frames")
     axes[0].grid(alpha=0.25)
     axes[0].legend()
 
     for method, group in throughput.groupby("method"):
-        axes[1].plot(
-            group["time_s"], group["path_a_quic_wire_mbps"],
-            label=f"{method} Path A", linewidth=1.1,
-        )
-        axes[1].plot(
-            group["time_s"], group["path_b_quic_wire_mbps"],
-            label=f"{method} Path B", linewidth=1.1, linestyle="--",
-        )
+        style_a = line_styles.get(f"{method}_path_a", {"label": f"{method_labels.get(method, method)} Path A"})
+        style_b = line_styles.get(f"{method}_path_b", {"label": f"{method_labels.get(method, method)} Path B", "linestyle": "--"})
+        axes[1].plot(group["time_s"], group["path_a_quic_wire_mbps"], linewidth=1.1, **style_a)
+        axes[1].plot(group["time_s"], group["path_b_quic_wire_mbps"], linewidth=1.1, **style_b)
     axes[1].set_ylabel("Per-path (Mbps)")
     axes[1].grid(alpha=0.25)
     axes[1].legend(ncol=2, fontsize=8)
 
-    if not delay.empty and delay["owd_ms_mean"].notna().any():
+    if prefix == "loss":
+        if not loss_monitor.empty and loss_monitor["path_b_monitor_loss_mean"].notna().any():
+            for method, group in loss_monitor.groupby("method"):
+                style = line_styles.get(f"{method}_total", {"label": method})
+                axes[2].plot(
+                    group["time_s"], group["path_b_monitor_loss_mean"],
+                    label=f"{method_labels.get(method, method)} Path B monitor loss",
+                    linewidth=1.5, color=style.get("color"),
+                )
+            axes[2].set_ylabel("Path B monitor loss")
+            axes[2].legend()
+        else:
+            axes[2].text(0.5, 0.5, "No Path B monitor loss samples found",
+                         ha="center", va="center", transform=axes[2].transAxes)
+            axes[2].set_ylabel("Path B monitor loss")
+    elif not delay.empty and delay["owd_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
             axes[2].plot(group["time_s"], group["owd_ms_mean"], label=method, linewidth=1.5)
         axes[2].set_ylabel("Path B OWD (ms)")
         axes[2].legend()
+    elif not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
+        for method, group in delay.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            axes[2].plot(
+                group["time_s"], group["rtt_latest_ms_mean"],
+                label=f"{method_labels.get(method, method)} Path B raw RTT", linewidth=1.5,
+                color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B raw RTT latest (ms)")
+        axes[2].legend()
+    elif not delay.empty and delay["rtt_ms_mean"].notna().any():
+        for method, group in delay.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            axes[2].plot(
+                group["time_s"], group["rtt_ms_mean"],
+                label=f"{method_labels.get(method, method)} Path B smoothed RTT", linewidth=1.5,
+                color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B smoothed RTT (ms)")
+        axes[2].legend()
     else:
-        axes[2].text(0.5, 0.5, "No OWD samples found", ha="center", va="center",
+        axes[2].text(0.5, 0.5, "No OWD/RTT samples found", ha="center", va="center",
                      transform=axes[2].transAxes)
-        axes[2].set_ylabel("Path B OWD (ms)")
+        axes[2].set_ylabel("Path B delay proxy (ms)")
     axes[2].set_xlabel("Time (s)")
     axes[2].grid(alpha=0.25)
     span = impairment_span or ((90.0, 150.0) if prefix == "delay" else (90.0, 100.0))
     for axis in axes:
         axis.axvspan(span[0], span[1], color="tab:red", alpha=0.08)
     fig.tight_layout()
-    fig.savefig(out / f"{prefix}_throughput_delay_over_time.png", dpi=180)
+    plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
+    fig.savefig(out / plot_name, dpi=180)
+
+    if prefix == "loss" and not loss_retrans.empty and loss_retrans["path_b_retrans_bytes_delta_sum"].notna().any():
+        axes[2].clear()
+        for method, group in loss_retrans.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            axes[2].plot(
+                group["time_s"], group["path_b_retrans_bytes_delta_sum"],
+                label=f"{method_labels.get(method, method)} Path B retransBytes delta",
+                linewidth=1.5, color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B retransBytes delta")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].grid(alpha=0.25)
+        axes[2].legend()
+        axes[2].axvspan(span[0], span[1], color="tab:red", alpha=0.08)
+        fig.tight_layout()
+        fig.savefig(out / f"{prefix}_throughput_retrans_over_time.png", dpi=180)
+
     plt.close(fig)
 
 
@@ -464,6 +656,8 @@ def _delay_window_metrics(
         "owd_ms_p95": _p95(ub["owd_ms"]) if "owd_ms" in ub.columns else float("nan"),
         "rtt_ms_mean": float(mb["rtt_smoothed_ms"].mean()) if "rtt_smoothed_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_ms_p95": _p95(mb["rtt_smoothed_ms"]) if "rtt_smoothed_ms" in mb.columns else float("nan"),
+        "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
+        "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
         "path_b_share_pct_mean": float(w["path_b_share_pct"].mean()) if "path_b_share_pct" in w.columns and len(w) else float("nan"),
         "secondary_total_quic_wire_mbps_mean": float(w["total_quic_wire_mbps"].mean()) if len(w) else float("nan"),
@@ -525,7 +719,7 @@ def analyze_run(
     preset: str,
     full_hi: float,
     recovery_start_s: float,
-) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     util, mon = load_pull_frames(run_dir)
     wire = load_wire_timeseries(run_dir)
     samples = load_runtime_samples(run_dir)
@@ -533,7 +727,9 @@ def analyze_run(
     if not wire.empty:
         wire = wire.copy()
         wire.insert(0, "method", method)
-    delay_timeseries = _per_second_delay(util, mon, method)
+    delay_timeseries = _per_second_delay(util, mon, method) if preset == "delay" else pd.DataFrame()
+    loss_monitor_timeseries = _per_second_loss_monitor(mon, method) if preset == "loss" else pd.DataFrame()
+    loss_retrans_timeseries = _per_second_retrans_delta(run_dir, method) if preset == "loss" else pd.DataFrame()
 
     recovery: dict[str, float] = {}
     if preset == "delay":
@@ -584,7 +780,7 @@ def analyze_run(
             **metrics,
         })
 
-    return pd.DataFrame(rows), recovery, wire, delay_timeseries
+    return pd.DataFrame(rows), recovery, wire, delay_timeseries, loss_monitor_timeseries, loss_retrans_timeseries
 
 
 def main() -> None:
@@ -618,12 +814,14 @@ def main() -> None:
     all_windows: list[pd.DataFrame] = []
     all_wire: list[pd.DataFrame] = []
     all_delay: list[pd.DataFrame] = []
+    all_loss_monitor: list[pd.DataFrame] = []
+    all_loss_retrans: list[pd.DataFrame] = []
     recovery_rows: list[dict] = []
     for method, rdir in runs.items():
         if not rdir.is_dir():
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
-        df, rec, wire, delay = analyze_run(
+        df, rec, wire, delay, loss_monitor, loss_retrans = analyze_run(
             rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
         )
         if not df.empty:
@@ -632,6 +830,10 @@ def main() -> None:
             all_wire.append(wire)
         if not delay.empty:
             all_delay.append(delay)
+        if not loss_monitor.empty:
+            all_loss_monitor.append(loss_monitor)
+        if not loss_retrans.empty:
+            all_loss_retrans.append(loss_retrans)
         recovery_rows.append({"method": method, "run_dir": str(rdir), **rec})
 
     if not all_windows:
@@ -642,12 +844,18 @@ def main() -> None:
     df_win = pd.concat(all_windows, ignore_index=True)
     df_wire = pd.concat(all_wire, ignore_index=True) if all_wire else pd.DataFrame()
     df_delay = pd.concat(all_delay, ignore_index=True) if all_delay else pd.DataFrame()
+    df_loss_monitor = pd.concat(all_loss_monitor, ignore_index=True) if all_loss_monitor else pd.DataFrame()
+    df_loss_retrans = pd.concat(all_loss_retrans, ignore_index=True) if all_loss_retrans else pd.DataFrame()
     df_win.to_csv(out / f"{prefix}_primary_metrics_windows.csv", index=False)
     pd.DataFrame(recovery_rows).to_csv(out / f"{prefix}_recovery_times.csv", index=False)
     if not df_wire.empty:
         df_wire.to_csv(out / f"{prefix}_throughput_timeseries.csv", index=False)
     if not df_delay.empty:
         df_delay.to_csv(out / f"{prefix}_delay_timeseries.csv", index=False)
+    if not df_loss_monitor.empty:
+        df_loss_monitor.to_csv(out / f"{prefix}_monitor_timeseries.csv", index=False)
+    if not df_loss_retrans.empty:
+        df_loss_retrans.to_csv(out / f"{prefix}_retrans_timeseries.csv", index=False)
 
     # Secondary throughput table (explicitly labeled).
     sec_cols = [
@@ -659,7 +867,7 @@ def main() -> None:
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
     impairment_span = _loss_span_from_tc_logs(session) if args.preset == "loss" else None
-    _plot_timeseries(df_wire, df_delay, out, prefix, impairment_span)
+    _plot_timeseries(df_wire, df_delay, df_loss_monitor, df_loss_retrans, out, prefix, impairment_span)
 
     metadata_path = session / "experiment_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
@@ -671,7 +879,10 @@ def main() -> None:
     print(f"Recovery times:  {out / f'{prefix}_recovery_times.csv'}")
     print(f"Secondary TP:    {out / f'{prefix}_secondary_throughput_windows.csv'}")
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
-    print(f"Time-series plot:{out / f'{prefix}_throughput_delay_over_time.png'}")
+    plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
+    print(f"Time-series plot:{out / plot_name}")
+    if prefix == "loss":
+        print(f"Retrans plot:    {out / f'{prefix}_throughput_retrans_over_time.png'}")
     print(f"\nWorker execution mode recorded by runner: {execution_mode}")
     print("Evaluation is read-only and does not start or stop the worker.")
     print(df_win.to_string(index=False, float_format="%.3f"))
