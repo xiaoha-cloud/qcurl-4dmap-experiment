@@ -39,7 +39,7 @@ EVAL_WINDOWS = [
 
 PRESETS: dict[str, dict[str, object]] = {
     "delay": {
-        "title": "Delay-only (primary: Path B QUIC latest RTT/recovery)",
+        "title": "Delay-only (primary: Path B active-probe RTT/recovery)",
         "baseline_dir": "delay_baseline",
         "dynamic_dirs": ("delay_qaccess_d_dynamic", "delay_qaccess_dynamic"),
         "out_subdir": "delay_only_compare",
@@ -460,6 +460,69 @@ def load_tc_qdisc_timeseries(run_dir: Path, method: str) -> pd.DataFrame:
     return pd.concat(pieces, ignore_index=True).sort_values(["method", "time_s"]).reset_index(drop=True)
 
 
+_RE_PING_TS = re.compile(r"^(?P<ts>\d+\.\d+)$")
+_RE_PING_RTT = re.compile(r"\btime=(?P<rtt>[0-9.]+)\s*ms\b")
+
+
+def _parse_path_b_ping_log(path: Path, method: str) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    epoch0: float | None = None
+    current: dict[str, object] | None = None
+
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for raw in handle:
+            line = raw.strip()
+            ts_match = _RE_PING_TS.match(line)
+            if ts_match:
+                epoch = float(ts_match.group("ts"))
+                if epoch0 is None:
+                    epoch0 = epoch
+                current = {
+                    "method": method,
+                    "time_s": epoch - epoch0,
+                    "ping_src_iface": "",
+                    "ping_src_ip": "",
+                    "ping_dst_ip": "",
+                    "active_probe_rtt_ms": float("nan"),
+                    "active_probe_success": False,
+                }
+                rows.append(current)
+                continue
+
+            if current is None:
+                continue
+
+            if line.startswith("src_iface="):
+                meta = dict(part.split("=", 1) for part in line.split() if "=" in part)
+                current["ping_src_iface"] = meta.get("src_iface", "")
+                current["ping_src_ip"] = meta.get("src_ip", "")
+                current["ping_dst_ip"] = meta.get("dst_ip", "")
+                continue
+
+            rtt_match = _RE_PING_RTT.search(line)
+            if rtt_match:
+                current["active_probe_rtt_ms"] = float(rtt_match.group("rtt"))
+                current["active_probe_success"] = True
+
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("time_s").reset_index(drop=True)
+
+
+def load_path_b_ping_timeseries(run_dir: Path, method: str) -> pd.DataFrame:
+    pieces = [
+        _parse_path_b_ping_log(path, method)
+        for path in sorted((run_dir / "logs").glob("ping_rtt_pathB_*.log"))
+    ]
+    pieces = [piece for piece in pieces if not piece.empty]
+    if not pieces:
+        return pd.DataFrame(columns=[
+            "method", "time_s", "ping_src_iface", "ping_src_ip", "ping_dst_ip",
+            "active_probe_rtt_ms", "active_probe_success",
+        ])
+    return pd.concat(pieces, ignore_index=True).sort_values(["method", "time_s"]).reset_index(drop=True)
+
+
 _RE_RETRANS_BYTES = re.compile(
     r"(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2}).*?\[m\]retransBytes:(?P<bytes>[^\s]+)"
 )
@@ -687,6 +750,7 @@ def _delay_span_from_tc_logs(session: Path) -> tuple[float, float] | None:
 def _plot_timeseries(
     throughput: pd.DataFrame,
     delay: pd.DataFrame,
+    active_probe_rtt: pd.DataFrame,
     loss_monitor: pd.DataFrame,
     loss_retrans: pd.DataFrame,
     loss_tc: pd.DataFrame,
@@ -694,7 +758,7 @@ def _plot_timeseries(
     prefix: str,
     impairment_span: tuple[float, float] | None = None,
 ) -> None:
-    if throughput.empty and delay.empty and loss_monitor.empty and loss_retrans.empty and loss_tc.empty:
+    if throughput.empty and delay.empty and active_probe_rtt.empty and loss_monitor.empty and loss_retrans.empty and loss_tc.empty:
         return
 
     method_labels = {"baseline": "Baseline", "loss_qaccess_l": "Q-Access-L", "delay_qaccess_d": "Q-Access-D"}
@@ -756,6 +820,17 @@ def _plot_timeseries(
             axes[2].text(0.5, 0.5, "No Path B tc/monitor loss samples found",
                          ha="center", va="center", transform=axes[2].transAxes)
             axes[2].set_ylabel("Path B loss")
+    elif not active_probe_rtt.empty and active_probe_rtt["active_probe_rtt_ms"].notna().any():
+        for method, group in active_probe_rtt.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            axes[2].plot(
+                group["time_s"], group["active_probe_rtt_ms"],
+                label=f"{method_labels.get(method, method)} Path B active-probe RTT", linewidth=1.5,
+                color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B active-probe RTT (ms)")
+        axes[2].set_title("Path B active-probe RTT over time")
+        axes[2].legend()
     elif not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
@@ -789,11 +864,31 @@ def _plot_timeseries(
     fig.tight_layout()
     if prefix == "loss" and not loss_tc.empty and "tc_dropped_delta" in loss_tc.columns and loss_tc["tc_dropped_delta"].notna().any():
         plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
+    elif prefix == "delay" and not active_probe_rtt.empty and active_probe_rtt["active_probe_rtt_ms"].notna().any():
+        plot_name = f"{prefix}_throughput_active_probe_rtt_over_time.png"
     elif prefix == "delay":
-        plot_name = f"{prefix}_throughput_quic_rtt_over_time.png"
+        plot_name = f"{prefix}_throughput_quic_rtt_diagnostic_over_time.png"
     else:
         plot_name = f"{prefix}_throughput_loss_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
+
+    if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
+        axes[2].clear()
+        for method, group in delay.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            axes[2].plot(
+                group["time_s"], group["rtt_latest_ms_mean"],
+                label=f"{method_labels.get(method, method)} Path B QUIC latest RTT",
+                linewidth=1.5, color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B QUIC latest RTT (ms)")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].set_title("Path B QUIC latest RTT diagnostic")
+        axes[2].grid(alpha=0.25)
+        axes[2].legend()
+        axes[2].axvspan(span[0], span[1], color="tab:red", alpha=0.08)
+        fig.tight_layout()
+        fig.savefig(out / f"{prefix}_throughput_quic_rtt_diagnostic_over_time.png", dpi=180)
 
     if prefix == "loss" and not loss_monitor.empty and loss_monitor["path_b_monitor_loss_mean"].notna().any():
         axes[2].clear()
@@ -837,6 +932,7 @@ def _delay_window_metrics(
     mon: pd.DataFrame,
     wire: pd.DataFrame,
     tc_qdisc: pd.DataFrame,
+    active_probe_rtt: pd.DataFrame,
     lo: float,
     hi: float,
 ) -> dict:
@@ -844,6 +940,7 @@ def _delay_window_metrics(
     m = _window_mask(mon, lo, hi)
     w = _window_mask(wire, lo, hi)
     t = _window_mask(tc_qdisc, lo, hi)
+    p = _window_mask(active_probe_rtt, lo, hi)
     ub = _path_b_rows(u)
     mb = _path_b_rows(m)
 
@@ -855,6 +952,9 @@ def _delay_window_metrics(
         "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
+        "active_probe_rtt_ms_mean": float(p["active_probe_rtt_ms"].mean()) if "active_probe_rtt_ms" in p.columns and len(p) else float("nan"),
+        "active_probe_rtt_ms_p95": _p95(p["active_probe_rtt_ms"]) if "active_probe_rtt_ms" in p.columns else float("nan"),
+        "active_probe_success_fraction": float(p["active_probe_success"].mean()) if "active_probe_success" in p.columns and len(p) else float("nan"),
         "tc_configured_delay_ms_mean": float(t["tc_configured_delay_ms"].mean()) if "tc_configured_delay_ms" in t.columns and len(t) else float("nan"),
         "tc_configured_jitter_ms_mean": float(t["tc_configured_jitter_ms"].mean()) if "tc_configured_jitter_ms" in t.columns and len(t) else float("nan"),
         "tc_backlog_pkts_mean": float(t["tc_backlog_pkts"].mean()) if "tc_backlog_pkts" in t.columns and len(t) else float("nan"),
@@ -926,7 +1026,7 @@ def analyze_run(
     preset: str,
     full_hi: float,
     recovery_start_s: float,
-) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     util, mon = load_pull_frames(run_dir)
     wire = load_wire_timeseries(run_dir)
     samples = load_runtime_samples(run_dir)
@@ -938,6 +1038,7 @@ def analyze_run(
     loss_monitor_timeseries = _per_second_loss_monitor(mon, method) if preset == "loss" else pd.DataFrame()
     loss_retrans_timeseries = _per_second_retrans_delta(run_dir, method) if preset == "loss" else pd.DataFrame()
     loss_tc_timeseries = load_tc_qdisc_timeseries(run_dir, method) if preset in ("loss", "delay") else pd.DataFrame()
+    active_probe_rtt_timeseries = load_path_b_ping_timeseries(run_dir, method) if preset == "delay" else pd.DataFrame()
 
     recovery: dict[str, float] = {}
     if preset == "delay":
@@ -973,7 +1074,7 @@ def analyze_run(
         if preset == "delay":
             metrics = _delay_window_metrics(util.rename(columns={"t": "time_s"}) if "t" in util.columns else util,
                                             mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon,
-                                            wire, loss_tc_timeseries, lo, hi)
+                                            wire, loss_tc_timeseries, active_probe_rtt_timeseries, lo, hi)
         else:
             metrics = _loss_window_metrics(
                 util.rename(columns={"t": "time_s"}) if "t" in util.columns else util,
@@ -988,7 +1089,7 @@ def analyze_run(
             **metrics,
         })
 
-    return pd.DataFrame(rows), recovery, wire, delay_timeseries, loss_monitor_timeseries, loss_retrans_timeseries, loss_tc_timeseries
+    return pd.DataFrame(rows), recovery, wire, delay_timeseries, active_probe_rtt_timeseries, loss_monitor_timeseries, loss_retrans_timeseries, loss_tc_timeseries
 
 
 def main() -> None:
@@ -1022,6 +1123,7 @@ def main() -> None:
     all_windows: list[pd.DataFrame] = []
     all_wire: list[pd.DataFrame] = []
     all_delay: list[pd.DataFrame] = []
+    all_active_probe_rtt: list[pd.DataFrame] = []
     all_loss_monitor: list[pd.DataFrame] = []
     all_loss_retrans: list[pd.DataFrame] = []
     all_loss_tc: list[pd.DataFrame] = []
@@ -1030,7 +1132,7 @@ def main() -> None:
         if not rdir.is_dir():
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
-        df, rec, wire, delay, loss_monitor, loss_retrans, loss_tc = analyze_run(
+        df, rec, wire, delay, active_probe_rtt, loss_monitor, loss_retrans, loss_tc = analyze_run(
             rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
         )
         if not df.empty:
@@ -1039,6 +1141,8 @@ def main() -> None:
             all_wire.append(wire)
         if not delay.empty:
             all_delay.append(delay)
+        if not active_probe_rtt.empty:
+            all_active_probe_rtt.append(active_probe_rtt)
         if not loss_monitor.empty:
             all_loss_monitor.append(loss_monitor)
         if not loss_retrans.empty:
@@ -1055,6 +1159,7 @@ def main() -> None:
     df_win = pd.concat(all_windows, ignore_index=True)
     df_wire = pd.concat(all_wire, ignore_index=True) if all_wire else pd.DataFrame()
     df_delay = pd.concat(all_delay, ignore_index=True) if all_delay else pd.DataFrame()
+    df_active_probe_rtt = pd.concat(all_active_probe_rtt, ignore_index=True) if all_active_probe_rtt else pd.DataFrame()
     df_loss_monitor = pd.concat(all_loss_monitor, ignore_index=True) if all_loss_monitor else pd.DataFrame()
     df_loss_retrans = pd.concat(all_loss_retrans, ignore_index=True) if all_loss_retrans else pd.DataFrame()
     df_loss_tc = pd.concat(all_loss_tc, ignore_index=True) if all_loss_tc else pd.DataFrame()
@@ -1064,6 +1169,8 @@ def main() -> None:
         df_wire.to_csv(out / f"{prefix}_throughput_timeseries.csv", index=False)
     if not df_delay.empty:
         df_delay.to_csv(out / f"{prefix}_delay_timeseries.csv", index=False)
+    if not df_active_probe_rtt.empty:
+        df_active_probe_rtt.to_csv(out / f"{prefix}_active_probe_rtt_timeseries.csv", index=False)
     if not df_loss_monitor.empty:
         df_loss_monitor.to_csv(out / f"{prefix}_monitor_timeseries.csv", index=False)
     if not df_loss_retrans.empty:
@@ -1086,7 +1193,7 @@ def main() -> None:
         impairment_span = _delay_span_from_tc_logs(session)
     else:
         impairment_span = None
-    _plot_timeseries(df_wire, df_delay, df_loss_monitor, df_loss_retrans, df_loss_tc, out, prefix, impairment_span)
+    _plot_timeseries(df_wire, df_delay, df_active_probe_rtt, df_loss_monitor, df_loss_retrans, df_loss_tc, out, prefix, impairment_span)
 
     metadata_path = session / "experiment_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
@@ -1100,13 +1207,18 @@ def main() -> None:
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
     if prefix == "loss" and not df_loss_tc.empty and "tc_dropped_delta" in df_loss_tc.columns and df_loss_tc["tc_dropped_delta"].notna().any():
         plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
+    elif prefix == "delay" and not df_active_probe_rtt.empty and df_active_probe_rtt["active_probe_rtt_ms"].notna().any():
+        plot_name = f"{prefix}_throughput_active_probe_rtt_over_time.png"
     elif prefix == "delay":
-        plot_name = f"{prefix}_throughput_quic_rtt_over_time.png"
+        plot_name = f"{prefix}_throughput_quic_rtt_diagnostic_over_time.png"
     else:
         plot_name = f"{prefix}_throughput_loss_over_time.png"
     print(f"Time-series plot:{out / plot_name}")
     if prefix in ("loss", "delay") and not df_loss_tc.empty:
         print(f"TC qdisc CSV:    {out / f'{prefix}_tc_qdisc_timeseries.csv'}")
+    if prefix == "delay" and not df_active_probe_rtt.empty:
+        print(f"Active RTT CSV:  {out / f'{prefix}_active_probe_rtt_timeseries.csv'}")
+        print(f"QUIC RTT diag:   {out / f'{prefix}_throughput_quic_rtt_diagnostic_over_time.png'}")
     if prefix == "loss":
         print(f"Monitor plot:   {out / f'{prefix}_throughput_monitor_loss_over_time.png'}")
         print(f"Retrans plot:   {out / f'{prefix}_throughput_retrans_over_time.png'}")

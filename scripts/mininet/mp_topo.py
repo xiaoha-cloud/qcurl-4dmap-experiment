@@ -391,6 +391,9 @@ def run_experiment(net, args):
     tc_qdisc_iface = ""
     tc_qdisc_node = ""
     tc_qdisc_kind = ""
+    path_b_ping_proc = None
+    path_b_ping_log = None
+    path_b_ping_log_path = None
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
 
@@ -623,6 +626,32 @@ def run_experiment(net, args):
             profile_kind=tc_qdisc_kind,
         )
         tc_qdisc_proc = tc_qdisc_host.popen(qdisc_cmd, shell=True, stdout=tc_qdisc_log, stderr=tc_qdisc_log)
+
+    if tc_qdisc_kind == "delay":
+        path_b_ping_log_path = os.path.join(logs_dir, f"ping_rtt_pathB_{run_id}.log")
+        path_b_ping_log = _open_log_file(path_b_ping_log_path, save_logs)
+        ping_cmd = (
+            "while true; do "
+            "date +%s.%N; "
+            "echo src_iface=h1-eth1 src_ip=10.0.2.1 dst_ip=10.0.2.2 interval_s=1; "
+            "ping -I h1-eth1 -c 1 -W 1 10.0.2.2; "
+            "sleep 1; "
+            "done"
+        )
+        _log("ping", f"starting Path B active RTT sampler h1-eth1 -> 10.0.2.2: {path_b_ping_log_path}")
+        _append_timeline(
+            timeline_path,
+            "path_b_ping_rtt_sampler_start",
+            run_id=run_id,
+            run_label=run_label or "",
+            src_node="h1",
+            src_iface="h1-eth1",
+            src_ip="10.0.2.1",
+            dst_ip="10.0.2.2",
+            interval_s="1",
+            ping_rtt_log=path_b_ping_log_path,
+        )
+        path_b_ping_proc = h1.popen(ping_cmd, shell=True, stdout=path_b_ping_log, stderr=path_b_ping_log)
 
     iperf_procs = []
     iperf_aux_files = []
@@ -860,6 +889,8 @@ def run_experiment(net, args):
         procs.append(tc_proc)
     if tc_qdisc_proc is not None:
         procs.append(tc_qdisc_proc)
+    if path_b_ping_proc is not None:
+        procs.append(path_b_ping_proc)
     for proc in procs:
         try:
             if proc.poll() is None:
@@ -889,6 +920,9 @@ def run_experiment(net, args):
     if tc_qdisc_log is not None:
         tc_qdisc_log.flush()
         tc_qdisc_log.close()
+    if path_b_ping_log is not None:
+        path_b_ping_log.flush()
+        path_b_ping_log.close()
     for f in [tcpdump_a_log, tcpdump_b_log]:
         if f is not None:
             try:
@@ -1001,6 +1035,8 @@ def run_experiment(net, args):
             _log("exp", f"tc timeline log: {tc_log_path}")
         if tc_qdisc_log_path:
             _log("exp", f"tc qdisc sampler log: {tc_qdisc_log_path}")
+        if path_b_ping_log_path:
+            _log("exp", f"Path B active RTT sampler log: {path_b_ping_log_path}")
 
 
 def main():
