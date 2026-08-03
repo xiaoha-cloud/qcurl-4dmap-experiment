@@ -66,6 +66,7 @@ _RE_MONITOR = re.compile(
     r" rtt_min=(?P<rtt_min>[^\s]+)"
     r" rtt_latest=(?P<rtt_latest>[^\s]+)"
     r" rtt_mean_dev=(?P<rtt_mean_dev>[^\s]+)"
+    r"(?: rtt_sample_seq=(?P<rtt_sample_seq>[^\s]+))?"
     r" owd=(?P<owd>[^\s]+)"
     r" bw=(?P<bw>[^\s]+)"
     r" inflight=(?P<inflight>[^\s]+)"
@@ -200,6 +201,7 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                         "rtt_min_ms": _parse_go_duration(mm["rtt_min"]),
                         "rtt_latest_ms": _parse_go_duration(mm["rtt_latest"]),
                         "rtt_mean_dev_ms": _parse_go_duration(mm["rtt_mean_dev"]),
+                        "rtt_sample_seq": int(mm["rtt_sample_seq"]) if mm["rtt_sample_seq"] else float("nan"),
                         "bw_bytes": _parse_bytes(mm["bw"]),
                         "cwnd_full": _parse_bytes(mm["cwnd_full"]),
                         "cwnd_room": _parse_bytes(mm["cwnd_room"]),

@@ -30,6 +30,7 @@ type RTTStats struct {
 	latestRTT          time.Duration
 	smoothedRTT        time.Duration
 	meanDeviation      time.Duration
+	sampleCount        uint64
 
 	numMinRTTsamplesRemaining uint32
 
@@ -57,6 +58,9 @@ func (r *RTTStats) MinRTT() time.Duration { return r.minRTT }
 // LatestRTT returns the most recent rtt measurement.
 // May return Zero if no valid updates have occurred.
 func (r *RTTStats) LatestRTT() time.Duration { return r.latestRTT }
+
+// SampleCount returns the number of valid RTT samples applied to this path.
+func (r *RTTStats) SampleCount() uint64 { return r.sampleCount }
 
 // RecentMinRTT the minRTT since SampleNewRecentMinRtt has been called, or the
 // minRTT for the entire connection if SampleNewMinRtt was never called.
@@ -103,6 +107,7 @@ func (r *RTTStats) UpdateRTT(sendDelta, ackDelay time.Duration, now time.Time) {
 	if sample > ackDelay {
 		sample -= ackDelay
 	}
+	r.sampleCount++
 	r.latestRTT = sample
 	// First time call.
 	if r.smoothedRTT == 0 {
@@ -165,6 +170,7 @@ func (r *RTTStats) OnConnectionMigration() {
 	r.minRTT = 0
 	r.smoothedRTT = 0
 	r.meanDeviation = 0
+	r.sampleCount = 0
 	r.initialRTTus = initialRTTus
 	r.numMinRTTsamplesRemaining = 0
 	r.recentMinRTTwindow = utils.InfDuration

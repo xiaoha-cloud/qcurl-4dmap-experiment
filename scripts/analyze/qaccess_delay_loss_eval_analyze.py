@@ -57,10 +57,18 @@ PRESETS: dict[str, dict[str, object]] = {
 }
 
 
-def _p95(s: pd.Series) -> float:
-    if s.empty or s.isna().all():
-        return float("nan")
-    return float(s.quantile(0.95))
+def _series_with_gaps(df: pd.DataFrame, tcol: str, vcol: str) -> pd.DataFrame:
+    if df.empty or tcol not in df.columns or vcol not in df.columns:
+        return pd.DataFrame(columns=[tcol, vcol])
+    series = df[[tcol, vcol]].dropna().copy()
+    if series.empty:
+        return pd.DataFrame(columns=[tcol, vcol])
+    series[tcol] = pd.to_numeric(series[tcol], errors="coerce").astype("Int64")
+    series = series.dropna(subset=[tcol]).drop_duplicates(subset=[tcol], keep="last")
+    if series.empty:
+        return pd.DataFrame(columns=[tcol, vcol])
+    full_range = pd.DataFrame({tcol: range(int(series[tcol].min()), int(series[tcol].max()) + 1)})
+    return full_range.merge(series, on=tcol, how="left")
 
 
 def _pcap_bytes_by_second(pcap: Path, global_t0: float) -> dict[int, int]:
@@ -279,29 +287,31 @@ def _recovery_time_s(
     return float("nan")
 
 
-def _observed_latest_rtt_changes(mon: pd.DataFrame) -> pd.DataFrame:
-    """Return monitor rows where Path B's logged latest-RTT state changed.
+def _latest_rtt_samples(mon: pd.DataFrame) -> pd.DataFrame:
+    """Return monitor rows that carry a new Path-B RTT sample sequence.
 
-    Legacy monitor logs contain periodic snapshots, but no RTT update sequence.
-    A value change is therefore the only evaluator-only evidence of a fresh RTT
-    observation. Equal consecutive RTT samples cannot be distinguished from a
-    repeated snapshot and are intentionally omitted.
+    New logs include rtt_sample_seq, which increments inside RTTStats.UpdateRTT.
+    Older logs do not have this field; for those logs this function deliberately
+    returns no samples instead of guessing from value changes.
     """
     if mon.empty or "rtt_latest_ms" not in mon.columns:
         return mon.iloc[0:0].copy()
     result = mon.copy()
-    latest = pd.to_numeric(result["rtt_latest_ms"], errors="coerce")
-    previous = latest.shift()
-    changed = latest.notna() & (previous.isna() | ((latest - previous).abs() > 1e-9))
+    result["rtt_latest_ms"] = pd.to_numeric(result["rtt_latest_ms"], errors="coerce")
+    if "rtt_sample_seq" not in result.columns:
+        return result.iloc[0:0].copy()
+    result["rtt_sample_seq"] = pd.to_numeric(result["rtt_sample_seq"], errors="coerce")
+    seq = result["rtt_sample_seq"]
+    previous = seq.shift()
+    changed = result["rtt_latest_ms"].notna() & seq.notna() & (previous.isna() | (seq != previous))
     return result.loc[changed].copy()
 
 
 def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.DataFrame:
     columns = [
-        "method", "time_s", "owd_ms_mean", "owd_ms_p95",
-        "rtt_ms_mean", "rtt_ms_p95", "rtt_latest_ms_mean", "rtt_latest_ms_p95", "jitter_ms_mean",
-        "rtt_latest_change_ms_median", "rtt_latest_change_ms_p95",
-        "rtt_latest_observed_change_count",
+        "method", "time_s", "owd_ms_mean",
+        "rtt_ms_mean", "rtt_latest_ms_mean", "jitter_ms_mean",
+        "rtt_latest_sample_ms", "rtt_sample_seq", "rtt_sample_observed_count",
     ]
     pieces: list[pd.DataFrame] = []
     if not util.empty and "owd_ms" in util.columns:
@@ -312,7 +322,7 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
             u["time_s"] = pd.to_numeric(u["time_s"], errors="coerce").floordiv(1)
             pieces.append(
                 u.groupby("time_s", as_index=False)["owd_ms"]
-                .agg(owd_ms_mean="mean", owd_ms_p95=lambda s: s.quantile(0.95))
+                .agg(owd_ms_mean="mean")
             )
     if not mon.empty and ("rtt_smoothed_ms" in mon.columns or "rtt_latest_ms" in mon.columns):
         m = mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon.copy()
@@ -323,20 +333,18 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
             agg: dict[str, object] = {}
             if "rtt_smoothed_ms" in m.columns:
                 agg["rtt_ms_mean"] = ("rtt_smoothed_ms", "mean")
-                agg["rtt_ms_p95"] = ("rtt_smoothed_ms", lambda s: s.quantile(0.95))
             if "rtt_latest_ms" in m.columns:
                 agg["rtt_latest_ms_mean"] = ("rtt_latest_ms", "mean")
-                agg["rtt_latest_ms_p95"] = ("rtt_latest_ms", lambda s: s.quantile(0.95))
             if "rtt_mean_dev_ms" in m.columns:
                 agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
             pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
-            changed = _observed_latest_rtt_changes(m)
-            if not changed.empty:
+            samples = _latest_rtt_samples(m)
+            if not samples.empty:
                 pieces.append(
-                    changed.groupby("time_s", as_index=False).agg(
-                        rtt_latest_change_ms_median=("rtt_latest_ms", "median"),
-                        rtt_latest_change_ms_p95=("rtt_latest_ms", lambda s: s.quantile(0.95)),
-                        rtt_latest_observed_change_count=("rtt_latest_ms", "count"),
+                    samples.groupby("time_s", as_index=False).agg(
+                        rtt_latest_sample_ms=("rtt_latest_ms", "last"),
+                        rtt_sample_seq=("rtt_sample_seq", "last"),
+                        rtt_sample_observed_count=("rtt_latest_ms", "count"),
                     )
                 )
 
@@ -643,8 +651,7 @@ def _per_second_retrans_delta(run_dir: Path, method: str) -> pd.DataFrame:
 
 def _per_second_loss_monitor(mon: pd.DataFrame, method: str) -> pd.DataFrame:
     columns = [
-        "method", "time_s", "path_b_monitor_loss_mean",
-        "path_b_monitor_loss_p95", "n_samples",
+        "method", "time_s", "path_b_monitor_loss_mean", "n_samples",
     ]
     if mon.empty or "loss" not in mon.columns:
         return pd.DataFrame(columns=columns)
@@ -665,7 +672,6 @@ def _per_second_loss_monitor(mon: pd.DataFrame, method: str) -> pd.DataFrame:
         m.groupby("time_s", as_index=False)["loss"]
         .agg(
             path_b_monitor_loss_mean="mean",
-            path_b_monitor_loss_p95=lambda series: series.quantile(0.95),
             n_samples="count",
         )
         .sort_values("time_s")
@@ -685,11 +691,9 @@ def _pct_change(baseline: float, dynamic: float, higher_is_better: bool) -> floa
 def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.DataFrame:
     metric_directions = {
         "owd_ms_mean": False,
-        "owd_ms_p95": False,
         "rtt_ms_mean": False,
-        "rtt_ms_p95": False,
-        "rtt_latest_change_ms_median": False,
-        "rtt_latest_change_ms_p95": False,
+        "rtt_latest_ms_mean": False,
+        "rtt_latest_sample_ms": False,
         "jitter_ms_mean": False,
         "secondary_total_quic_wire_mbps_mean": True,
         "secondary_path_a_quic_wire_mbps_mean": True,
@@ -859,19 +863,19 @@ def _plot_timeseries(
         axes[2].set_ylabel("Path B active-probe RTT (ms)")
         axes[2].set_title("Path B active-probe RTT over time")
         axes[2].legend()
-    elif not delay.empty and delay["rtt_latest_change_ms_median"].notna().any():
+    elif not delay.empty and delay["rtt_latest_sample_ms"].notna().any():
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
-            observed = group.dropna(subset=["rtt_latest_change_ms_median"])
-            axes[2].scatter(
-                observed["time_s"], observed["rtt_latest_change_ms_median"],
-                label=f"{method_labels.get(method, method)} Path B observed latest-RTT changes",
-                s=16, alpha=0.8,
+            samples = _series_with_gaps(group, "time_s", "rtt_latest_sample_ms")
+            axes[2].plot(
+                samples["time_s"], samples["rtt_latest_sample_ms"],
+                label=f"{method_labels.get(method, method)} Path B latest RTT",
+                linewidth=1.4,
                 color=style.get("color"),
             )
-        axes[2].set_ylabel("Path B latest RTT state (ms)")
-        axes[2].set_title("Path B QUIC latest-RTT state changes (1 s median)")
-        axes[2].legend()
+        axes[2].set_ylabel("Path B latest RTT (ms)")
+        axes[2].set_title("Path B QUIC latest RTT from real sample updates")
+        axes[2].legend(fontsize=8)
     elif not delay.empty and delay["rtt_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
@@ -902,21 +906,21 @@ def _plot_timeseries(
         plot_name = f"{prefix}_throughput_loss_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
 
-    if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_change_ms_median"].notna().any():
+    if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_sample_ms"].notna().any():
         axes[2].clear()
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
-            observed = group.dropna(subset=["rtt_latest_change_ms_median"])
-            axes[2].scatter(
-                observed["time_s"], observed["rtt_latest_change_ms_median"],
-                label=f"{method_labels.get(method, method)} Path B observed latest-RTT changes",
-                s=16, alpha=0.8, color=style.get("color"),
+            samples = _series_with_gaps(group, "time_s", "rtt_latest_sample_ms")
+            axes[2].plot(
+                samples["time_s"], samples["rtt_latest_sample_ms"],
+                label=f"{method_labels.get(method, method)} Path B latest RTT",
+                linewidth=1.4, color=style.get("color"),
             )
-        axes[2].set_ylabel("Path B latest RTT state (ms)")
+        axes[2].set_ylabel("Path B latest RTT (ms)")
         axes[2].set_xlabel("Time (s)")
-        axes[2].set_title("Path B QUIC latest-RTT state changes (1 s median; gaps are intentional)")
+        axes[2].set_title("Path B QUIC latest RTT from real sample updates")
         axes[2].grid(alpha=0.25)
-        axes[2].legend()
+        axes[2].legend(fontsize=8, loc="best")
         axes[2].axvspan(span[0], span[1], color="tab:red", alpha=0.08)
         fig.tight_layout()
         fig.savefig(out / f"{prefix}_throughput_quic_rtt_diagnostic_over_time.png", dpi=180)
@@ -974,21 +978,16 @@ def _delay_window_metrics(
     ub = _path_b_rows(u)
     mb_all = _path_b_rows(mon)
     mb = _window_mask(mb_all, lo, hi)
-    mb_changes = _window_mask(_observed_latest_rtt_changes(mb_all), lo, hi)
+    mb_samples = _window_mask(_latest_rtt_samples(mb_all), lo, hi)
 
     out = {
         "owd_ms_mean": float(ub["owd_ms"].mean()) if "owd_ms" in ub.columns and len(ub) else float("nan"),
-        "owd_ms_p95": _p95(ub["owd_ms"]) if "owd_ms" in ub.columns else float("nan"),
         "rtt_ms_mean": float(mb["rtt_smoothed_ms"].mean()) if "rtt_smoothed_ms" in mb.columns and len(mb) else float("nan"),
-        "rtt_ms_p95": _p95(mb["rtt_smoothed_ms"]) if "rtt_smoothed_ms" in mb.columns else float("nan"),
         "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
-        "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
-        "rtt_latest_change_ms_median": float(mb_changes["rtt_latest_ms"].median()) if "rtt_latest_ms" in mb_changes.columns and len(mb_changes) else float("nan"),
-        "rtt_latest_change_ms_p95": _p95(mb_changes["rtt_latest_ms"]) if "rtt_latest_ms" in mb_changes.columns else float("nan"),
-        "rtt_latest_observed_change_count": float(len(mb_changes)) if "rtt_latest_ms" in mb_changes.columns else float("nan"),
+        "rtt_latest_sample_ms": float(mb_samples["rtt_latest_ms"].iloc[-1]) if "rtt_latest_ms" in mb_samples.columns and len(mb_samples) else float("nan"),
+        "rtt_sample_observed_count": float(len(mb_samples)) if "rtt_latest_ms" in mb_samples.columns else float("nan"),
         "active_probe_rtt_ms_mean": float(p["active_probe_rtt_ms"].mean()) if "active_probe_rtt_ms" in p.columns and len(p) else float("nan"),
-        "active_probe_rtt_ms_p95": _p95(p["active_probe_rtt_ms"]) if "active_probe_rtt_ms" in p.columns else float("nan"),
         "active_probe_success_fraction": float(p["active_probe_success"].mean()) if "active_probe_success" in p.columns and len(p) else float("nan"),
         "tc_configured_delay_ms_mean": float(t["tc_configured_delay_ms"].mean()) if "tc_configured_delay_ms" in t.columns and len(t) else float("nan"),
         "tc_configured_jitter_ms_mean": float(t["tc_configured_jitter_ms"].mean()) if "tc_configured_jitter_ms" in t.columns and len(t) else float("nan"),
