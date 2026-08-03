@@ -328,7 +328,7 @@ _RE_QDISC_TS = re.compile(r"^([0-9]+(?:\.[0-9]+)?)$")
 _RE_QDISC_NETEM = re.compile(r"^qdisc netem\s+")
 _RE_QDISC_SENT = re.compile(
     r"^Sent\s+(?P<bytes>\d+)\s+bytes\s+(?P<pkts>\d+)\s+pkt\s+"
-    r"\(dropped\s+(?P<dropped>\d+),\s+overlimits\s+(?P<overlimits>\d+),"
+    r"\(dropped\s+(?P<dropped>\d+),\s+overlimits\s+(?P<overlimits>\d+),?"
 )
 _RE_QDISC_BACKLOG = re.compile(r"^backlog\s+(?P<bytes>[^\s]+)\s+(?P<pkts>\d+)p")
 

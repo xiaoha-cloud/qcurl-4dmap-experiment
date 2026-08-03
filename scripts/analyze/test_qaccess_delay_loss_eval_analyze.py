@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 
 import pandas as pd
 
@@ -46,6 +48,32 @@ class DelayLossEvaluationTest(unittest.TestCase):
         )
         share = result[result.metric == "path_b_share_pct_mean"].iloc[0]
         self.assertAlmostEqual(share["change_percentage_points"], -10.0)
+
+    def test_parse_tc_qdisc_log_accepts_overlimits_without_comma(self):
+        text = """1785740134.270442528
+iface=h2-eth1 profile_kind=delay
+qdisc htb 5: root refcnt 5 r2q 10 default 0x1 direct_packets_stat 0 ver 3.17 direct_qlen 1000
+ Sent 320 bytes 4 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+qdisc netem 10: parent 5:1 limit 1000 delay 20ms seed 947112343233105958
+ Sent 320 bytes 4 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 0b 0p requeues 0
+1785740224.270442528
+iface=h2-eth1 profile_kind=delay
+qdisc htb 5: root refcnt 5 r2q 10 default 0x1 direct_packets_stat 0 ver 3.17 direct_qlen 1000
+ Sent 640 bytes 8 pkt (dropped 0, overlimits 1 requeues 0)
+ backlog 0b 0p requeues 0
+qdisc netem 10: parent 5:1 limit 1000 delay 80ms seed 947112343233105958
+ Sent 640 bytes 8 pkt (dropped 0, overlimits 0 requeues 0)
+ backlog 400b 3p requeues 0
+"""
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tc_qdisc_stats_pathB.log"
+            path.write_text(text)
+            parsed = evaluation._parse_tc_qdisc_log(path, "baseline")
+        self.assertEqual(parsed["tc_configured_delay_ms"].tolist(), [20.0, 80.0])
+        self.assertEqual(parsed["tc_backlog_pkts"].tolist(), [0, 3])
+        self.assertEqual(parsed["tc_interface"].tolist(), ["h2-eth1", "h2-eth1"])
 
 
 if __name__ == "__main__":
