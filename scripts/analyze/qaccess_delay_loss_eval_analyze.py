@@ -661,6 +661,29 @@ def _loss_span_from_tc_logs(session: Path) -> tuple[float, float] | None:
     return None
 
 
+def _delay_span_from_tc_logs(session: Path) -> tuple[float, float] | None:
+    steps: list[tuple[float, float]] = []
+    pattern = re.compile(r"profile_step\[\d+\] at=([0-9.]+)s delay=([0-9.]+)ms")
+    for log_path in sorted(session.glob("*/logs/tc_delay_*.log")):
+        for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+            match = pattern.search(line)
+            if match:
+                steps.append((float(match.group(1)), float(match.group(2))))
+        if steps:
+            break
+    if len(steps) < 2:
+        return None
+    steps = sorted(steps)
+    initial_delay = steps[0][1]
+    for idx, (start, delay_ms) in enumerate(steps[1:], start=1):
+        if delay_ms == initial_delay:
+            continue
+        end = steps[idx + 1][0] if idx + 1 < len(steps) else start
+        if end > start:
+            return start, end
+    return None
+
+
 def _plot_timeseries(
     throughput: pd.DataFrame,
     delay: pd.DataFrame,
@@ -678,10 +701,13 @@ def _plot_timeseries(
     line_styles = {
         "baseline_total": {"color": "#1f77b4", "label": "Baseline total"},
         "loss_qaccess_l_total": {"color": "#ff7f0e", "label": "Q-Access-L total"},
+        "delay_qaccess_d_total": {"color": "#ff7f0e", "label": "Q-Access-D total"},
         "baseline_path_a": {"color": "#2ca02c", "label": "Baseline Path A"},
         "baseline_path_b": {"color": "#d62728", "label": "Baseline Path B", "linestyle": "--"},
         "loss_qaccess_l_path_a": {"color": "#9467bd", "label": "Q-Access-L Path A"},
         "loss_qaccess_l_path_b": {"color": "#8c564b", "label": "Q-Access-L Path B", "linestyle": "--"},
+        "delay_qaccess_d_path_a": {"color": "#9467bd", "label": "Q-Access-D Path A"},
+        "delay_qaccess_d_path_b": {"color": "#8c564b", "label": "Q-Access-D Path B", "linestyle": "--"},
     }
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 9), sharex=True)
@@ -757,7 +783,7 @@ def _plot_timeseries(
         axes[2].set_ylabel("Path B delay proxy (ms)")
     axes[2].set_xlabel("Time (s)")
     axes[2].grid(alpha=0.25)
-    span = impairment_span or ((90.0, 150.0) if prefix == "delay" else (90.0, 100.0))
+    span = impairment_span or ((90.0, 110.0) if prefix == "delay" else (90.0, 100.0))
     for axis in axes:
         axis.axvspan(span[0], span[1], color="tab:red", alpha=0.08)
     fig.tight_layout()
@@ -1054,7 +1080,12 @@ def main() -> None:
     dynamic_method = str(cfg["dynamic_dirs"][0]).removesuffix("_dynamic")
     comparison = build_improvement_table(df_win, dynamic_method)
     comparison.to_csv(out / f"{prefix}_baseline_vs_qaccess_improvement.csv", index=False)
-    impairment_span = _loss_span_from_tc_logs(session) if args.preset == "loss" else None
+    if args.preset == "loss":
+        impairment_span = _loss_span_from_tc_logs(session)
+    elif args.preset == "delay":
+        impairment_span = _delay_span_from_tc_logs(session)
+    else:
+        impairment_span = None
     _plot_timeseries(df_wire, df_delay, df_loss_monitor, df_loss_retrans, df_loss_tc, out, prefix, impairment_span)
 
     metadata_path = session / "experiment_metadata.json"
