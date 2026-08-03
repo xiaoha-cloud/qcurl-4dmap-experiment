@@ -93,6 +93,13 @@ SCENARIOS = {
         "path_a": (20, "40ms", 0),
         "path_b": (20, "40ms", 0),
     },
+    # Lower-latency delay-only validation:
+    #   Path A: 20 Mbps, 20 ms, 0%
+    #   Path B: 20 Mbps, 20 ms, 0%; dynamic delay profile changes only Path B delay.
+    "delay_formal_20ms": {
+        "path_a": (20, "20ms", 0),
+        "path_b": (20, "20ms", 0),
+    },
     # Fig.8-style combined deterioration (heterogeneous paths):
     #   Path A: 20 Mbps, 40 ms, 0%
     #   Path B: 30 Mbps, 20 ms, 0% static; combined delay+loss steps on h2-eth1 via
