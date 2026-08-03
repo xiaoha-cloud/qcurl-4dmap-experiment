@@ -383,6 +383,7 @@ def run_experiment(net, args):
     tc_qdisc_log_path = None
     tc_qdisc_iface = ""
     tc_qdisc_node = ""
+    tc_qdisc_kind = ""
 
     run_id = time.strftime("%Y%m%d_%H%M%S")
 
@@ -538,6 +539,9 @@ def run_experiment(net, args):
         _log("tc", f"starting delay steps on {tc_node} → {tc_log_path}")
         _log("tc", f"profile = {prof_path}")
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
+        tc_qdisc_iface = _iface_for_profile(prof_path)
+        tc_qdisc_node = tc_node
+        tc_qdisc_kind = "delay"
     elif loss_prof:
         prof_path = expand_user_path(loss_prof)
         if not os.path.isfile(prof_path):
@@ -556,6 +560,7 @@ def run_experiment(net, args):
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
         tc_qdisc_iface = _iface_for_profile(prof_path)
         tc_qdisc_node = tc_node
+        tc_qdisc_kind = "loss"
     elif deterioration_prof:
         prof_path = expand_user_path(deterioration_prof)
         if not os.path.isfile(prof_path):
@@ -587,12 +592,13 @@ def run_experiment(net, args):
         )
         tc_proc = tc_h.popen(cmd, shell=True, stdout=tc_log_f, stderr=tc_log_f)
 
-    if loss_prof and tc_qdisc_iface and tc_qdisc_node:
+    if tc_qdisc_iface and tc_qdisc_node:
         tc_qdisc_log_path = os.path.join(logs_dir, f"tc_qdisc_stats_pathB_{run_id}.log")
         tc_qdisc_log = _open_log_file(tc_qdisc_log_path, save_logs)
         qdisc_cmd = (
             "while true; do "
             "date +%s.%N; "
+            f"echo iface={shlex.quote(tc_qdisc_iface)} profile_kind={shlex.quote(tc_qdisc_kind)}; "
             f"tc -s -d qdisc show dev {shlex.quote(tc_qdisc_iface)}; "
             "sleep 1; "
             "done"
@@ -607,6 +613,7 @@ def run_experiment(net, args):
             tc_node=tc_qdisc_node,
             iface=tc_qdisc_iface,
             tc_qdisc_log=tc_qdisc_log_path,
+            profile_kind=tc_qdisc_kind,
         )
         tc_qdisc_proc = tc_qdisc_host.popen(qdisc_cmd, shell=True, stdout=tc_qdisc_log, stderr=tc_qdisc_log)
 

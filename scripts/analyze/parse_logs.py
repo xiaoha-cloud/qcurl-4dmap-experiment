@@ -190,9 +190,12 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
                 if t0 is None:
                     t0 = ts
                 try:
+                    endpoint_match = re.search(r"\blocal=(?P<local>\S+) remote=(?P<remote>\S+)", line)
                     row = {
                         "t": ts - t0,
                         "path": int(mm["path"]),
+                        "local_endpoint": endpoint_match["local"] if endpoint_match else "",
+                        "remote_endpoint": endpoint_match["remote"] if endpoint_match else "",
                         "rtt_smoothed_ms": _parse_go_duration(mm["rtt_smoothed"]),
                         "rtt_min_ms": _parse_go_duration(mm["rtt_min"]),
                         "rtt_latest_ms": _parse_go_duration(mm["rtt_latest"]),

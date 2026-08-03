@@ -3,7 +3,7 @@
 Analyze delay-only and loss-only Q-ACCeSS experiments.
 
 Primary metrics differ from Fig.7 throughput eval:
-  delay — OWD/RTT proxy, jitter, path-B usage shift, recovery time
+  delay — QUIC Path-B latest RTT, smoothed RTT, configured tc delay evidence, path-B usage shift, recovery time
   loss  — loss rate, retrans/lost-byte proxy, path-B usage shift, recovery time
 
 Throughput (total / path A / path B) is computed from every captured frame.
@@ -32,19 +32,19 @@ if str(_REPO / "scripts" / "analyze") not in sys.path:
 EVAL_WINDOWS = [
     ("0-50", 0.0, 50.0),
     ("50-90", 50.0, 90.0),
-    ("90-100", 90.0, 100.0),
-    ("100-150", 100.0, 150.0),
+    ("90-110", 90.0, 110.0),
+    ("110-150", 110.0, 150.0),
     ("150-200", 150.0, 200.0),
 ]
 
 PRESETS: dict[str, dict[str, object]] = {
     "delay": {
-        "title": "Delay-only (primary: delay/RTT/recovery)",
+        "title": "Delay-only (primary: Path B QUIC latest RTT/recovery)",
         "baseline_dir": "delay_baseline",
         "dynamic_dirs": ("delay_qaccess_d_dynamic", "delay_qaccess_dynamic"),
         "out_subdir": "delay_only_compare",
         "file_prefix": "delay",
-        "recovery_start_s": 150.0,
+        "recovery_start_s": 110.0,
     },
     "loss": {
         "title": "Loss-only (primary: loss/retrans/recovery)",
@@ -328,8 +328,23 @@ _RE_QDISC_TS = re.compile(r"^([0-9]+(?:\.[0-9]+)?)$")
 _RE_QDISC_NETEM = re.compile(r"^qdisc netem\s+")
 _RE_QDISC_SENT = re.compile(
     r"^Sent\s+(?P<bytes>\d+)\s+bytes\s+(?P<pkts>\d+)\s+pkt\s+"
-    r"\(dropped\s+(?P<dropped>\d+),"
+    r"\(dropped\s+(?P<dropped>\d+),\s+overlimits\s+(?P<overlimits>\d+),"
 )
+_RE_QDISC_BACKLOG = re.compile(r"^backlog\s+(?P<bytes>[^\s]+)\s+(?P<pkts>\d+)p")
+
+
+def _tc_duration_to_ms(token: str) -> float:
+    token = str(token or "").strip()
+    try:
+        if token.endswith("ms"):
+            return float(token[:-2])
+        if token.endswith("us") or token.endswith("µs"):
+            return float(token[:-2]) / 1000.0
+        if token.endswith("s"):
+            return float(token[:-1]) * 1000.0
+        return float(token)
+    except ValueError:
+        return float("nan")
 
 
 def _parse_tc_qdisc_log(path: Path, method: str) -> pd.DataFrame:
@@ -337,7 +352,13 @@ def _parse_tc_qdisc_log(path: Path, method: str) -> pd.DataFrame:
     epoch0: float | None = None
     current_epoch: float | None = None
     in_netem = False
+    current_iface = ""
+    current_kind = ""
+    netem_handle = ""
+    netem_parent = ""
     configured_loss_pct = 0.0
+    configured_delay_ms = float("nan")
+    configured_jitter_ms = float("nan")
 
     with path.open(encoding="utf-8", errors="replace") as handle:
         for raw in handle:
@@ -349,13 +370,32 @@ def _parse_tc_qdisc_log(path: Path, method: str) -> pd.DataFrame:
                     epoch0 = current_epoch
                 in_netem = False
                 configured_loss_pct = 0.0
+                configured_delay_ms = float("nan")
+                configured_jitter_ms = float("nan")
+                netem_handle = ""
+                netem_parent = ""
+                continue
+
+            if line.startswith("iface="):
+                meta = dict(part.split("=", 1) for part in line.split() if "=" in part)
+                current_iface = meta.get("iface", current_iface)
+                current_kind = meta.get("profile_kind", current_kind)
                 continue
 
             netem_match = _RE_QDISC_NETEM.match(line)
             if netem_match:
                 in_netem = True
+                handle_match = re.search(r"^qdisc\s+netem\s+([^\s]+)", line)
+                parent_match = re.search(r"\bparent\s+([^\s]+)", line)
                 loss_match = re.search(r"loss\s+([0-9.]+)%", line)
+                delay_match = re.search(r"delay\s+([^\s]+)(?:\s+([^\s]+))?", line)
+                netem_handle = handle_match.group(1) if handle_match else ""
+                netem_parent = parent_match.group(1) if parent_match else ""
                 configured_loss_pct = float(loss_match.group(1)) if loss_match else 0.0
+                configured_delay_ms = _tc_duration_to_ms(delay_match.group(1)) if delay_match else float("nan")
+                configured_jitter_ms = float("nan")
+                if delay_match and delay_match.group(2) and re.search(r"(ms|us|µs|s)$", delay_match.group(2)):
+                    configured_jitter_ms = _tc_duration_to_ms(delay_match.group(2))
                 continue
 
             if line.startswith("qdisc "):
@@ -367,10 +407,26 @@ def _parse_tc_qdisc_log(path: Path, method: str) -> pd.DataFrame:
                 rows.append({
                     "method": method,
                     "time_s": current_epoch - epoch0,
+                    "tc_interface": current_iface,
+                    "tc_profile_kind": current_kind,
+                    "tc_qdisc_kind": "netem",
+                    "tc_handle": netem_handle,
+                    "tc_parent": netem_parent,
+                    "tc_configured_delay_ms": configured_delay_ms,
+                    "tc_configured_jitter_ms": configured_jitter_ms,
                     "tc_configured_loss_pct": configured_loss_pct,
                     "tc_sent_pkts": int(sent_match.group("pkts")),
                     "tc_dropped_pkts": int(sent_match.group("dropped")),
+                    "tc_overlimits": int(sent_match.group("overlimits")),
+                    "tc_backlog_bytes_raw": "",
+                    "tc_backlog_pkts": float("nan"),
                 })
+                continue
+
+            backlog_match = _RE_QDISC_BACKLOG.match(line)
+            if in_netem and backlog_match and rows:
+                rows[-1]["tc_backlog_bytes_raw"] = backlog_match.group("bytes")
+                rows[-1]["tc_backlog_pkts"] = int(backlog_match.group("pkts"))
                 in_netem = False
 
     if not rows:
@@ -379,8 +435,9 @@ def _parse_tc_qdisc_log(path: Path, method: str) -> pd.DataFrame:
     df = pd.DataFrame(rows).sort_values("time_s").reset_index(drop=True)
     df["tc_sent_pkts_delta"] = pd.to_numeric(df["tc_sent_pkts"], errors="coerce").diff().fillna(0)
     df["tc_dropped_delta"] = pd.to_numeric(df["tc_dropped_pkts"], errors="coerce").diff().fillna(0)
-    df.loc[df["tc_sent_pkts_delta"] < 0, "tc_sent_pkts_delta"] = 0
-    df.loc[df["tc_dropped_delta"] < 0, "tc_dropped_delta"] = 0
+    df["tc_overlimits_delta"] = pd.to_numeric(df["tc_overlimits"], errors="coerce").diff().fillna(0)
+    for column in ("tc_sent_pkts_delta", "tc_dropped_delta", "tc_overlimits_delta"):
+        df.loc[df[column] < 0, column] = 0
     denom = df["tc_sent_pkts_delta"] + df["tc_dropped_delta"]
     df["tc_loss_rate"] = df["tc_dropped_delta"] / denom.where(denom > 0)
     return df
@@ -394,9 +451,11 @@ def load_tc_qdisc_timeseries(run_dir: Path, method: str) -> pd.DataFrame:
     pieces = [piece for piece in pieces if not piece.empty]
     if not pieces:
         return pd.DataFrame(columns=[
-            "method", "time_s", "tc_configured_loss_pct", "tc_sent_pkts",
-            "tc_dropped_pkts", "tc_sent_pkts_delta", "tc_dropped_delta",
-            "tc_loss_rate",
+            "method", "time_s", "tc_interface", "tc_profile_kind", "tc_qdisc_kind",
+            "tc_handle", "tc_parent", "tc_configured_delay_ms", "tc_configured_jitter_ms",
+            "tc_configured_loss_pct", "tc_sent_pkts", "tc_dropped_pkts", "tc_overlimits",
+            "tc_backlog_bytes_raw", "tc_backlog_pkts", "tc_sent_pkts_delta",
+            "tc_dropped_delta", "tc_overlimits_delta", "tc_loss_rate",
         ])
     return pd.concat(pieces, ignore_index=True).sort_values(["method", "time_s"]).reset_index(drop=True)
 
@@ -615,7 +674,7 @@ def _plot_timeseries(
     if throughput.empty and delay.empty and loss_monitor.empty and loss_retrans.empty and loss_tc.empty:
         return
 
-    method_labels = {"baseline": "Baseline", "loss_qaccess_l": "Q-Access-L"}
+    method_labels = {"baseline": "Baseline", "loss_qaccess_l": "Q-Access-L", "delay_qaccess_d": "Q-Access-D"}
     line_styles = {
         "baseline_total": {"color": "#1f77b4", "label": "Baseline total"},
         "loss_qaccess_l_total": {"color": "#ff7f0e", "label": "Q-Access-L total"},
@@ -671,20 +730,16 @@ def _plot_timeseries(
             axes[2].text(0.5, 0.5, "No Path B tc/monitor loss samples found",
                          ha="center", va="center", transform=axes[2].transAxes)
             axes[2].set_ylabel("Path B loss")
-    elif not delay.empty and delay["owd_ms_mean"].notna().any():
-        for method, group in delay.groupby("method"):
-            axes[2].plot(group["time_s"], group["owd_ms_mean"], label=method, linewidth=1.5)
-        axes[2].set_ylabel("Path B OWD (ms)")
-        axes[2].legend()
     elif not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
             axes[2].plot(
                 group["time_s"], group["rtt_latest_ms_mean"],
-                label=f"{method_labels.get(method, method)} Path B raw RTT", linewidth=1.5,
+                label=f"{method_labels.get(method, method)} Path B latest RTT", linewidth=1.5,
                 color=style.get("color"),
             )
-        axes[2].set_ylabel("Path B raw RTT latest (ms)")
+        axes[2].set_ylabel("Path B latest RTT (ms)")
+        axes[2].set_title("Path B QUIC latest RTT over time")
         axes[2].legend()
     elif not delay.empty and delay["rtt_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
@@ -708,8 +763,10 @@ def _plot_timeseries(
     fig.tight_layout()
     if prefix == "loss" and not loss_tc.empty and "tc_dropped_delta" in loss_tc.columns and loss_tc["tc_dropped_delta"].notna().any():
         plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
+    elif prefix == "delay":
+        plot_name = f"{prefix}_throughput_quic_rtt_over_time.png"
     else:
-        plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
+        plot_name = f"{prefix}_throughput_loss_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
 
     if prefix == "loss" and not loss_monitor.empty and loss_monitor["path_b_monitor_loss_mean"].notna().any():
@@ -753,12 +810,14 @@ def _delay_window_metrics(
     util: pd.DataFrame,
     mon: pd.DataFrame,
     wire: pd.DataFrame,
+    tc_qdisc: pd.DataFrame,
     lo: float,
     hi: float,
 ) -> dict:
     u = _window_mask(util, lo, hi)
     m = _window_mask(mon, lo, hi)
     w = _window_mask(wire, lo, hi)
+    t = _window_mask(tc_qdisc, lo, hi)
     ub = _path_b_rows(u)
     mb = _path_b_rows(m)
 
@@ -770,6 +829,11 @@ def _delay_window_metrics(
         "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
+        "tc_configured_delay_ms_mean": float(t["tc_configured_delay_ms"].mean()) if "tc_configured_delay_ms" in t.columns and len(t) else float("nan"),
+        "tc_configured_jitter_ms_mean": float(t["tc_configured_jitter_ms"].mean()) if "tc_configured_jitter_ms" in t.columns and len(t) else float("nan"),
+        "tc_backlog_pkts_mean": float(t["tc_backlog_pkts"].mean()) if "tc_backlog_pkts" in t.columns and len(t) else float("nan"),
+        "tc_dropped_delta_sum": float(t["tc_dropped_delta"].fillna(0).sum()) if "tc_dropped_delta" in t.columns and len(t) else float("nan"),
+        "tc_overlimits_delta_sum": float(t["tc_overlimits_delta"].fillna(0).sum()) if "tc_overlimits_delta" in t.columns and len(t) else float("nan"),
         "path_b_share_pct_mean": float(w["path_b_share_pct"].mean()) if "path_b_share_pct" in w.columns and len(w) else float("nan"),
         "secondary_total_quic_wire_mbps_mean": float(w["total_quic_wire_mbps"].mean()) if len(w) else float("nan"),
         "secondary_path_a_quic_wire_mbps_mean": float(w["path_a_quic_wire_mbps"].mean()) if len(w) else float("nan"),
@@ -847,7 +911,7 @@ def analyze_run(
     delay_timeseries = _per_second_delay(util, mon, method) if preset == "delay" else pd.DataFrame()
     loss_monitor_timeseries = _per_second_loss_monitor(mon, method) if preset == "loss" else pd.DataFrame()
     loss_retrans_timeseries = _per_second_retrans_delta(run_dir, method) if preset == "loss" else pd.DataFrame()
-    loss_tc_timeseries = load_tc_qdisc_timeseries(run_dir, method) if preset == "loss" else pd.DataFrame()
+    loss_tc_timeseries = load_tc_qdisc_timeseries(run_dir, method) if preset in ("loss", "delay") else pd.DataFrame()
 
     recovery: dict[str, float] = {}
     if preset == "delay":
@@ -883,7 +947,7 @@ def analyze_run(
         if preset == "delay":
             metrics = _delay_window_metrics(util.rename(columns={"t": "time_s"}) if "t" in util.columns else util,
                                             mon.rename(columns={"t": "time_s"}) if "t" in mon.columns else mon,
-                                            wire, lo, hi)
+                                            wire, loss_tc_timeseries, lo, hi)
         else:
             metrics = _loss_window_metrics(
                 util.rename(columns={"t": "time_s"}) if "t" in util.columns else util,
@@ -1005,12 +1069,14 @@ def main() -> None:
     print(f"Comparison:      {out / f'{prefix}_baseline_vs_qaccess_improvement.csv'}")
     if prefix == "loss" and not df_loss_tc.empty and "tc_dropped_delta" in df_loss_tc.columns and df_loss_tc["tc_dropped_delta"].notna().any():
         plot_name = f"{prefix}_throughput_tc_dropped_packets_cumulative_over_time.png"
+    elif prefix == "delay":
+        plot_name = f"{prefix}_throughput_quic_rtt_over_time.png"
     else:
-        plot_name = f"{prefix}_throughput_loss_over_time.png" if prefix == "loss" else f"{prefix}_throughput_delay_over_time.png"
+        plot_name = f"{prefix}_throughput_loss_over_time.png"
     print(f"Time-series plot:{out / plot_name}")
+    if prefix in ("loss", "delay") and not df_loss_tc.empty:
+        print(f"TC qdisc CSV:    {out / f'{prefix}_tc_qdisc_timeseries.csv'}")
     if prefix == "loss":
-        if not df_loss_tc.empty:
-            print(f"TC qdisc CSV:    {out / f'{prefix}_tc_qdisc_timeseries.csv'}")
         print(f"Monitor plot:   {out / f'{prefix}_throughput_monitor_loss_over_time.png'}")
         print(f"Retrans plot:   {out / f'{prefix}_throughput_retrans_over_time.png'}")
     print(f"\nWorker execution mode recorded by runner: {execution_mode}")

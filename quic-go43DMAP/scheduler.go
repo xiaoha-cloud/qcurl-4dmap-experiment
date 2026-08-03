@@ -2670,10 +2670,10 @@ func (m *monitor) monitorUpdatePathState(pth *path) {
 
 	cwndFull := pth.sentPacketHandler.GetCWND()
 	lostB := pth.sentPacketHandler.GetLostByte()
-	utils.Infof("[m]monitor path=%v rtt_smoothed=%v rtt_min=%v rtt_latest=%v rtt_mean_dev=%v owd=%v bw=%vB/s inflight=%vB cwnd_full=%vB cwnd_room=%vB loss=%v lost_B=%v serverinx=%v",
+	utils.Infof("[m]monitor path=%v rtt_smoothed=%v rtt_min=%v rtt_latest=%v rtt_mean_dev=%v owd=%v bw=%vB/s inflight=%vB cwnd_full=%vB cwnd_room=%vB loss=%v lost_B=%v serverinx=%v local=%s remote=%s",
 		pth.pathID, nowRTT, pth.rttStats.MinRTT(), pth.rttStats.LatestRTT(), pth.rttStats.MeanDeviation(),
 		m.state_owd[pth.pathID], m.state_bw[pth.pathID], m.state_inflight[pth.pathID], cwndFull, m.state_cwnd[pth.pathID],
-		m.state_loss[pth.pathID], lostB, m.state_serverinx[pth.pathID])
+		m.state_loss[pth.pathID], lostB, m.state_serverinx[pth.pathID], pth.conn.LocalAddr(), pth.conn.RemoteAddr())
 	utils.Infof("[m]retransBytes:%vB", m.retransBytes)
 }
 
