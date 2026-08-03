@@ -279,10 +279,29 @@ def _recovery_time_s(
     return float("nan")
 
 
+def _observed_latest_rtt_changes(mon: pd.DataFrame) -> pd.DataFrame:
+    """Return monitor rows where Path B's logged latest-RTT state changed.
+
+    Legacy monitor logs contain periodic snapshots, but no RTT update sequence.
+    A value change is therefore the only evaluator-only evidence of a fresh RTT
+    observation. Equal consecutive RTT samples cannot be distinguished from a
+    repeated snapshot and are intentionally omitted.
+    """
+    if mon.empty or "rtt_latest_ms" not in mon.columns:
+        return mon.iloc[0:0].copy()
+    result = mon.copy()
+    latest = pd.to_numeric(result["rtt_latest_ms"], errors="coerce")
+    previous = latest.shift()
+    changed = latest.notna() & (previous.isna() | ((latest - previous).abs() > 1e-9))
+    return result.loc[changed].copy()
+
+
 def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.DataFrame:
     columns = [
         "method", "time_s", "owd_ms_mean", "owd_ms_p95",
         "rtt_ms_mean", "rtt_ms_p95", "rtt_latest_ms_mean", "rtt_latest_ms_p95", "jitter_ms_mean",
+        "rtt_latest_change_ms_median", "rtt_latest_change_ms_p95",
+        "rtt_latest_observed_change_count",
     ]
     pieces: list[pd.DataFrame] = []
     if not util.empty and "owd_ms" in util.columns:
@@ -311,6 +330,15 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
             if "rtt_mean_dev_ms" in m.columns:
                 agg["jitter_ms_mean"] = ("rtt_mean_dev_ms", "mean")
             pieces.append(m.groupby("time_s", as_index=False).agg(**agg))
+            changed = _observed_latest_rtt_changes(m)
+            if not changed.empty:
+                pieces.append(
+                    changed.groupby("time_s", as_index=False).agg(
+                        rtt_latest_change_ms_median=("rtt_latest_ms", "median"),
+                        rtt_latest_change_ms_p95=("rtt_latest_ms", lambda s: s.quantile(0.95)),
+                        rtt_latest_observed_change_count=("rtt_latest_ms", "count"),
+                    )
+                )
 
     if not pieces:
         return pd.DataFrame(columns=columns)
@@ -660,8 +688,8 @@ def build_improvement_table(df_win: pd.DataFrame, dynamic_method: str) -> pd.Dat
         "owd_ms_p95": False,
         "rtt_ms_mean": False,
         "rtt_ms_p95": False,
-        "rtt_latest_ms_mean": False,
-        "rtt_latest_ms_p95": False,
+        "rtt_latest_change_ms_median": False,
+        "rtt_latest_change_ms_p95": False,
         "jitter_ms_mean": False,
         "secondary_total_quic_wire_mbps_mean": True,
         "secondary_path_a_quic_wire_mbps_mean": True,
@@ -831,16 +859,18 @@ def _plot_timeseries(
         axes[2].set_ylabel("Path B active-probe RTT (ms)")
         axes[2].set_title("Path B active-probe RTT over time")
         axes[2].legend()
-    elif not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
+    elif not delay.empty and delay["rtt_latest_change_ms_median"].notna().any():
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
-            axes[2].plot(
-                group["time_s"], group["rtt_latest_ms_mean"],
-                label=f"{method_labels.get(method, method)} Path B latest RTT", linewidth=1.5,
+            observed = group.dropna(subset=["rtt_latest_change_ms_median"])
+            axes[2].scatter(
+                observed["time_s"], observed["rtt_latest_change_ms_median"],
+                label=f"{method_labels.get(method, method)} Path B observed latest-RTT changes",
+                s=16, alpha=0.8,
                 color=style.get("color"),
             )
-        axes[2].set_ylabel("Path B latest RTT (ms)")
-        axes[2].set_title("Path B QUIC latest RTT over time")
+        axes[2].set_ylabel("Path B latest RTT state (ms)")
+        axes[2].set_title("Path B QUIC latest-RTT state changes (1 s median)")
         axes[2].legend()
     elif not delay.empty and delay["rtt_ms_mean"].notna().any():
         for method, group in delay.groupby("method"):
@@ -872,18 +902,19 @@ def _plot_timeseries(
         plot_name = f"{prefix}_throughput_loss_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
 
-    if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_ms_mean"].notna().any():
+    if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_change_ms_median"].notna().any():
         axes[2].clear()
         for method, group in delay.groupby("method"):
             style = line_styles.get(f"{method}_total", {"label": method})
-            axes[2].plot(
-                group["time_s"], group["rtt_latest_ms_mean"],
-                label=f"{method_labels.get(method, method)} Path B QUIC latest RTT",
-                linewidth=1.5, color=style.get("color"),
+            observed = group.dropna(subset=["rtt_latest_change_ms_median"])
+            axes[2].scatter(
+                observed["time_s"], observed["rtt_latest_change_ms_median"],
+                label=f"{method_labels.get(method, method)} Path B observed latest-RTT changes",
+                s=16, alpha=0.8, color=style.get("color"),
             )
-        axes[2].set_ylabel("Path B QUIC latest RTT (ms)")
+        axes[2].set_ylabel("Path B latest RTT state (ms)")
         axes[2].set_xlabel("Time (s)")
-        axes[2].set_title("Path B QUIC latest RTT diagnostic")
+        axes[2].set_title("Path B QUIC latest-RTT state changes (1 s median; gaps are intentional)")
         axes[2].grid(alpha=0.25)
         axes[2].legend()
         axes[2].axvspan(span[0], span[1], color="tab:red", alpha=0.08)
@@ -937,12 +968,13 @@ def _delay_window_metrics(
     hi: float,
 ) -> dict:
     u = _window_mask(util, lo, hi)
-    m = _window_mask(mon, lo, hi)
     w = _window_mask(wire, lo, hi)
     t = _window_mask(tc_qdisc, lo, hi)
     p = _window_mask(active_probe_rtt, lo, hi)
     ub = _path_b_rows(u)
-    mb = _path_b_rows(m)
+    mb_all = _path_b_rows(mon)
+    mb = _window_mask(mb_all, lo, hi)
+    mb_changes = _window_mask(_observed_latest_rtt_changes(mb_all), lo, hi)
 
     out = {
         "owd_ms_mean": float(ub["owd_ms"].mean()) if "owd_ms" in ub.columns and len(ub) else float("nan"),
@@ -952,6 +984,9 @@ def _delay_window_metrics(
         "rtt_latest_ms_mean": float(mb["rtt_latest_ms"].mean()) if "rtt_latest_ms" in mb.columns and len(mb) else float("nan"),
         "rtt_latest_ms_p95": _p95(mb["rtt_latest_ms"]) if "rtt_latest_ms" in mb.columns else float("nan"),
         "jitter_ms_mean": float(mb["rtt_mean_dev_ms"].mean()) if "rtt_mean_dev_ms" in mb.columns and len(mb) else float("nan"),
+        "rtt_latest_change_ms_median": float(mb_changes["rtt_latest_ms"].median()) if "rtt_latest_ms" in mb_changes.columns and len(mb_changes) else float("nan"),
+        "rtt_latest_change_ms_p95": _p95(mb_changes["rtt_latest_ms"]) if "rtt_latest_ms" in mb_changes.columns else float("nan"),
+        "rtt_latest_observed_change_count": float(len(mb_changes)) if "rtt_latest_ms" in mb_changes.columns else float("nan"),
         "active_probe_rtt_ms_mean": float(p["active_probe_rtt_ms"].mean()) if "active_probe_rtt_ms" in p.columns and len(p) else float("nan"),
         "active_probe_rtt_ms_p95": _p95(p["active_probe_rtt_ms"]) if "active_probe_rtt_ms" in p.columns else float("nan"),
         "active_probe_success_fraction": float(p["active_probe_success"].mean()) if "active_probe_success" in p.columns and len(p) else float("nan"),
