@@ -6,6 +6,8 @@ Log lines handled:
              gain=.. backoff=.. U=.. trend_ms=..
   [m]monitor path=X rtt_smoothed=.. rtt_min=.. bw=..B/s inflight=..
              cwnd_full=.. cwnd_room=.. loss=.. lost_B=..
+  [rtt_sample] path=X seq=.. packet=.. sample=.. smoothed=.. min=..
+               mean_dev=.. ack_delay=.. send_delta=..
   tc_delay / tc_loss   (written by tc_delay_steps.sh / tc_loss_steps.sh)
   [learn]   path=X wT=.. wD=.. wL=.. grad=(g0,g1,g2) eta=.. floor=..  (ModeLearn on leader path)
   tc_bw               (written by tc_bw_steps.sh — capacity steps on one interface)
@@ -74,6 +76,19 @@ _RE_MONITOR = re.compile(
     r" cwnd_room=(?P<cwnd_room>[^\s]+)"
     r" loss=(?P<loss>[^\s]+)"
     r" lost_B=(?P<lost_B>[^\s]+)"
+)
+
+_RE_RTT_SAMPLE = re.compile(
+    r"(?P<date>\d{4}/\d{2}/\d{2}) (?P<time>\d{2}:\d{2}:\d{2})"
+    r" \[rtt_sample\] path=(?P<path>\d+)"
+    r" seq=(?P<seq>\d+)"
+    r" packet=(?P<packet>\d+)"
+    r" sample=(?P<sample>[^\s]+)"
+    r" smoothed=(?P<smoothed>[^\s]+)"
+    r" min=(?P<min>[^\s]+)"
+    r" mean_dev=(?P<mean_dev>[^\s]+)"
+    r" ack_delay=(?P<ack_delay>[^\s]+)"
+    r" send_delta=(?P<send_delta>[^\s]+)"
 )
 
 _RE_TC_HEAD = re.compile(
@@ -221,6 +236,44 @@ def load_pull_log(path: Union[str, Path], label: str = "") -> tuple:
         df_util = df_util[df_util["U"].notna() & df_util["bw_mbps"].notna()]
 
     return df_util, df_mon
+
+
+def load_rtt_samples(path: Union[str, Path], label: str = "") -> pd.DataFrame:
+    """
+    Parse per-ACK QUIC RTT sample lines from a pull log.
+
+    Returns one row per ``[rtt_sample]`` line. ``t`` uses the first sample line
+    as origin, so missing seconds indicate no observed RTT sample in that period.
+    """
+    rows: list[dict] = []
+    t0 = None
+
+    with open(path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            match = _RE_RTT_SAMPLE.search(line)
+            if not match:
+                continue
+            ts = _hms_to_sec(match["date"], match["time"])
+            if t0 is None:
+                t0 = ts
+            try:
+                rows.append({
+                    "t": ts - t0,
+                    "path": int(match["path"]),
+                    "rtt_sample_seq": int(match["seq"]),
+                    "packet": int(match["packet"]),
+                    "rtt_sample_ms": _parse_go_duration(match["sample"]),
+                    "rtt_smoothed_ms": _parse_go_duration(match["smoothed"]),
+                    "rtt_min_ms": _parse_go_duration(match["min"]),
+                    "rtt_mean_dev_ms": _parse_go_duration(match["mean_dev"]),
+                    "ack_delay_ms": _parse_go_duration(match["ack_delay"]),
+                    "send_delta_ms": _parse_go_duration(match["send_delta"]),
+                    "label": label,
+                })
+            except (ValueError, TypeError):
+                pass
+
+    return pd.DataFrame(rows)
 
 
 def _first_metric_tod_sec(path: Union[str, Path]) -> int:

@@ -196,6 +196,28 @@ def load_pull_frames(run_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
     return best_util, best_mon
 
 
+def load_quic_rtt_samples(run_dir: Path, method: str) -> pd.DataFrame:
+    candidates = _metric_log_candidates(run_dir)
+    if not candidates:
+        return pd.DataFrame()
+    try:
+        from parse_logs import load_rtt_samples  # type: ignore
+    except ImportError:
+        return pd.DataFrame()
+    best_samples = pd.DataFrame()
+    best_score = -1
+    for candidate in candidates:
+        samples = load_rtt_samples(candidate, label=run_dir.name)
+        score = len(samples)
+        if score > best_score:
+            best_samples, best_score = samples, score
+    if best_samples.empty:
+        return pd.DataFrame()
+    best_samples = best_samples.copy()
+    best_samples.insert(0, "method", method)
+    return best_samples
+
+
 def load_runtime_samples(run_dir: Path) -> pd.DataFrame:
     for p in (
         run_dir / "qaccess_runtime_samples.csv",
@@ -358,6 +380,52 @@ def _per_second_delay(util: pd.DataFrame, mon: pd.DataFrame, method: str) -> pd.
         if column not in result.columns:
             result[column] = float("nan")
     return result[columns].sort_values("time_s").reset_index(drop=True)
+
+
+def _per_second_quic_rtt_samples(samples: pd.DataFrame, method: str) -> pd.DataFrame:
+    columns = [
+        "method", "time_s", "rtt_sample_ms_mean", "rtt_smoothed_ms_mean",
+        "rtt_min_ms_mean", "rtt_mean_dev_ms_mean", "ack_delay_ms_mean",
+        "send_delta_ms_mean", "rtt_sample_seq_last", "rtt_sample_count",
+    ]
+    if samples.empty or "rtt_sample_ms" not in samples.columns:
+        return pd.DataFrame(columns=columns)
+    s = samples.rename(columns={"t": "time_s"}) if "t" in samples.columns else samples.copy()
+    s = _path_b_rows(s)
+    if s.empty or "time_s" not in s.columns:
+        return pd.DataFrame(columns=columns)
+    s = s.copy()
+    s["time_s"] = pd.to_numeric(s["time_s"], errors="coerce").floordiv(1)
+    numeric_columns = [
+        "rtt_sample_ms", "rtt_smoothed_ms", "rtt_min_ms", "rtt_mean_dev_ms",
+        "ack_delay_ms", "send_delta_ms", "rtt_sample_seq",
+    ]
+    for column in numeric_columns:
+        if column in s.columns:
+            s[column] = pd.to_numeric(s[column], errors="coerce")
+    s = s.dropna(subset=["time_s", "rtt_sample_ms"])
+    if s.empty:
+        return pd.DataFrame(columns=columns)
+    result = (
+        s.groupby("time_s", as_index=False)
+        .agg(
+            rtt_sample_ms_mean=("rtt_sample_ms", "mean"),
+            rtt_smoothed_ms_mean=("rtt_smoothed_ms", "mean"),
+            rtt_min_ms_mean=("rtt_min_ms", "mean"),
+            rtt_mean_dev_ms_mean=("rtt_mean_dev_ms", "mean"),
+            ack_delay_ms_mean=("ack_delay_ms", "mean"),
+            send_delta_ms_mean=("send_delta_ms", "mean"),
+            rtt_sample_seq_last=("rtt_sample_seq", "last"),
+            rtt_sample_count=("rtt_sample_ms", "count"),
+        )
+        .sort_values("time_s")
+        .reset_index(drop=True)
+    )
+    result.insert(0, "method", method)
+    for column in columns:
+        if column not in result.columns:
+            result[column] = float("nan")
+    return result[columns]
 
 
 _RE_QDISC_TS = re.compile(r"^([0-9]+(?:\.[0-9]+)?)$")
@@ -783,6 +851,7 @@ def _plot_timeseries(
     throughput: pd.DataFrame,
     delay: pd.DataFrame,
     active_probe_rtt: pd.DataFrame,
+    quic_rtt_samples: pd.DataFrame,
     loss_monitor: pd.DataFrame,
     loss_retrans: pd.DataFrame,
     loss_tc: pd.DataFrame,
@@ -790,7 +859,7 @@ def _plot_timeseries(
     prefix: str,
     impairment_span: tuple[float, float] | None = None,
 ) -> None:
-    if throughput.empty and delay.empty and active_probe_rtt.empty and loss_monitor.empty and loss_retrans.empty and loss_tc.empty:
+    if throughput.empty and delay.empty and active_probe_rtt.empty and quic_rtt_samples.empty and loss_monitor.empty and loss_retrans.empty and loss_tc.empty:
         return
 
     method_labels = {"baseline": "Baseline", "loss_qaccess_l": "Q-Access-L", "delay_qaccess_d": "Q-Access-D"}
@@ -905,6 +974,25 @@ def _plot_timeseries(
     else:
         plot_name = f"{prefix}_throughput_loss_over_time.png"
     fig.savefig(out / plot_name, dpi=180)
+
+    if prefix == "delay" and not quic_rtt_samples.empty and quic_rtt_samples["rtt_sample_ms_mean"].notna().any():
+        axes[2].clear()
+        for method, group in quic_rtt_samples.groupby("method"):
+            style = line_styles.get(f"{method}_total", {"label": method})
+            samples = _series_with_gaps(group, "time_s", "rtt_sample_ms_mean")
+            axes[2].plot(
+                samples["time_s"], samples["rtt_sample_ms_mean"],
+                label=f"{method_labels.get(method, method)} Path B RTT sample",
+                linewidth=1.4, color=style.get("color"),
+            )
+        axes[2].set_ylabel("Path B QUIC RTT sample (ms)")
+        axes[2].set_xlabel("Time (s)")
+        axes[2].set_title("Path B QUIC RTT samples from ACK updates")
+        axes[2].grid(alpha=0.25)
+        axes[2].legend(fontsize=8, loc="best")
+        axes[2].axvspan(span[0], span[1], color="tab:red", alpha=0.08)
+        fig.tight_layout()
+        fig.savefig(out / f"{prefix}_throughput_quic_rtt_samples_over_time.png", dpi=180)
 
     if prefix == "delay" and not active_probe_rtt.empty and not delay.empty and delay["rtt_latest_sample_ms"].notna().any():
         axes[2].clear()
@@ -1060,15 +1148,17 @@ def analyze_run(
     preset: str,
     full_hi: float,
     recovery_start_s: float,
-) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     util, mon = load_pull_frames(run_dir)
     wire = load_wire_timeseries(run_dir)
     samples = load_runtime_samples(run_dir)
+    quic_rtt_samples_raw = load_quic_rtt_samples(run_dir, method) if preset == "delay" else pd.DataFrame()
 
     if not wire.empty:
         wire = wire.copy()
         wire.insert(0, "method", method)
     delay_timeseries = _per_second_delay(util, mon, method) if preset == "delay" else pd.DataFrame()
+    quic_rtt_samples_timeseries = _per_second_quic_rtt_samples(quic_rtt_samples_raw, method) if preset == "delay" else pd.DataFrame()
     loss_monitor_timeseries = _per_second_loss_monitor(mon, method) if preset == "loss" else pd.DataFrame()
     loss_retrans_timeseries = _per_second_retrans_delta(run_dir, method) if preset == "loss" else pd.DataFrame()
     loss_tc_timeseries = load_tc_qdisc_timeseries(run_dir, method) if preset in ("loss", "delay") else pd.DataFrame()
@@ -1123,7 +1213,7 @@ def analyze_run(
             **metrics,
         })
 
-    return pd.DataFrame(rows), recovery, wire, delay_timeseries, active_probe_rtt_timeseries, loss_monitor_timeseries, loss_retrans_timeseries, loss_tc_timeseries
+    return pd.DataFrame(rows), recovery, wire, delay_timeseries, active_probe_rtt_timeseries, quic_rtt_samples_timeseries, loss_monitor_timeseries, loss_retrans_timeseries, loss_tc_timeseries
 
 
 def main() -> None:
@@ -1158,6 +1248,7 @@ def main() -> None:
     all_wire: list[pd.DataFrame] = []
     all_delay: list[pd.DataFrame] = []
     all_active_probe_rtt: list[pd.DataFrame] = []
+    all_quic_rtt_samples: list[pd.DataFrame] = []
     all_loss_monitor: list[pd.DataFrame] = []
     all_loss_retrans: list[pd.DataFrame] = []
     all_loss_tc: list[pd.DataFrame] = []
@@ -1166,7 +1257,7 @@ def main() -> None:
         if not rdir.is_dir():
             print(f"[warn] missing run dir: {rdir}", file=sys.stderr)
             continue
-        df, rec, wire, delay, active_probe_rtt, loss_monitor, loss_retrans, loss_tc = analyze_run(
+        df, rec, wire, delay, active_probe_rtt, quic_rtt_samples, loss_monitor, loss_retrans, loss_tc = analyze_run(
             rdir, method, args.preset, args.full_hi, float(cfg["recovery_start_s"]),
         )
         if not df.empty:
@@ -1177,6 +1268,8 @@ def main() -> None:
             all_delay.append(delay)
         if not active_probe_rtt.empty:
             all_active_probe_rtt.append(active_probe_rtt)
+        if not quic_rtt_samples.empty:
+            all_quic_rtt_samples.append(quic_rtt_samples)
         if not loss_monitor.empty:
             all_loss_monitor.append(loss_monitor)
         if not loss_retrans.empty:
@@ -1194,6 +1287,7 @@ def main() -> None:
     df_wire = pd.concat(all_wire, ignore_index=True) if all_wire else pd.DataFrame()
     df_delay = pd.concat(all_delay, ignore_index=True) if all_delay else pd.DataFrame()
     df_active_probe_rtt = pd.concat(all_active_probe_rtt, ignore_index=True) if all_active_probe_rtt else pd.DataFrame()
+    df_quic_rtt_samples = pd.concat(all_quic_rtt_samples, ignore_index=True) if all_quic_rtt_samples else pd.DataFrame()
     df_loss_monitor = pd.concat(all_loss_monitor, ignore_index=True) if all_loss_monitor else pd.DataFrame()
     df_loss_retrans = pd.concat(all_loss_retrans, ignore_index=True) if all_loss_retrans else pd.DataFrame()
     df_loss_tc = pd.concat(all_loss_tc, ignore_index=True) if all_loss_tc else pd.DataFrame()
@@ -1205,6 +1299,8 @@ def main() -> None:
         df_delay.to_csv(out / f"{prefix}_delay_timeseries.csv", index=False)
     if not df_active_probe_rtt.empty:
         df_active_probe_rtt.to_csv(out / f"{prefix}_active_probe_rtt_timeseries.csv", index=False)
+    if not df_quic_rtt_samples.empty:
+        df_quic_rtt_samples.to_csv(out / f"{prefix}_quic_rtt_samples_timeseries.csv", index=False)
     if not df_loss_monitor.empty:
         df_loss_monitor.to_csv(out / f"{prefix}_monitor_timeseries.csv", index=False)
     if not df_loss_retrans.empty:
@@ -1227,7 +1323,7 @@ def main() -> None:
         impairment_span = _delay_span_from_tc_logs(session)
     else:
         impairment_span = None
-    _plot_timeseries(df_wire, df_delay, df_active_probe_rtt, df_loss_monitor, df_loss_retrans, df_loss_tc, out, prefix, impairment_span)
+    _plot_timeseries(df_wire, df_delay, df_active_probe_rtt, df_quic_rtt_samples, df_loss_monitor, df_loss_retrans, df_loss_tc, out, prefix, impairment_span)
 
     metadata_path = session / "experiment_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
@@ -1253,6 +1349,9 @@ def main() -> None:
     if prefix == "delay" and not df_active_probe_rtt.empty:
         print(f"Active RTT CSV:  {out / f'{prefix}_active_probe_rtt_timeseries.csv'}")
         print(f"QUIC RTT diag:   {out / f'{prefix}_throughput_quic_rtt_diagnostic_over_time.png'}")
+    if prefix == "delay" and not df_quic_rtt_samples.empty:
+        print(f"QUIC RTT samples CSV: {out / f'{prefix}_quic_rtt_samples_timeseries.csv'}")
+        print(f"QUIC RTT samples plot:{out / f'{prefix}_throughput_quic_rtt_samples_over_time.png'}")
     if prefix == "loss":
         print(f"Monitor plot:   {out / f'{prefix}_throughput_monitor_loss_over_time.png'}")
         print(f"Retrans plot:   {out / f'{prefix}_throughput_retrans_over_time.png'}")

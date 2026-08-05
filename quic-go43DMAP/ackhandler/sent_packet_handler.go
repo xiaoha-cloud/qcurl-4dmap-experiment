@@ -3,6 +3,7 @@ package ackhandler
 import (
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/lucas-clemente/quic-go/congestion"
@@ -64,8 +65,10 @@ type sentPacketHandler struct {
 
 	congestion congestion.SendAlgorithm
 	rttStats   *congestion.RTTStats
+	pathID     protocol.PathID
 
 	onRTOCallback func(time.Time) bool
+	logRTTSamples bool
 
 	// The number of times an RTO has been sent without receiving an ack.
 	rtoCount uint32
@@ -126,8 +129,10 @@ func NewSentPacketHandler(rttStats *congestion.RTTStats, cong congestion.SendAlg
 		packetHistory:      NewPacketList(),
 		stopWaitingManager: stopWaitingManager{},
 		rttStats:           rttStats,
+		pathID:             pathID,
 		congestion:         congestionControl,
 		onRTOCallback:      onRTOCallback,
+		logRTTSamples:      os.Getenv("QACCESS_LOG_RTT_SAMPLES") == "1",
 		starttime:          time.Now(),
 		lasttime:           time.Now(),
 
@@ -391,7 +396,16 @@ func (h *sentPacketHandler) maybeUpdateRTT(largestAcked protocol.PacketNumber, a
 	for el := h.packetHistory.Front(); el != nil; el = el.Next() {
 		packet := el.Value
 		if packet.PacketNumber == largestAcked {
-			h.rttStats.UpdateRTT(rcvTime.Sub(packet.SendTime), ackDelay, time.Now())
+			sendDelta := rcvTime.Sub(packet.SendTime)
+			h.rttStats.UpdateRTT(sendDelta, ackDelay, time.Now())
+			if h.logRTTSamples {
+				utils.Infof(
+					"[rtt_sample] path=%v seq=%v packet=%v sample=%v smoothed=%v min=%v mean_dev=%v ack_delay=%v send_delta=%v",
+					h.pathID, h.rttStats.SampleCount(), packet.PacketNumber, h.rttStats.LatestRTT(),
+					h.rttStats.SmoothedRTT(), h.rttStats.MinRTT(), h.rttStats.MeanDeviation(),
+					ackDelay, sendDelta,
+				)
+			}
 			return true
 		}
 		// Packets are sorted by number, so we can stop searching
