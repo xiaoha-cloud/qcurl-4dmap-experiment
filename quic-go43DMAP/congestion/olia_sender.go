@@ -105,6 +105,11 @@ func (o *OliaSender) SetUtilityControl(gain float64, backoff float64) {
 	}
 }
 
+func (o *OliaSender) SetUtilityControl(gain float64, backoff float64) {
+	o.utilityGain = gain
+	o.utilityBackoff = backoff
+}
+
 func (o *OliaSender) TimeUntilSend(now time.Time, bytesInFlight protocol.ByteCount) time.Duration {
 	if o.InRecovery() {
 		// PRR is used when in recovery.
