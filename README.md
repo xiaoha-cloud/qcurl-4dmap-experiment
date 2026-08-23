@@ -23,3 +23,8 @@ As a pusher:
   cd 4D-MAP/
   go build
   ./4D-MAP -type=false -file=video_dir -protocol=[quic/tcp] =multi=true -sch=[rtt/stms/dispatch/RDDT/duplicate] -network=[udp4/tcp] -red=false -iprio=[true/false] rtmp://x.x.x.x 
+```
+
+## Acknowledgements
+
+This repository is based on and extends [cxht/4D-MAP](https://github.com/cxht/4D-MAP.git). We thank the original authors for making their implementation publicly available.
