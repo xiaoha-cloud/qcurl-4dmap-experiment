@@ -1,0 +1,6 @@
+data/** -text
+data/evaluation/**/*.pcap filter=lfs diff=lfs merge=lfs -text
+data/evaluation/**/*.flv filter=lfs diff=lfs merge=lfs -text
+data/evaluation/**/*.log filter=lfs diff=lfs merge=lfs -text
+data/input_video/*.flv filter=lfs diff=lfs merge=lfs -text
+data/training/**/model.pkl filter=lfs diff=lfs merge=lfs -text

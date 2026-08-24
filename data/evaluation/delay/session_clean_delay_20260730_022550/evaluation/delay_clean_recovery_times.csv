@@ -1,0 +1,3 @@
+method,run_dir,steady_rtt_median_ms_30_50,steady_rtt_median_ms_80_100,steady_rtt_median_ms_130_160,recovery_time_s_owd,recovery_time_s_path_b_share
+baseline,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/FromVM/session_clean_delay_20260730_022550/clean_delay_baseline,416.423583,439.142042,416.098334,0.0,9.0
+clean_delay_qaccess_d,/Users/jememalum/Project/mpquic/qcurl-4dmap-experiment/logs_exp/FromVM/session_clean_delay_20260730_022550/clean_delay_qaccess_d,406.1035,428.657875,407.605583,,9.0
